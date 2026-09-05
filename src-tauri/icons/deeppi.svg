@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-label="DeepPi">
+  <rect width="1024" height="1024" rx="192" fill="#111412"/>
+  <path d="M232 330 386 484 232 638" fill="none" stroke="#74c7c4" stroke-linecap="round" stroke-linejoin="round" stroke-width="68"/>
+  <path d="M462 330v308M462 330h250M586 330v308M462 638h250" fill="none" stroke="#8fd6ad" stroke-linecap="round" stroke-linejoin="round" stroke-width="64"/>
+  <path d="M238 748h548" fill="none" stroke="#e4c875" stroke-linecap="round" stroke-width="24"/>
+</svg>

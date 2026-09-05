@@ -1,0 +1,25 @@
+.DS_Store
+node_modules
+/artifacts
+/.deeppi-runtime
+/build
+/.svelte-kit
+/package
+.env
+.env.*
+!.env.example
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*
+/src-tauri/tauri.release.generated.conf.json
+
+# Planning and milestone evidence are not part of the source distribution
+/DESIGN.md
+/DEVELOPMENT_PLAN.md
+/*_RESULTS.md
+/*_RESULTS.MD
+
+# Local editor settings and scaffold-only assets
+/.vscode
+/static/svelte.svg
+/static/tauri.svg
+/static/vite.svg

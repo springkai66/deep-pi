@@ -1,0 +1,748 @@
+use std::{
+    collections::HashMap,
+    sync::Mutex,
+    time::{Duration, Instant},
+};
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use tauri::{State, Url};
+
+const MAX_QUERY_LENGTH: usize = 100;
+const MAX_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+const CACHE_TTL: Duration = Duration::from_secs(600);
+const PI_PACKAGES_URL: &str = "https://pi.dev/packages";
+const PI_MODELS_URL: &str = "https://pi.dev/models";
+const NPM_REGISTRY_URL: &str = "https://registry.npmjs.org";
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PiPackage {
+    pub name: String,
+    pub description: String,
+    pub types: Vec<String>,
+    pub downloads: u64,
+    pub published_at: i64,
+    pub path: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackageMetadata {
+    pub version: String,
+    pub license: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PiModelSummary {
+    pub provider: String,
+    pub id: String,
+    pub name: String,
+    pub path: String,
+    pub context_window: Option<u64>,
+    pub input_cost: Option<f64>,
+    pub output_cost: Option<f64>,
+    pub cache_read_cost: Option<f64>,
+    pub cache_write_cost: Option<f64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelCost {
+    pub input: Option<f64>,
+    pub output: Option<f64>,
+    pub cache_read: Option<f64>,
+    pub cache_write: Option<f64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PiModelProfile {
+    pub provider: String,
+    pub id: String,
+    pub name: String,
+    pub api: Option<String>,
+    pub base_url: Option<String>,
+    pub reasoning: bool,
+    pub input: Vec<String>,
+    pub context_window: Option<u64>,
+    pub max_tokens: Option<u64>,
+    pub thinking_levels: Vec<String>,
+    pub cost: Option<ModelCost>,
+}
+
+#[derive(Default)]
+pub struct MarketCache {
+    entries: Mutex<HashMap<String, (Instant, Vec<PiPackage>)>>,
+}
+
+impl MarketCache {
+    fn get(&self, query: &str) -> Option<Vec<PiPackage>> {
+        let entries = self.entries.lock().ok()?;
+        let (created, packages) = entries.get(query)?;
+        (created.elapsed() < CACHE_TTL).then(|| packages.clone())
+    }
+
+    fn insert(&self, query: String, packages: Vec<PiPackage>) {
+        if let Ok(mut entries) = self.entries.lock() {
+            entries.retain(|_, (created, _)| created.elapsed() < CACHE_TTL);
+            entries.insert(query, (Instant::now(), packages));
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct ModelCatalogCache {
+    entries: Mutex<HashMap<String, (Instant, Vec<PiModelSummary>)>>,
+}
+
+impl ModelCatalogCache {
+    fn get(&self, key: &str) -> Option<Vec<PiModelSummary>> {
+        let entries = self.entries.lock().ok()?;
+        let (created, models) = entries.get(key)?;
+        (created.elapsed() < CACHE_TTL).then(|| models.clone())
+    }
+
+    fn insert(&self, key: String, models: Vec<PiModelSummary>) {
+        if let Ok(mut entries) = self.entries.lock() {
+            entries.retain(|_, (created, _)| created.elapsed() < CACHE_TTL);
+            entries.insert(key, (Instant::now(), models));
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackageRequest {
+    query: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackageMetadataRequest {
+    name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelSearchRequest {
+    query: String,
+    provider: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelProfileRequest {
+    path: String,
+    provider: String,
+    model_id: String,
+}
+
+fn http_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_global(Some(REQUEST_TIMEOUT))
+        .https_only(true)
+        .build()
+        .new_agent()
+}
+
+fn read_response(body: &mut ureq::Body) -> Result<String, String> {
+    body.with_config()
+        .limit(MAX_RESPONSE_BYTES)
+        .lossy_utf8(true)
+        .read_to_string()
+        .map_err(|error| format!("failed to read market response: {error}"))
+}
+
+fn html_attribute(tag: &str, name: &str) -> Option<String> {
+    let prefix = format!("{name}=\"");
+    let start = tag.find(&prefix)? + prefix.len();
+    let end = tag[start..].find('"')? + start;
+    Some(tag[start..end].to_owned())
+}
+
+fn decode_entities(value: &str) -> String {
+    value
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+}
+
+fn strip_tags(value: &str) -> String {
+    let mut text = String::with_capacity(value.len());
+    let mut in_tag = false;
+    for character in value.chars() {
+        match character {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => text.push(character),
+            _ => {}
+        }
+    }
+    decode_entities(&text)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn element_text(body: &str, class_name: &str) -> Option<String> {
+    let class_marker = format!("class=\"{class_name}\"");
+    let class_start = body.find(&class_marker)?;
+    let content_start = body[class_start..].find('>')? + class_start + 1;
+    let content_end = body[content_start..].find('<')? + content_start;
+    Some(strip_tags(&body[content_start..content_end]))
+}
+
+fn model_cell(body: &str, label: &str) -> Option<String> {
+    let marker = format!("data-label=\"{label}\"");
+    let marker_start = body.find(&marker)?;
+    let content_start = body[marker_start..].find('>')? + marker_start + 1;
+    let content_end = body[content_start..].find('<')? + content_start;
+    Some(strip_tags(&body[content_start..content_end]))
+}
+
+fn first_anchor_text(body: &str) -> Option<String> {
+    let anchor_start = body.find("<a")?;
+    let content_start = body[anchor_start..].find('>')? + anchor_start + 1;
+    let content_end = body[content_start..].find("</a>")? + content_start;
+    Some(strip_tags(&body[content_start..content_end]))
+}
+
+fn parse_decimal(value: Option<String>) -> Option<f64> {
+    value?.replace(['$', ','], "").parse::<f64>().ok()
+}
+
+fn parse_integer(value: Option<String>) -> Option<u64> {
+    value?.replace(',', "").parse::<u64>().ok()
+}
+
+pub fn parse_pi_models(
+    html: &str,
+    query: &str,
+    provider_filter: Option<&str>,
+) -> Vec<PiModelSummary> {
+    let query = query.trim().to_ascii_lowercase();
+    let provider_filter = provider_filter
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase);
+    let mut models = Vec::new();
+    let mut cursor = 0;
+
+    while models.len() < 200 {
+        let Some(relative_start) = html[cursor..].find("<tr") else {
+            break;
+        };
+        let start = cursor + relative_start;
+        let Some(relative_open_end) = html[start..].find('>') else {
+            break;
+        };
+        let open_end = start + relative_open_end + 1;
+        let opening = &html[start..open_end];
+        let Some(relative_close) = html[open_end..].find("</tr>") else {
+            break;
+        };
+        let close = open_end + relative_close;
+        cursor = close + "</tr>".len();
+
+        if html_attribute(opening, "data-model-row").as_deref() != Some("true") {
+            continue;
+        }
+        let Some(provider) = html_attribute(opening, "data-model-provider") else {
+            continue;
+        };
+        let Some(id) = html_attribute(opening, "data-model-id") else {
+            continue;
+        };
+        let name = first_anchor_text(&html[open_end..close])
+            .filter(|value| !value.is_empty())
+            .or_else(|| html_attribute(opening, "data-model-name"))
+            .unwrap_or_else(|| id.clone());
+        let searchable = format!("{provider} {id} {name}").to_ascii_lowercase();
+        if provider_filter
+            .as_ref()
+            .is_some_and(|filter| !provider.to_ascii_lowercase().eq(filter))
+            || (!query.is_empty() && !searchable.contains(&query))
+        {
+            continue;
+        }
+
+        let body = &html[open_end..close];
+        let path = html_attribute(body, "data-model-path")
+            .unwrap_or_else(|| format!("/models/{provider}/{id}"));
+        models.push(PiModelSummary {
+            provider,
+            id,
+            name,
+            path,
+            context_window: parse_integer(model_cell(body, "Context")),
+            input_cost: parse_decimal(model_cell(body, "Input /M")),
+            output_cost: parse_decimal(model_cell(body, "Output /M")),
+            cache_read_cost: parse_decimal(model_cell(body, "Cache read /M")),
+            cache_write_cost: parse_decimal(model_cell(body, "Cache write /M")),
+        });
+    }
+    models
+}
+
+fn raw_model_configuration(html: &str) -> Result<Value, String> {
+    let start = html
+        .find("<pre class=\"raw-data-panel\">")
+        .ok_or_else(|| "Pi model detail has no configuration block".to_string())?;
+    let content_start = html[start..]
+        .find('>')
+        .map(|offset| start + offset + 1)
+        .ok_or_else(|| "Pi model configuration is malformed".to_string())?;
+    let content_end = html[content_start..]
+        .find("</pre>")
+        .map(|offset| content_start + offset)
+        .ok_or_else(|| "Pi model configuration is malformed".to_string())?;
+    let json = strip_tags(&html[content_start..content_end]);
+    serde_json::from_str(&json)
+        .map_err(|error| format!("Pi model configuration is invalid: {error}"))
+}
+
+fn json_string(value: Option<&Value>) -> Option<String> {
+    value.and_then(Value::as_str).map(str::to_owned)
+}
+
+fn json_u64(value: Option<&Value>) -> Option<u64> {
+    value.and_then(Value::as_u64)
+}
+
+fn thinking_level_rank(level: &str) -> (usize, &str) {
+    let rank = match level {
+        "off" => 0,
+        "minimal" => 1,
+        "low" => 2,
+        "medium" => 3,
+        "high" => 4,
+        "xhigh" => 5,
+        _ => 6,
+    };
+    (rank, level)
+}
+
+pub fn parse_model_profile(
+    html: &str,
+    provider: &str,
+    model_id: &str,
+) -> Result<PiModelProfile, String> {
+    let configuration = raw_model_configuration(html)?;
+    let provider_config = configuration
+        .get("providers")
+        .and_then(|providers| providers.get(provider))
+        .ok_or_else(|| format!("Pi model provider not found: {provider}"))?;
+    let model = provider_config
+        .get("models")
+        .and_then(Value::as_array)
+        .and_then(|models| {
+            models
+                .iter()
+                .find(|model| model.get("id").and_then(Value::as_str) == Some(model_id))
+        })
+        .ok_or_else(|| format!("Pi model not found: {provider}/{model_id}"))?;
+    let reasoning = model
+        .get("reasoning")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let mut thinking_levels = model
+        .get("thinkingLevelMap")
+        .and_then(Value::as_object)
+        .map(|levels| {
+            levels
+                .iter()
+                .filter(|(_, value)| !value.is_null())
+                .map(|(level, _)| level.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if reasoning && thinking_levels.is_empty() {
+        thinking_levels = ["off", "minimal", "low", "medium", "high"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+    }
+    thinking_levels
+        .sort_by(|left, right| thinking_level_rank(left).cmp(&thinking_level_rank(right)));
+
+    let cost = model
+        .get("cost")
+        .and_then(Value::as_object)
+        .map(|cost| ModelCost {
+            input: cost.get("input").and_then(Value::as_f64),
+            output: cost.get("output").and_then(Value::as_f64),
+            cache_read: cost.get("cacheRead").and_then(Value::as_f64),
+            cache_write: cost.get("cacheWrite").and_then(Value::as_f64),
+        });
+    let input = model
+        .get("input")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(PiModelProfile {
+        provider: provider.to_owned(),
+        id: model_id.to_owned(),
+        name: json_string(model.get("name")).unwrap_or_else(|| model_id.to_owned()),
+        api: json_string(model.get("api")).or_else(|| json_string(provider_config.get("api"))),
+        base_url: json_string(provider_config.get("baseUrl")),
+        reasoning,
+        input,
+        context_window: json_u64(model.get("contextWindow")),
+        max_tokens: json_u64(model.get("maxTokens")),
+        thinking_levels,
+        cost,
+    })
+}
+
+pub fn parse_pi_packages(html: &str) -> Vec<PiPackage> {
+    let mut packages = Vec::new();
+    let mut cursor = 0;
+    while packages.len() < 50 {
+        let Some(relative_start) = html[cursor..].find("<article") else {
+            break;
+        };
+        let start = cursor + relative_start;
+        let Some(relative_open_end) = html[start..].find('>') else {
+            break;
+        };
+        let open_end = start + relative_open_end + 1;
+        let opening = &html[start..open_end];
+        let Some(relative_close) = html[open_end..].find("</article>") else {
+            break;
+        };
+        let close = open_end + relative_close;
+        cursor = close + "</article>".len();
+
+        if html_attribute(opening, "data-package-card").as_deref() != Some("true") {
+            continue;
+        }
+        let Some(name) = html_attribute(opening, "data-package-name") else {
+            continue;
+        };
+        if validate_package_name(&name).is_err() {
+            continue;
+        }
+        let body = &html[open_end..close];
+        let description = element_text(body, "packages-desc")
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                html_attribute(opening, "data-package-search").map(|value| strip_tags(&value))
+            })
+            .unwrap_or_else(|| name.clone());
+        let types = html_attribute(opening, "data-package-types")
+            .unwrap_or_default()
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect();
+        let downloads = html_attribute(opening, "data-package-downloads")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or_default();
+        let published_at = html_attribute(opening, "data-package-date")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or_default();
+        packages.push(PiPackage {
+            path: format!("/packages/{name}"),
+            name,
+            description,
+            types,
+            downloads,
+            published_at,
+        });
+    }
+    packages
+}
+
+pub fn validate_package_name(name: &str) -> Result<&str, String> {
+    if name.is_empty() || name.len() > 214 || name.starts_with('.') || name.starts_with('-') {
+        return Err("invalid npm package name".into());
+    }
+    if name.chars().any(|character| {
+        character.is_control()
+            || character.is_whitespace()
+            || !character.is_ascii()
+            || !matches!(character, '@' | '/' | '-' | '_' | '.' | '0'..='9' | 'a'..='z' | 'A'..='Z')
+    }) {
+        return Err("invalid npm package name".into());
+    }
+    if name.starts_with('@') {
+        let Some((scope, package)) = name.split_once('/') else {
+            return Err("scoped npm package must contain a package name".into());
+        };
+        if scope.len() < 2 || package.is_empty() || package.contains('/') {
+            return Err("invalid scoped npm package name".into());
+        }
+    } else if name.contains('/') {
+        return Err("unscoped npm package cannot contain a slash".into());
+    }
+    Ok(name)
+}
+
+pub fn fetch_pi_packages(query: &str) -> Result<Vec<PiPackage>, String> {
+    let query = query.trim();
+    if query.len() > MAX_QUERY_LENGTH || query.chars().any(char::is_control) {
+        return Err("package search query is invalid".into());
+    }
+    let mut url =
+        Url::parse(PI_PACKAGES_URL).map_err(|error| format!("invalid catalog URL: {error}"))?;
+    if !query.is_empty() {
+        url.query_pairs_mut().append_pair("search", query);
+    }
+    let mut response = http_agent()
+        .get(url.as_str())
+        .call()
+        .map_err(|error| format!("Pi package catalog request failed: {error}"))?;
+    Ok(parse_pi_packages(&read_response(response.body_mut())?))
+}
+
+pub fn fetch_package_metadata(name: &str) -> Result<PackageMetadata, String> {
+    validate_package_name(name)?;
+    let encoded = name.replace('/', "%2f");
+    let url = format!("{NPM_REGISTRY_URL}/{encoded}");
+    let mut response = http_agent()
+        .get(url)
+        .call()
+        .map_err(|error| format!("npm metadata request failed: {error}"))?;
+    let body = read_response(response.body_mut())?;
+    let value: Value =
+        serde_json::from_str(&body).map_err(|error| format!("npm metadata is invalid: {error}"))?;
+    let version = value
+        .get("dist-tags")
+        .and_then(|tags| tags.get("latest"))
+        .and_then(Value::as_str)
+        .filter(|version| is_valid_version(version))
+        .ok_or_else(|| "npm metadata has no valid latest version".to_string())?;
+    let license = value
+        .get("versions")
+        .and_then(|versions| versions.get(version))
+        .and_then(|latest| latest.get("license"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    Ok(PackageMetadata {
+        version: version.to_owned(),
+        license,
+    })
+}
+
+fn is_valid_version(version: &str) -> bool {
+    let mut parts = version.splitn(2, '-');
+    let numbers = parts.next().unwrap_or_default().split('.');
+    numbers.clone().count() == 3
+        && numbers.into_iter().all(|part| {
+            !part.is_empty() && part.chars().all(|character| character.is_ascii_digit())
+        })
+        && parts.next().is_none_or(|suffix| {
+            !suffix.is_empty()
+                && suffix.chars().all(|character| {
+                    character.is_ascii_alphanumeric() || matches!(character, '.' | '-')
+                })
+        })
+}
+
+fn validate_model_path(path: &str) -> Result<&str, String> {
+    if !path.starts_with("/models/")
+        || path.len() > 500
+        || path
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+        || path.contains("..")
+        || path.contains('?')
+        || path.contains('#')
+    {
+        return Err("Pi model path is invalid".into());
+    }
+    Ok(path)
+}
+
+pub fn fetch_pi_models(
+    query: &str,
+    provider_filter: Option<&str>,
+) -> Result<Vec<PiModelSummary>, String> {
+    let query = query.trim();
+    if query.len() > MAX_QUERY_LENGTH || query.chars().any(char::is_control) {
+        return Err("model search query is invalid".into());
+    }
+    if provider_filter.is_some_and(|provider| {
+        provider.len() > MAX_QUERY_LENGTH
+            || provider
+                .chars()
+                .any(|character| character.is_control() || character.is_whitespace())
+    }) {
+        return Err("model provider filter is invalid".into());
+    }
+    let mut response = http_agent()
+        .get(PI_MODELS_URL)
+        .call()
+        .map_err(|error| format!("Pi model catalog request failed: {error}"))?;
+    Ok(parse_pi_models(
+        &read_response(response.body_mut())?,
+        query,
+        provider_filter,
+    ))
+}
+
+pub fn fetch_model_profile(
+    path: &str,
+    provider: &str,
+    model_id: &str,
+) -> Result<PiModelProfile, String> {
+    validate_model_path(path)?;
+    if provider.is_empty()
+        || model_id.is_empty()
+        || provider.chars().any(|character| character.is_control())
+        || model_id.chars().any(|character| character.is_control())
+    {
+        return Err("Pi model identity is invalid".into());
+    }
+    let url = Url::parse(&format!("https://pi.dev{path}"))
+        .map_err(|error| format!("invalid Pi model URL: {error}"))?;
+    let mut response = http_agent()
+        .get(url.as_str())
+        .call()
+        .map_err(|error| format!("Pi model detail request failed: {error}"))?;
+    parse_model_profile(&read_response(response.body_mut())?, provider, model_id)
+}
+
+#[tauri::command]
+pub fn search_pi_models(
+    cache: State<'_, ModelCatalogCache>,
+    request: ModelSearchRequest,
+) -> Result<Vec<PiModelSummary>, String> {
+    let query = request.query.trim().to_owned();
+    let provider = request
+        .provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|provider| !provider.is_empty());
+    let key = format!("{query}\0{}", provider.unwrap_or_default());
+    if let Some(models) = cache.get(&key) {
+        return Ok(models);
+    }
+    let models = fetch_pi_models(&query, provider)?;
+    cache.insert(key, models.clone());
+    Ok(models)
+}
+
+#[tauri::command]
+pub fn pi_model_profile(request: ModelProfileRequest) -> Result<PiModelProfile, String> {
+    fetch_model_profile(&request.path, &request.provider, &request.model_id)
+}
+
+#[tauri::command]
+pub fn search_pi_packages(
+    cache: State<'_, MarketCache>,
+    request: PackageRequest,
+) -> Result<Vec<PiPackage>, String> {
+    let query = request.query.trim().to_owned();
+    if let Some(packages) = cache.get(&query) {
+        return Ok(packages);
+    }
+    let packages = fetch_pi_packages(&query)?;
+    cache.insert(query, packages.clone());
+    Ok(packages)
+}
+
+#[tauri::command]
+pub fn pi_package_metadata(request: PackageMetadataRequest) -> Result<PackageMetadata, String> {
+    fetch_package_metadata(&request.name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_model_profile, parse_pi_models, parse_pi_packages, validate_package_name};
+
+    #[test]
+    fn parses_official_package_cards() {
+        let html = r#"
+          <article data-package-card="true" data-package-name="pi-tools"
+            data-package-search="Tools &amp; helpers" data-package-types="extension skill"
+            data-package-downloads="1200" data-package-date="1730000000000">
+            <div class="packages-desc">Tools &amp; helpers</div>
+          </article>
+        "#;
+
+        let packages = parse_pi_packages(html);
+
+        assert_eq!(packages.len(), 1);
+        assert_eq!(packages[0].name, "pi-tools");
+        assert_eq!(packages[0].description, "Tools & helpers");
+        assert_eq!(packages[0].types, vec!["extension", "skill"]);
+        assert_eq!(packages[0].downloads, 1_200);
+    }
+
+    #[test]
+    fn parses_official_model_rows() {
+        let html = r#"
+          <tr data-model-row="true" data-model-name="GPT 4" data-model-id="gpt-4" data-model-provider="openai">
+            <th><a data-model-path="/models/openai/gpt-4">GPT-4</a></th>
+            <td data-label="Context">8,192</td>
+            <td data-label="Input /M">$30</td>
+            <td data-label="Output /M">$60</td>
+            <td data-label="Cache read /M">$0</td>
+            <td data-label="Cache write /M">$0</td>
+          </tr>
+        "#;
+
+        let models = parse_pi_models(html, "", None);
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].provider, "openai");
+        assert_eq!(models[0].id, "gpt-4");
+        assert_eq!(models[0].name, "GPT-4");
+        assert_eq!(models[0].context_window, Some(8_192));
+        assert_eq!(models[0].input_cost, Some(30.0));
+        assert_eq!(models[0].path, "/models/openai/gpt-4");
+    }
+
+    #[test]
+    fn reads_model_profile_from_pi_configuration() {
+        let html = r#"<pre class="raw-data-panel">{
+          &quot;providers&quot;: {&quot;openai&quot;: {&quot;api&quot;: &quot;openai-responses&quot;,
+          &quot;baseUrl&quot;: &quot;https://api.openai.com/v1&quot;,
+          &quot;models&quot;: [{&quot;id&quot;: &quot;gpt-5&quot;, &quot;name&quot;: &quot;GPT-5&quot;, &quot;reasoning&quot;: true,
+          &quot;input&quot;: [&quot;text&quot;, &quot;image&quot;], &quot;contextWindow&quot;: 200000,
+          &quot;maxTokens&quot;: 32000, &quot;thinkingLevelMap&quot;: {&quot;off&quot;: null, &quot;low&quot;: &quot;low&quot;, &quot;high&quot;: &quot;high&quot;},
+          &quot;cost&quot;: {&quot;input&quot;: 1, &quot;output&quot;: 5, &quot;cacheRead&quot;: 0, &quot;cacheWrite&quot;: 0}}]}}
+        }</pre>"#;
+
+        let profile = parse_model_profile(html, "openai", "gpt-5").expect("profile should parse");
+
+        assert_eq!(profile.api.as_deref(), Some("openai-responses"));
+        assert_eq!(profile.context_window, Some(200000));
+        assert_eq!(profile.thinking_levels, vec!["low", "high"]);
+        assert_eq!(profile.input, vec!["text", "image"]);
+    }
+
+    #[test]
+    #[ignore = "requires network access to pi.dev"]
+    fn fetches_live_pi_model_catalog_and_profile() {
+        let models = super::fetch_pi_models("gpt-4", Some("openai"))
+            .expect("Pi model catalog should be reachable");
+        let model = models
+            .iter()
+            .find(|model| model.id == "gpt-4")
+            .expect("gpt-4 should be in the official catalog");
+        let profile = super::fetch_model_profile(&model.path, &model.provider, &model.id)
+            .expect("Pi model detail should be reachable");
+        assert_eq!(profile.id, "gpt-4");
+        assert_eq!(profile.context_window, Some(8_192));
+    }
+
+    #[test]
+    fn rejects_unsafe_npm_package_names() {
+        assert!(validate_package_name("pi-tools").is_ok());
+        assert!(validate_package_name("@scope/pi-tools").is_ok());
+        assert!(validate_package_name("pi-tools && whoami").is_err());
+        assert!(validate_package_name("https://example.com").is_err());
+    }
+}

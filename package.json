@@ -1,0 +1,48 @@
+{
+  "name": "deeppi",
+  "version": "0.1.0",
+  "description": "Desktop host for Pi Coding Agent and DeepSeek Harness",
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "release:check": "node scripts/release-check.mjs",
+    "perf:smoke": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/perf-smoke.ps1 -DurationSeconds 60 -SampleSeconds 5",
+    "perf:soak": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/perf-smoke.ps1",
+    "installer:smoke": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/installer-smoke.ps1",
+    "updater:prepare": "node scripts/prepare-updater-config.mjs",
+    "updater:manifest": "node scripts/prepare-updater-manifest.mjs",
+    "preview": "vite preview",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
+    "test:web": "vitest run",
+    "security:audit": "pnpm audit --prod --audit-level high",
+    "licenses:check": "node scripts/check-licenses.mjs",
+    "test": "pnpm check && pnpm test:web && cargo test --manifest-path src-tauri/Cargo.toml",
+    "tauri": "tauri"
+  },
+  "license": "MIT",
+  "packageManager": "pnpm@10.30.3",
+  "dependencies": {
+    "@lucide/svelte": "^1.39.0",
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-dialog": "^2.7.3",
+    "@tauri-apps/plugin-process": "~2.3.1",
+    "@tauri-apps/plugin-updater": "~2.11.0",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/addon-image": "0.9.0",
+    "@xterm/xterm": "^6.0.0"
+  },
+  "devDependencies": {
+    "@sveltejs/adapter-static": "^3.0.6",
+    "@sveltejs/kit": "^2.9.0",
+    "@sveltejs/vite-plugin-svelte": "^5.0.0",
+    "@tauri-apps/cli": "^2",
+    "@types/node": "^26.4.1",
+    "svelte": "^5.0.0",
+    "svelte-check": "^4.0.0",
+    "typescript": "~5.6.2",
+    "vite": "^6.0.3",
+    "vitest": "^4.1.11"
+  }
+}

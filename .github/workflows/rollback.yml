@@ -1,0 +1,79 @@
+name: Roll Back Stable Updater
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_tag:
+        description: Signed release tag to restore to the stable channel
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download signed release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ "${{ inputs.target_tag }}" = "stable" ]; then
+            echo 'target_tag cannot be stable' >&2
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/deeppi-rollback"
+          gh release download "${{ inputs.target_tag }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern 'latest.json' \
+            --pattern '*-setup.exe' \
+            --pattern '*-setup.exe.sig' \
+            --dir "$RUNNER_TEMP/deeppi-rollback"
+
+      - name: Point the manifest at the stable channel
+        env:
+          ROLLBACK_DIR: ${{ runner.temp }}/deeppi-rollback
+        run: |
+          set -euo pipefail
+          installer=$(find "$ROLLBACK_DIR" \
+            -maxdepth 1 \
+            -name '*-setup.exe' \
+            -type f \
+            -printf '%f' | head -n 1)
+          test -n "$installer"
+          test -s "$ROLLBACK_DIR/$installer.sig"
+          base_url="https://github.com/$GITHUB_REPOSITORY/releases/download/stable"
+          installer_url="$base_url/$installer"
+          jq --arg url "$installer_url" \
+            '.platforms["windows-x86_64"].url = $url' \
+            "$ROLLBACK_DIR/latest.json" > "$ROLLBACK_DIR/latest.json.tmp"
+          mv "$ROLLBACK_DIR/latest.json.tmp" "$ROLLBACK_DIR/latest.json"
+
+      - name: Create stable channel if needed
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if ! gh release view stable \
+            --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release create stable \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title 'DeepPi stable updater channel' \
+              --notes 'Managed by the Roll Back Stable Updater workflow.' \
+              --prerelease
+          fi
+
+      - name: Upload rollback assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ROLLBACK_DIR: ${{ runner.temp }}/deeppi-rollback
+        run: |
+          set -euo pipefail
+          gh release upload stable \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber \
+            "$ROLLBACK_DIR/latest.json" \
+            "$ROLLBACK_DIR"/*-setup.exe \
+            "$ROLLBACK_DIR"/*-setup.exe.sig
