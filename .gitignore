@@ -15,8 +15,8 @@ vite.config.ts.timestamp-*
 # Planning and milestone evidence are not part of the source distribution
 /DESIGN.md
 /DEVELOPMENT_PLAN.md
-/*_RESULTS.md
-/*_RESULTS.MD
+**/*_RESULTS.md
+**/*_RESULTS.MD
 
 # Local editor settings and scaffold-only assets
 /.vscode
