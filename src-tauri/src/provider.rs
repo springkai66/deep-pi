@@ -701,7 +701,17 @@ fn fetch_provider_models(provider: &ProviderRecord) -> Result<Vec<ProviderModelS
 }
 
 #[tauri::command]
-pub fn list_provider_models(
+pub async fn list_provider_models(
+    app: tauri::AppHandle,
+    request: ProviderModelsRequest,
+) -> Result<Vec<ProviderModelSummary>, String> {
+    use tauri::Manager;
+    tauri::async_runtime::spawn_blocking(move || list_provider_models_inner(app.state(), request))
+        .await
+        .map_err(|error| format!("provider model worker failed: {error}"))?
+}
+
+fn list_provider_models_inner(
     paths: State<'_, AppPaths>,
     request: ProviderModelsRequest,
 ) -> Result<Vec<ProviderModelSummary>, String> {

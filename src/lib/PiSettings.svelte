@@ -8,12 +8,16 @@
 
   import type { AppUpdateState } from "$lib/app-update";
   import type { RuntimeComponent, RuntimeUpdate } from "$lib/runtime";
+  import type { OperationState } from "$lib/operation";
 
   interface Props {
     settings: AppSettings;
     runtimes: RuntimeComponent[];
     updates: RuntimeUpdate[];
     isCheckingUpdates: boolean;
+    busyRuntime: string | null;
+    runtimeOperation: OperationState | null;
+    onCancelRuntime: () => void;
     appUpdate: AppUpdateState;
     onChangeSettings: (settings: AppSettings) => void;
     onCheckUpdates: () => void;
@@ -33,6 +37,9 @@
     runtimes,
     updates,
     isCheckingUpdates,
+    busyRuntime,
+    runtimeOperation,
+    onCancelRuntime,
     appUpdate,
     onChangeSettings,
     onCheckUpdates,
@@ -221,19 +228,22 @@
               </span>
               <span class="runtime-actions">
                 <span class:error={update?.error} class:update={update?.updateAvailable} class:stale={update?.stale} class="runtime-status">
-                  {#if skipped}已跳过 {update?.latestVersion}{:else if snoozed}已稍后提醒{:else if update?.stale}离线缓存 · {update.latestVersion ?? "无版本"}{:else if update?.error}检查失败{:else if update?.updateAvailable}可更新 · {update.latestVersion}{:else if update?.latestVersion}最新{:else}未检查{/if}
+                  {#if busyRuntime === runtime.id}{runtimeOperation?.cancelling ? "正在取消并恢复" : "处理中"}{:else if skipped}已跳过 {update?.latestVersion}{:else if snoozed}已稍后提醒{:else if update?.stale}离线缓存 · {update.latestVersion ?? "无版本"}{:else if update?.error}检查失败{:else if update?.updateAvailable}可更新 · {update.latestVersion}{:else if update?.latestVersion}最新{:else}未检查{/if}
                 </span>
                 {#if update?.latestVersion && update.installable && !skipped && !snoozed}
                   {#if update.updateAvailable}
-                    <button type="button" class="runtime-action" onclick={() => onUpdateRuntime(update)}>更新</button>
+                    <button type="button" class="runtime-action" disabled={busyRuntime !== null} onclick={() => onUpdateRuntime(update)}>更新</button>
                     <button type="button" class="runtime-action" onclick={() => onSnoozeRuntime(update)}>稍后</button>
                     <button type="button" class="runtime-action" onclick={() => onSkipRuntime(update)}>跳过</button>
                   {:else if !update.stale && !update.error}
-                    <button type="button" class="runtime-action" onclick={() => onUpdateRuntime(update)}>修复</button>
+                    <button type="button" class="runtime-action" disabled={busyRuntime !== null} onclick={() => onUpdateRuntime(update)}>修复</button>
                   {/if}
                 {/if}
                 {#if update?.canRollback && !skipped}
-                  <button type="button" class="runtime-action" onclick={() => onRollbackRuntime(update)}>回滚</button>
+                  <button type="button" class="runtime-action" disabled={busyRuntime !== null} onclick={() => onRollbackRuntime(update)}>回滚</button>
+                {/if}
+                {#if busyRuntime === runtime.id && runtimeOperation}
+                  <button type="button" class="runtime-action" aria-label="取消组件操作" title="取消组件操作" disabled={runtimeOperation.cancelling} onclick={onCancelRuntime}><X size={14} /></button>
                 {/if}
               </span>
             </div>

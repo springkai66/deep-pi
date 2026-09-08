@@ -10,13 +10,15 @@ use std::{
 
 use atomic_write_file::AtomicWriteFile;
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 use uuid::Uuid;
 
 use crate::{
     app_paths::AppPaths,
     dsh::DshManager,
-    provider,
+    operation::{Cancellation, OperationManager},
+    process_runner, provider,
+    recovery::activate_directory,
     task::{TaskStatus, TaskStore},
 };
 
@@ -58,7 +60,14 @@ fn package_version_from_json(content: &str) -> Option<String> {
 }
 
 fn command_version(command: &mut Command) -> Option<String> {
-    let output = command.output().ok()?;
+    command_version_cancellable(command, None)
+}
+
+fn command_version_cancellable(
+    command: &mut Command,
+    token: Option<&Cancellation>,
+) -> Option<String> {
+    let output = process_runner::run_cancellable(command, Duration::from_secs(15), token).ok()?;
     if !output.status.success() {
         return None;
     }
@@ -70,8 +79,8 @@ fn command_version(command: &mut Command) -> Option<String> {
     extract_version(&text)
 }
 
-pub(crate) fn runtime_status_for_paths(paths: &AppPaths) -> Vec<RuntimeComponent> {
-    let (mut pi_command, pi_source) = if let Some(pi_cli) = paths.pi_cli() {
+pub(crate) fn runtime_status_for_paths(paths: &AppPaths) -> Result<Vec<RuntimeComponent>, String> {
+    let (mut pi_command, pi_source) = if let Some(pi_cli) = paths.pi_cli()? {
         let mut command = Command::new(paths.node_executable());
         command.arg(pi_cli).arg("--version");
         (command, "managed")
@@ -83,13 +92,13 @@ pub(crate) fn runtime_status_for_paths(paths: &AppPaths) -> Vec<RuntimeComponent
     pi_command.env("PI_CODING_AGENT_DIR", &paths.pi_home);
     let pi_version = command_version(&mut pi_command);
 
-    let dsh_runtime = paths.dsh_runtime();
+    let dsh_runtime = paths.dsh_runtime()?;
     let mut dsh_command = Command::new(paths.node_executable());
     dsh_command
         .arg(AppPaths::dsh_cli_path(&dsh_runtime))
         .arg("--version");
     let dsh_version = command_version(&mut dsh_command);
-    let dsh_source = if dsh_runtime == paths.managed_dsh_runtime() {
+    let dsh_source = if dsh_runtime == paths.managed_dsh_runtime()? {
         "managed"
     } else {
         "development"
@@ -99,7 +108,7 @@ pub(crate) fn runtime_status_for_paths(paths: &AppPaths) -> Vec<RuntimeComponent
         .ok()
         .and_then(|content| package_version_from_json(&content));
 
-    vec![
+    Ok(vec![
         RuntimeComponent {
             id: "deeppi",
             name: "DeepPi",
@@ -128,12 +137,14 @@ pub(crate) fn runtime_status_for_paths(paths: &AppPaths) -> Vec<RuntimeComponent
             current_version: market_version,
             source: "profile",
         },
-    ]
+    ])
 }
 
 #[tauri::command]
-pub fn runtime_status(paths: State<'_, AppPaths>) -> Vec<RuntimeComponent> {
-    runtime_status_for_paths(&paths)
+pub async fn runtime_status(app: AppHandle) -> Result<Vec<RuntimeComponent>, String> {
+    tauri::async_runtime::spawn_blocking(move || runtime_status_for_paths(&app.state::<AppPaths>()))
+        .await
+        .map_err(|error| format!("runtime status worker failed: {error}"))?
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -359,6 +370,7 @@ fn version_is_newer(current: &str, latest: &str) -> bool {
 
 fn dshmarket_is_compatible(paths: &AppPaths) -> bool {
     runtime_status_for_paths(paths)
+        .unwrap_or_default()
         .into_iter()
         .find(|component| component.id == "dsh")
         .and_then(|component| component.current_version)
@@ -410,6 +422,13 @@ fn runtime_backup_exists(paths: &AppPaths, component: &str) -> bool {
     let Ok(root) = runtime_root(paths, component) else {
         return false;
     };
+    if crate::runtime_pointer::previous(&root)
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        return true;
+    }
     fs::read_dir(root.join("backups"))
         .ok()
         .into_iter()
@@ -425,19 +444,21 @@ fn ensure_runtime_idle(
     component: &str,
     store: &TaskStore,
     dsh_manager: &DshManager,
+    pty_manager: &crate::pty::PtyManager,
 ) -> Result<(), String> {
     if component == "pi"
-        && store.list()?.iter().any(|task| {
-            task.agent == "pi"
-                && matches!(
-                    task.status,
-                    TaskStatus::Queued | TaskStatus::Running | TaskStatus::Waiting
-                )
-        })
+        && (pty_manager.is_running()?
+            || store.list()?.iter().any(|task| {
+                task.agent == "pi"
+                    && matches!(
+                        task.status,
+                        TaskStatus::Queued | TaskStatus::Running | TaskStatus::Waiting
+                    )
+            }))
     {
         return Err("请先停止所有 Pi Session，再切换 Pi runtime".into());
     }
-    if component == "dsh" && dsh_manager.is_running()? {
+    if matches!(component, "dsh" | "dshmarket") && dsh_manager.is_running()? {
         return Err("请先关闭 DSH，再切换 DSH runtime".into());
     }
     Ok(())
@@ -454,21 +475,7 @@ fn npm_executable() -> &'static str {
     }
 }
 
-fn truncate_process_output(output: &[u8]) -> String {
-    const MAX_OUTPUT: usize = 64 * 1024;
-    let output = String::from_utf8_lossy(output);
-    if output.len() <= MAX_OUTPUT {
-        return output.into_owned();
-    }
-    let end = output
-        .char_indices()
-        .take_while(|(index, _)| *index < MAX_OUTPUT)
-        .last()
-        .map_or(0, |(index, character)| index + character.len_utf8());
-    format!("{}\n[output truncated]", &output[..end])
-}
-
-fn npm_install(prefix: &Path, spec: &str) -> Result<(), String> {
+fn npm_install(prefix: &Path, spec: &str, cancellation: &Cancellation) -> Result<(), String> {
     let prefix = prefix.to_string_lossy().into_owned();
     let proxy = configured_update_proxy()?;
     let mut command = Command::new(npm_executable());
@@ -497,20 +504,15 @@ fn npm_install(prefix: &Path, spec: &str) -> Result<(), String> {
     if let Some(proxy) = proxy {
         command.env("HTTP_PROXY", &proxy).env("HTTPS_PROXY", &proxy);
     }
-    let output = command
-        .output()
-        .map_err(|error| format!("failed to install runtime package: {error}"))?;
+    let output = process_runner::run_cancellable(
+        &mut command,
+        Duration::from_secs(600),
+        Some(cancellation),
+    )?;
     if output.status.success() {
         return Ok(());
     }
-    let stdout = truncate_process_output(&output.stdout);
-    let stderr = truncate_process_output(&output.stderr);
-    let details = match (stdout.is_empty(), stderr.is_empty()) {
-        (true, true) => "no output".to_owned(),
-        (false, true) => stdout,
-        (true, false) => stderr,
-        (false, false) => format!("{stdout}\n{stderr}"),
-    };
+    let details = output.text();
     Err(format!("runtime installation failed: {details}"))
 }
 
@@ -538,7 +540,11 @@ fn latest_dshmarket_backup(paths: &AppPaths) -> Option<PathBuf> {
         .map(|entry| entry.path())
 }
 
-fn install_dshmarket(paths: &AppPaths, version: &str) -> Result<RuntimeOperationResult, String> {
+fn install_dshmarket(
+    paths: &AppPaths,
+    version: &str,
+    cancellation: &Cancellation,
+) -> Result<RuntimeOperationResult, String> {
     let profile = paths.dsh_profile();
     if !profile.is_dir() {
         return Err("DSH profile is not installed".into());
@@ -547,45 +553,77 @@ fn install_dshmarket(paths: &AppPaths, version: &str) -> Result<RuntimeOperation
     let backups = dshmarket_backup_root(paths);
     fs::create_dir_all(&backups)
         .map_err(|error| format!("failed to create dshmarket backup directory: {error}"))?;
-    let backup = if package.exists() {
-        let backup = backups.join(format!("dshmarket-previous-{}", Uuid::new_v4()));
-        fs::rename(&package, &backup)
-            .map_err(|error| format!("failed to stage old dshmarket: {error}"))?;
-        Some(backup)
-    } else {
-        None
-    };
+    let staging = paths
+        .runtimes
+        .join("dshmarket")
+        .join(format!("staging-{}", Uuid::new_v4()));
+    fs::create_dir_all(&staging).map_err(|error| error.to_string())?;
     let spec = format!("dshmarket@{version}");
-    if let Err(error) = npm_install(&profile, &spec) {
-        let _ = fs::remove_dir_all(&package);
-        if let Some(backup) = &backup {
-            let _ = fs::rename(backup, &package);
-        }
+    if let Err(error) = npm_install(&staging, &spec, cancellation) {
+        let _ = fs::remove_dir_all(&staging);
         return Err(error);
     }
-    let installed_version = fs::read_to_string(paths.dshmarket_manifest())
+    let candidate = staging.join("node_modules").join("dshmarket");
+    let installed_version = fs::read_to_string(candidate.join("package.json"))
         .ok()
         .and_then(|content| package_version_from_json(&content));
     if installed_version.as_deref() != Some(version) {
-        let failed = backups.join(format!("dshmarket-failed-{}", Uuid::new_v4()));
-        let _ = fs::rename(&package, failed);
-        if let Some(backup) = &backup {
-            let _ = fs::rename(backup, &package);
-        }
+        let _ = fs::remove_dir_all(&staging);
         return Err("dshmarket failed its version verification".into());
     }
+    // Install into the profile only after a restorable snapshot exists, including dependencies.
+    let snapshot = crate::snapshot::Snapshot::capture(
+        &[
+            profile.join("package.json"),
+            profile.join("package-lock.json"),
+            profile.join("node_modules"),
+        ],
+        &paths.backups,
+    )?;
+    snapshot.preserve_entry(
+        &package,
+        &backups.join(format!("dshmarket-previous-{}", Uuid::new_v4())),
+    )?;
+    let installed = npm_install(&profile, &spec, cancellation).and_then(|()| {
+        let installed = fs::read_to_string(paths.dshmarket_manifest())
+            .ok()
+            .and_then(|content| package_version_from_json(&content));
+        if installed.as_deref() == Some(version) {
+            cancellation.commit()
+        } else {
+            Err("dshmarket failed its profile verification".into())
+        }
+    });
+    let _ = fs::remove_dir_all(&staging);
+    if let Err(error) = installed {
+        return Err(snapshot.restore_error(error));
+    }
+    snapshot.commit()?;
     Ok(RuntimeOperationResult {
         component_id: "dshmarket".into(),
         version: version.into(),
     })
 }
 
-fn verify_runtime(paths: &AppPaths, component: &str, root: &Path) -> Result<String, String> {
+fn verify_runtime(
+    paths: &AppPaths,
+    component: &str,
+    root: &Path,
+    cancellation: &Cancellation,
+) -> Result<String, String> {
+    cancellation.check()?;
     let cli = runtime_cli_path(root, component)
         .ok_or_else(|| "runtime component is not installable".to_string())?;
     if !cli.is_file() {
         return Err(format!("{component} runtime has no executable entry"));
     }
+    let package = runtime_package(component).ok_or("unsupported runtime component")?;
+    let manifest_version =
+        fs::read_to_string(root.join("node_modules").join(package).join("package.json"))
+            .ok()
+            .and_then(|content| package_version_from_json(&content))
+            .filter(|version| valid_package_version(version))
+            .ok_or("runtime package manifest has no valid version")?;
     let mut command = Command::new(paths.node_executable());
     command.arg(cli).arg("--version");
     if component == "pi" {
@@ -593,8 +631,15 @@ fn verify_runtime(paths: &AppPaths, component: &str, root: &Path) -> Result<Stri
     } else {
         command.env("DSH_HOME", &paths.dsh_home);
     }
-    command_version(&mut command)
-        .ok_or_else(|| format!("{component} runtime failed its startup verification"))
+    let actual = command_version_cancellable(&mut command, Some(cancellation))
+        .ok_or_else(|| format!("{component} runtime failed its startup verification"))?;
+    cancellation.check()?;
+    if actual != manifest_version {
+        return Err(format!(
+            "{component} CLI version {actual} differs from manifest {manifest_version}"
+        ));
+    }
+    Ok(actual)
 }
 
 fn latest_runtime_backup(root: &Path) -> Option<PathBuf> {
@@ -617,6 +662,7 @@ fn latest_runtime_backup(root: &Path) -> Option<PathBuf> {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeInstallRequest {
+    operation_id: String,
     component_id: String,
     version: String,
 }
@@ -624,6 +670,7 @@ pub struct RuntimeInstallRequest {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeRollbackRequest {
+    operation_id: String,
     component_id: String,
 }
 
@@ -642,34 +689,66 @@ impl Default for RuntimeOperationLock {
     }
 }
 
+impl RuntimeOperationLock {
+    pub(crate) fn acquire(&self) -> Result<std::sync::MutexGuard<'_, ()>, String> {
+        self.0
+            .try_lock()
+            .map_err(|_| "runtime lifecycle operation is in progress".into())
+    }
+}
+
 #[tauri::command]
-pub fn install_runtime(
+pub async fn install_runtime(
+    app: AppHandle,
+    request: RuntimeInstallRequest,
+) -> Result<RuntimeOperationResult, String> {
+    let operation = app
+        .state::<OperationManager>()
+        .begin(&request.operation_id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        install_runtime_inner(
+            app.state(),
+            app.state(),
+            app.state(),
+            app.state(),
+            app.state(),
+            request,
+            &operation.token,
+        )
+    })
+    .await
+    .map_err(|error| format!("runtime install worker failed: {error}"))?
+}
+
+fn install_runtime_inner(
     lock: State<'_, RuntimeOperationLock>,
     paths: State<'_, AppPaths>,
     store: State<'_, TaskStore>,
     dsh_manager: State<'_, DshManager>,
+    pty_manager: State<'_, crate::pty::PtyManager>,
     request: RuntimeInstallRequest,
+    cancellation: &Cancellation,
 ) -> Result<RuntimeOperationResult, String> {
-    let _guard = lock
-        .0
-        .lock()
-        .map_err(|_| "runtime operation is unavailable".to_string())?;
+    let _guard = lock.acquire()?;
+    cancellation.check()?;
+    crate::snapshot::Snapshot::ensure_ready(&paths.backups)?;
     if !component_installable(&paths, &request.component_id) {
         return Err("该组件当前不可更新，请先满足其运行时兼容条件".into());
     }
     if !valid_package_version(&request.version) {
         return Err("runtime version is invalid".into());
     }
-    ensure_runtime_idle(&request.component_id, &store, &dsh_manager)?;
+    ensure_runtime_idle(&request.component_id, &store, &dsh_manager, &pty_manager)?;
     let package = runtime_package(&request.component_id)
         .ok_or_else(|| "runtime component is not supported".to_string())?;
     let proxy = configured_update_proxy()?;
     let latest = latest_package_version(package, proxy.as_deref())?;
+    cancellation.check()?;
     if latest != request.version {
         return Err("只能安装刚从官方 registry 验证的最新版本".into());
     }
     if request.component_id == "dshmarket" {
-        let result = install_dshmarket(&paths, &request.version)?;
+        let result = install_dshmarket(&paths, &request.version, cancellation)?;
         log::info!(
             "event=runtime_install component={} version={} status=active",
             request.component_id,
@@ -679,51 +758,37 @@ pub fn install_runtime(
     }
 
     let root = runtime_root(&paths, &request.component_id)?;
-    let staging_root = root.join("staging");
+    let staging_root = root.join("versions");
     fs::create_dir_all(&staging_root)
         .map_err(|error| format!("failed to create runtime staging directory: {error}"))?;
     let staging = staging_root.join(format!("{}-{}", request.version, Uuid::new_v4()));
     fs::create_dir_all(&staging)
         .map_err(|error| format!("failed to create runtime staging directory: {error}"))?;
     let spec = format!("{package}@{}", request.version);
-    if let Err(error) = npm_install(&staging, &spec) {
+    if let Err(error) = npm_install(&staging, &spec, cancellation) {
         let _ = fs::remove_dir_all(&staging);
         return Err(error);
     }
-    if let Err(error) = verify_runtime(&paths, &request.component_id, &staging) {
+    let verify_version = |root: &Path| {
+        let actual = verify_runtime(&paths, &request.component_id, root, cancellation)?;
+        if actual != request.version {
+            return Err(format!(
+                "runtime version mismatch: expected {}, got {actual}",
+                request.version
+            ));
+        }
+        Ok(actual)
+    };
+    if let Err(error) = verify_version(&staging) {
         let _ = fs::remove_dir_all(&staging);
         return Err(error);
     }
 
-    let current = root.join("current");
-    let backups = root.join("backups");
-    fs::create_dir_all(&backups)
-        .map_err(|error| format!("failed to create runtime backup directory: {error}"))?;
-    let backup = if current.exists() {
-        let backup = backups.join(format!("previous-{}", Uuid::new_v4()));
-        fs::rename(&current, &backup).map_err(|error| {
-            let _ = fs::remove_dir_all(&staging);
-            format!("failed to stage old runtime for rollback: {error}")
-        })?;
-        Some(backup)
-    } else {
-        None
-    };
-    if let Err(error) = fs::rename(&staging, &current) {
-        if let Some(backup) = &backup {
-            let _ = fs::rename(backup, &current);
-        }
-        let _ = fs::remove_dir_all(&staging);
-        return Err(format!("failed to activate runtime: {error}"));
-    }
-    if let Err(error) = verify_runtime(&paths, &request.component_id, &current) {
-        let failed = backups.join(format!("failed-{}", Uuid::new_v4()));
-        let _ = fs::rename(&current, failed);
-        if let Some(backup) = &backup {
-            let _ = fs::rename(backup, &current);
-        }
-        return Err(error);
-    }
+    crate::runtime_pointer::activate(&root, &staging, |candidate| {
+        let version = verify_version(candidate)?;
+        cancellation.commit()?;
+        Ok(version)
+    })?;
     log::info!(
         "event=runtime_install component={} version={} status=active",
         request.component_id,
@@ -736,51 +801,66 @@ pub fn install_runtime(
 }
 
 #[tauri::command]
-pub fn rollback_runtime(
+pub async fn rollback_runtime(
+    app: AppHandle,
+    request: RuntimeRollbackRequest,
+) -> Result<RuntimeOperationResult, String> {
+    let operation = app
+        .state::<OperationManager>()
+        .begin(&request.operation_id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        rollback_runtime_inner(
+            app.state(),
+            app.state(),
+            app.state(),
+            app.state(),
+            app.state(),
+            request,
+            &operation.token,
+        )
+    })
+    .await
+    .map_err(|error| format!("runtime rollback worker failed: {error}"))?
+}
+
+fn rollback_runtime_inner(
     lock: State<'_, RuntimeOperationLock>,
     paths: State<'_, AppPaths>,
     store: State<'_, TaskStore>,
     dsh_manager: State<'_, DshManager>,
+    pty_manager: State<'_, crate::pty::PtyManager>,
     request: RuntimeRollbackRequest,
+    cancellation: &Cancellation,
 ) -> Result<RuntimeOperationResult, String> {
-    let _guard = lock
-        .0
-        .lock()
-        .map_err(|_| "runtime operation is unavailable".to_string())?;
+    let _guard = lock.acquire()?;
+    cancellation.check()?;
+    crate::snapshot::Snapshot::ensure_ready(&paths.backups)?;
     if !runtime_installable(&request.component_id) {
         return Err("该组件没有可回滚的独立运行时".into());
     }
-    ensure_runtime_idle(&request.component_id, &store, &dsh_manager)?;
+    ensure_runtime_idle(&request.component_id, &store, &dsh_manager, &pty_manager)?;
     if request.component_id == "dshmarket" {
         let backup = latest_dshmarket_backup(&paths)
             .ok_or_else(|| "没有可用的 dshmarket 回滚版本".to_string())?;
         let package = paths.dshmarket_package();
         let backups = dshmarket_backup_root(&paths);
         let failed = backups.join(format!("dshmarket-rollback-{}", Uuid::new_v4()));
-        if package.exists() {
-            fs::rename(&package, &failed)
-                .map_err(|error| format!("failed to stage current dshmarket: {error}"))?;
-        }
-        if let Err(error) = fs::rename(&backup, &package) {
-            if failed.exists() {
-                let _ = fs::rename(&failed, &package);
+        let snapshot =
+            crate::snapshot::Snapshot::capture(std::slice::from_ref(&package), &paths.backups)?;
+        let result = activate_directory(&package, &backup, &failed, || {
+            let version = fs::read_to_string(paths.dshmarket_manifest())
+                .ok()
+                .and_then(|content| package_version_from_json(&content))
+                .ok_or_else(|| "dshmarket rollback failed its version verification".to_string())?;
+            cancellation.commit()?;
+            Ok(version)
+        });
+        let version = match result {
+            Ok(version) => {
+                snapshot.commit()?;
+                version
             }
-            return Err(format!("failed to activate dshmarket rollback: {error}"));
-        }
-        let version = fs::read_to_string(paths.dshmarket_manifest())
-            .ok()
-            .and_then(|content| package_version_from_json(&content))
-            .ok_or_else(|| "dshmarket rollback failed its version verification".to_string());
-        let version = match version {
-            Ok(version) => version,
-            Err(error) => {
-                let broken = backups.join(format!("dshmarket-failed-{}", Uuid::new_v4()));
-                let _ = fs::rename(&package, broken);
-                if failed.exists() {
-                    let _ = fs::rename(&failed, &package);
-                }
-                return Err(error);
-            }
+            Err(error) => return Err(snapshot.restore_error(error)),
         };
         log::info!(
             "event=runtime_rollback component=dshmarket version={} status=active",
@@ -792,35 +872,12 @@ pub fn rollback_runtime(
         });
     }
     let root = runtime_root(&paths, &request.component_id)?;
-    let backup =
-        latest_runtime_backup(&root).ok_or_else(|| "没有可用的 runtime 回滚版本".to_string())?;
-    let current = root.join("current");
-    let failed = root
-        .join("backups")
-        .join(format!("rollback-{}", Uuid::new_v4()));
-    if current.exists() {
-        fs::rename(&current, &failed)
-            .map_err(|error| format!("failed to stage current runtime: {error}"))?;
-    }
-    if let Err(error) = fs::rename(&backup, &current) {
-        if failed.exists() {
-            let _ = fs::rename(&failed, &current);
-        }
-        return Err(format!("failed to activate rollback runtime: {error}"));
-    }
-    let version = match verify_runtime(&paths, &request.component_id, &current) {
-        Ok(version) => version,
-        Err(error) => {
-            let broken = root
-                .join("backups")
-                .join(format!("failed-{}", Uuid::new_v4()));
-            let _ = fs::rename(&current, broken);
-            if failed.exists() {
-                let _ = fs::rename(&failed, &current);
-            }
-            return Err(error);
-        }
-    };
+    let version =
+        crate::runtime_pointer::rollback(&root, latest_runtime_backup(&root), |target| {
+            let version = verify_runtime(&paths, &request.component_id, target, cancellation)?;
+            cancellation.commit()?;
+            Ok(version)
+        })?;
     log::info!(
         "event=runtime_rollback component={} version={} status=active",
         request.component_id,
@@ -833,7 +890,15 @@ pub fn rollback_runtime(
 }
 
 #[tauri::command]
-pub fn check_runtime_updates(
+pub async fn check_runtime_updates(app: AppHandle) -> Result<Vec<RuntimeUpdate>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        check_runtime_updates_inner(app.state(), app.state())
+    })
+    .await
+    .map_err(|error| format!("runtime update worker failed: {error}"))?
+}
+
+fn check_runtime_updates_inner(
     cache: State<'_, UpdateCache>,
     paths: State<'_, AppPaths>,
 ) -> Result<Vec<RuntimeUpdate>, String> {
@@ -842,7 +907,7 @@ pub fn check_runtime_updates(
         return Ok(updates);
     }
     let started = Instant::now();
-    let updates = runtime_status_for_paths(&paths)
+    let updates = runtime_status_for_paths(&paths)?
         .into_iter()
         .map(|component| {
             let Some(package) = runtime_package(component.id) else {
@@ -920,6 +985,68 @@ mod tests {
         extract_version, package_version_from_json, runtime_cli_path, runtime_installable,
         valid_package_version, version_is_newer,
     };
+
+    #[test]
+    #[ignore = "downloads the official Pi runtime into an isolated temporary profile"]
+    fn installs_verifies_and_rolls_back_live_pi_in_isolation() {
+        let root =
+            std::env::temp_dir().join(format!("deeppi-live-runtime-{}", uuid::Uuid::new_v4()));
+        let paths = crate::app_paths::AppPaths::from_roots(
+            root.join("roaming"),
+            root.join("local"),
+            root.join("project"),
+        )
+        .unwrap();
+        let runtime = paths.runtimes.join("pi");
+        let staging = runtime.join("versions/first");
+        std::fs::create_dir_all(&staging).unwrap();
+        let proxy = super::configured_update_proxy().unwrap();
+        let version =
+            super::latest_package_version("@earendil-works/pi-coding-agent", proxy.as_deref())
+                .unwrap();
+        let cancellation = crate::operation::Cancellation::default();
+        super::npm_install(
+            &staging,
+            &format!("@earendil-works/pi-coding-agent@{version}"),
+            &cancellation,
+        )
+        .unwrap();
+        let verified = super::verify_runtime(&paths, "pi", &staging, &cancellation).unwrap();
+        assert_eq!(verified, version);
+        crate::runtime_pointer::activate(&runtime, &staging, |candidate| {
+            super::verify_runtime(&paths, "pi", candidate, &cancellation)
+        })
+        .unwrap();
+        let first = paths.managed_pi_runtime().unwrap();
+        let second = runtime.join("versions/second");
+        super::npm_install(
+            &second,
+            &format!("@earendil-works/pi-coding-agent@{version}"),
+            &cancellation,
+        )
+        .unwrap();
+        crate::runtime_pointer::activate(&runtime, &second, |candidate| {
+            super::verify_runtime(&paths, "pi", candidate, &cancellation)
+        })
+        .unwrap();
+        assert_ne!(paths.managed_pi_runtime().unwrap(), first);
+        crate::runtime_pointer::rollback(&runtime, None, |candidate| {
+            super::verify_runtime(&paths, "pi", candidate, &cancellation)
+        })
+        .unwrap();
+        assert_eq!(paths.managed_pi_runtime().unwrap(), first);
+        eprintln!("isolated Pi install, repair, and rollback verified: {version}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn lifecycle_lock_rejects_overlapping_operations() {
+        let lifecycle = super::RuntimeOperationLock::default();
+        let active = lifecycle.acquire().unwrap();
+        assert!(lifecycle.acquire().is_err());
+        drop(active);
+        assert!(lifecycle.acquire().is_ok());
+    }
 
     #[test]
     fn validates_runtime_packages_and_entries() {

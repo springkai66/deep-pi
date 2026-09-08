@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { createDialogQueue } from "$lib/dialog";
+  import { createOperationRunner, type OperationState } from "$lib/operation";
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import { open } from "@tauri-apps/plugin-dialog";
@@ -44,6 +46,7 @@
 
   interface TaskStatusUpdate {
     taskId: string;
+    runId: string;
     status: TaskStatus;
   }
 
@@ -58,6 +61,9 @@
   let runtimes = $state<RuntimeComponent[]>([]);
   let updates = $state<RuntimeUpdate[]>([]);
   let isCheckingUpdates = $state(false);
+  let busyRuntime = $state<string | null>(null);
+  let runtimeOperation = $state<OperationState | null>(null);
+  const runtimeRunner = createOperationRunner(invoke, (state) => { runtimeOperation = state; });
   let appUpdate = $state<AppUpdateState>({
     status: "idle",
     version: null,
@@ -78,11 +84,11 @@
   let isDshStarting = $state(false);
   let dshHostError = $state<string | null>(null);
   let dialogRequest = $state<DialogRequest | null>(null);
+  const dialogs = createDialogQueue((request) => { dialogRequest = request; });
   let isClosing = false;
   let workspace: HTMLElement;
   let dshWebview: Webview | null = null;
   let nextTaskNumber = 1;
-  let dialogId = 0;
 
   const piTasks = $derived(tasks.filter((task) => task.agent === "pi"));
   const selectedProject = $derived(
@@ -192,49 +198,51 @@
 
   async function installRuntime(update: RuntimeUpdate) {
     if (!update.latestVersion || !update.installable) return;
-    if (
-      !(await confirmDialog(
-        "更新组件",
-        `下载并激活 ${update.name} ${update.latestVersion} 吗？当前运行时会先备份。`,
-        "更新",
-      ))
-    ) {
-      return;
-    }
+    await changeRuntime(update, false);
+  }
+
+  async function rollbackRuntime(update: RuntimeUpdate) {
+    if (!update.canRollback) return;
+    await changeRuntime(update, true);
+  }
+
+  async function cancelRuntime() {
     try {
-      const affectsDsh = update.id === "dsh" || update.id === "dshmarket";
-      if (affectsDsh) {
-        await dshWebview?.close();
-        dshWebview = null;
-        await invoke("stop_dsh");
-      }
-      await invoke("install_runtime", {
-        request: { componentId: update.id, version: update.latestVersion },
-      });
-      runtimes = await invoke<RuntimeComponent[]>("runtime_status");
-      if (affectsDsh) await invoke("start_dsh");
-      await checkUpdates(true);
+      if (!(await runtimeRunner.cancel())) showError("当前操作尚未接受取消，或已进入提交阶段。");
     } catch (error) {
       showError(error);
     }
   }
 
-  async function rollbackRuntime(update: RuntimeUpdate) {
-    if (!update.canRollback) return;
-    if (!(await confirmDialog("回滚组件", `恢复 ${update.name} 的上一版本吗？`, "回滚"))) return;
+  async function changeRuntime(update: RuntimeUpdate, rollback: boolean) {
+    if (busyRuntime) return;
+    busyRuntime = update.id;
+    let stoppedDsh = false;
     try {
+      const confirmed = rollback
+        ? await confirmDialog("回滚组件", `恢复 ${update.name} 的上一版本吗？`, "回滚")
+        : await confirmDialog("更新组件", `下载并激活 ${update.name} ${update.latestVersion} 吗？当前运行时会保留。`, "更新");
+      if (!confirmed) return;
       const affectsDsh = update.id === "dsh" || update.id === "dshmarket";
       if (affectsDsh) {
         await dshWebview?.close();
         dshWebview = null;
         await invoke("stop_dsh");
+        stoppedDsh = true;
       }
-      await invoke("rollback_runtime", { request: { componentId: update.id } });
+      await runtimeRunner.run(rollback ? "rollback_runtime" : "install_runtime", {
+        componentId: update.id,
+        ...(rollback ? {} : { version: update.latestVersion }),
+      });
       runtimes = await invoke<RuntimeComponent[]>("runtime_status");
-      if (affectsDsh) await invoke("start_dsh");
       await checkUpdates(true);
     } catch (error) {
       showError(error);
+    } finally {
+      if (stoppedDsh) {
+        try { await invoke("start_dsh"); } catch (error) { showError(error); }
+      }
+      busyRuntime = null;
     }
   }
 
@@ -319,7 +327,7 @@
     });
     const statusListener = listen<TaskStatusUpdate>("task-status", ({ payload }) => {
       const task = tasks.find((candidate) => candidate.id === payload.taskId);
-      if (task && ["running", "waiting"].includes(task.status)) {
+      if (task && task.runId === payload.runId && ["running", "waiting"].includes(task.status)) {
         task.status = payload.status;
       }
     });
@@ -333,55 +341,40 @@
       void dshTaskListener.then((unlisten) => unlisten());
       void dshStatusListener.then((unlisten) => unlisten());
       void statusListener.then((unlisten) => unlisten());
+      dialogs.dispose();
       void dshWebview?.close();
     };
   });
 
   function showError(error: unknown) {
     errorMessage = String(error);
-    dialogRequest = {
-      id: ++dialogId,
+    void dialogs.request({
       kind: "alert",
       title: "操作失败",
       message: errorMessage,
       confirmLabel: "知道了",
-      resolve: () => {},
-    };
+    });
   }
 
   function resolveDialog(value: DialogValue) {
-    const request = dialogRequest;
-    dialogRequest = null;
-    request?.resolve(value);
+    dialogs.resolve(value);
   }
 
   function confirmDialog(title: string, message: string, confirmLabel = "确认") {
-    return new Promise<boolean>((resolve) => {
-      dialogRequest = {
-        id: ++dialogId,
-        kind: "confirm",
-        title,
-        message,
-        confirmLabel,
-        resolve: (value) => resolve(value === true),
-      };
-    });
+    return dialogs.request({ kind: "confirm", title, message, confirmLabel })
+      .then((value) => value === true);
   }
 
   function closeChoiceDialog() {
-    return new Promise<CloseBehavior | null>((resolve) => {
-      dialogRequest = {
-        id: ++dialogId,
-        kind: "choice",
-        title: "关闭 DeepPi",
-        message: "选择点击窗口关闭按钮时的默认行为。这个选择会记住，也可以在设置中修改。",
-        choices: [
-          { value: "minimize", label: "最小化" },
-          { value: "exit", label: "退出应用" },
-        ],
-        resolve: (value) => resolve(value === "minimize" || value === "exit" ? value : null),
-      };
-    });
+    return dialogs.request({
+      kind: "choice",
+      title: "关闭 DeepPi",
+      message: "选择点击窗口关闭按钮时的默认行为。这个选择会记住，也可以在设置中修改。",
+      choices: [
+        { value: "minimize", label: "最小化" },
+        { value: "exit", label: "退出应用" },
+      ],
+    }).then((value): CloseBehavior | null => value === "minimize" || value === "exit" ? value : null);
   }
 
   function updateSettings(next: AppSettings) {
@@ -390,18 +383,14 @@
   }
 
   function inputDialog(title: string, message: string, initialValue: string) {
-    return new Promise<string | null>((resolve) => {
-      dialogRequest = {
-        id: ++dialogId,
-        kind: "input",
-        title,
-        message,
-        initialValue,
-        placeholder: "输入任务名称",
-        confirmLabel: "保存",
-        resolve: (value) => resolve(typeof value === "string" ? value.trim() : null),
-      };
-    });
+    return dialogs.request({
+      kind: "input",
+      title,
+      message,
+      initialValue,
+      placeholder: "输入任务名称",
+      confirmLabel: "保存",
+    }).then((value) => typeof value === "string" ? value.trim() : null);
   }
 
   function applyPaneSelection(selection: { panes: string[]; active: string | null }) {
@@ -623,19 +612,20 @@
       return;
     }
     if (isStarting || runningCount >= settings.maxConcurrentTasks) return;
-    if (selectedProjectId !== project.id) selectProject(project);
-    if (
-      hasProjectConflict(project.path, piTasks) &&
-      !(await confirmDialog(
-        "确认并发写入",
-        "该项目已有活动任务，继续可能产生文件冲突。仍要创建任务吗？",
-      ))
-    ) {
-      return;
-    }
     isStarting = true;
     errorMessage = "";
     try {
+      if (selectedProjectId !== project.id) selectProject(project);
+      if (
+        hasProjectConflict(project.path, piTasks) &&
+        !(await confirmDialog(
+          "确认并发写入",
+          "该项目已有活动任务，继续可能产生文件冲突。仍要创建任务吗？",
+        ))
+      ) {
+        return;
+      }
+      if (runningCount >= settings.maxConcurrentTasks) return;
       const title = `Pi Task ${nextTaskNumber++}`;
       const task = await invoke<Task>("start_pi_task", {
         request: { projectId: project.id, title, rows: 32, cols: 100 },
@@ -788,6 +778,9 @@
         runtimes={runtimes}
         updates={updates}
         isCheckingUpdates={isCheckingUpdates}
+        {busyRuntime}
+        {runtimeOperation}
+        onCancelRuntime={() => void cancelRuntime()}
         {appUpdate}
         onChangeSettings={updateSettings}
         onCheckUpdates={() => void checkUpdates(true)}
@@ -852,6 +845,7 @@
         >
           {#each allTerminalTasks as task (task.id)}
             <TerminalPane
+              runId={task.runId}
               taskId={task.id}
               title={task.title}
               status={task.status}

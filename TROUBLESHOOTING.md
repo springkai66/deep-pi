@@ -15,7 +15,7 @@ pnpm tauri dev
 
 ## Pi 无法启动
 
-DeepPi 优先使用 `%LOCALAPPDATA%\com.deeppi.desktop\runtimes\pi\current` 下的托管运行时。设置页显示 `system` 时，应用正在回退到 PATH 中的 `pi`，这只适合开发环境。
+DeepPi 优先读取 `%LOCALAPPDATA%\com.deeppi.desktop\runtimes\pi\active.json` 中的托管运行时指针，新版本位于同级 `versions` 目录。没有指针文件的旧安装继续使用 `current`。设置页显示 `system` 时，应用正在回退到 PATH 中的 `pi`，这只适合开发环境。指针损坏或指向缺失的运行时会报错，不会静默切换到本机 Pi。
 
 确认以下目录可写，并检查日志：
 
@@ -41,7 +41,11 @@ DSH 的 profile 位于：
 
 ## 更新失败
 
-更新前 DeepPi 会检查活动任务，并把旧运行时放入 `backups`。先停止对应 Pi Session 或 DSH，再重试。更新失败时不要删除 `backups`，可使用设置页的“回滚”。
+更新前 DeepPi 会检查活动任务。Pi/DSH 安装到独立版本目录，验证后原子替换 `active.json`；旧版本保留供回滚，不再搬移正在使用的 `current`。旧安装的 `backups` 仍兼容。先停止对应 Pi Session 或 DSH，再重试。更新失败时不要手动删除 `active.json`、`versions` 或 `backups`，可使用设置页的“回滚”。
+
+运行时和扩展操作进行中可请求取消。取消被后端接受后，界面会等待进程结束及必要的恢复完成；已经进入提交阶段的操作不能再取消。网络探测和文件复制阶段可能需要等到下一检查点。
+
+扩展与 dshmarket 的原地修改会先建立持久化快照。应用意外退出后，下次启动会在创建会话前恢复未提交快照。若提示 `pending package recovery`，请关闭并重新启动 DeepPi；恢复失败时保留日志及 `backups\operation-*`，不要继续修改包目录。旧格式快照只保留用于人工诊断，不自动重放。
 
 没有网络时，设置页可能显示带“离线缓存”的旧检查结果；旧结果最多保留 7 天，不代表当前 registry 状态。需要代理时，在启动 DeepPi 前设置 `HTTPS_PROXY` 或 `HTTP_PROXY`；代理必须是 HTTPS，或指向 loopback 的 HTTP 地址。
 

@@ -3,15 +3,17 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::Mutex,
+    time::Duration,
 };
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 
-use crate::app_paths::AppPaths;
+use crate::{
+    app_paths::AppPaths, process_runner, runtime::RuntimeOperationLock, snapshot::Snapshot,
+};
 
-const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 const MANAGED_ENVIRONMENT: &str = "managed";
 const NATIVE_ENVIRONMENT: &str = "native";
 const ALL_ENVIRONMENTS: &str = "all";
@@ -27,6 +29,7 @@ pub struct InstalledPackage {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PackageRequest {
+    operation_id: String,
     operation: String,
     spec: String,
     scope: String,
@@ -203,7 +206,7 @@ fn package_command(
         _ => return Err("package scope must be global or project".into()),
     };
     let pi_cli = paths
-        .pi_cli()
+        .pi_cli()?
         .ok_or_else(|| "managed Pi runtime is not installed".to_string())?;
     let mut command = Command::new(paths.node_executable());
     command
@@ -243,19 +246,6 @@ fn package_command(
     Ok((command, cwd))
 }
 
-fn truncate_output(output: &[u8]) -> String {
-    let output = String::from_utf8_lossy(output);
-    if output.len() <= MAX_OUTPUT_BYTES {
-        return output.into_owned();
-    }
-    let end = output
-        .char_indices()
-        .take_while(|(index, _)| *index < MAX_OUTPUT_BYTES)
-        .last()
-        .map_or(0, |(index, character)| index + character.len_utf8());
-    format!("{}\n[output truncated]", &output[..end])
-}
-
 #[tauri::command]
 pub fn list_pi_packages(
     paths: State<'_, AppPaths>,
@@ -272,43 +262,99 @@ pub fn list_pi_packages(
 }
 
 #[tauri::command]
-pub fn package_operation(
-    paths: State<'_, AppPaths>,
-    operation_lock: State<'_, PackageOperationLock>,
+pub async fn package_operation(
+    app: AppHandle,
     request: PackageRequest,
 ) -> Result<PackageOperationResult, String> {
-    // ponytail: one global lock keeps package settings atomic; split by scope if throughput matters.
+    let operation = app
+        .state::<crate::operation::OperationManager>()
+        .begin(&request.operation_id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        package_operation_inner(
+            app.state(),
+            app.state(),
+            app.state(),
+            app.state(),
+            request,
+            &operation.token,
+        )
+    })
+    .await
+    .map_err(|error| format!("package worker failed: {error}"))?
+}
+
+fn package_operation_inner(
+    paths: State<'_, AppPaths>,
+    operation_lock: State<'_, PackageOperationLock>,
+    lifecycle: State<'_, RuntimeOperationLock>,
+    pty_manager: State<'_, crate::pty::PtyManager>,
+    request: PackageRequest,
+    cancellation: &crate::operation::Cancellation,
+) -> Result<PackageOperationResult, String> {
+    let _lifecycle = lifecycle.acquire()?;
+    cancellation.check()?;
+    Snapshot::ensure_ready(&paths.backups)?;
     let _lock = operation_lock
         .0
-        .lock()
+        .try_lock()
         .map_err(|_| "Pi package operation is already unavailable".to_string())?;
-    let (mut command, _) = package_command(&paths, &request)?;
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x0800_0000);
+    if pty_manager.is_running()? {
+        return Err("请先停止所有 Pi 任务，再修改扩展，以确保可以安全恢复".into());
     }
-    let output = command
-        .output()
-        .map_err(|error| format!("failed to run Pi package command: {error}"))?;
-    let stdout = truncate_output(&output.stdout);
-    let stderr = truncate_output(&output.stderr);
-    let combined = match (stdout.is_empty(), stderr.is_empty()) {
-        (true, true) => String::new(),
-        (false, true) => stdout,
-        (true, false) => stderr,
-        (false, false) => format!("{stdout}\n{stderr}"),
-    };
-    if !output.status.success() {
-        return Err(format!(
-            "Pi package command failed ({}): {combined}",
-            output
-                .status
-                .code()
-                .map_or_else(|| "terminated".into(), |code| code.to_string())
-        ));
+    let (mut command, cwd) = package_command(&paths, &request)?;
+    let roots = [paths.pi_home.clone(), cwd.join(".pi")];
+    let targets = roots
+        .iter()
+        .flat_map(|root| ["settings.json", "npm", "git"].map(|name| root.join(name)))
+        .collect::<Vec<_>>();
+    validate_settings_files(&roots)?;
+    let snapshot = Snapshot::capture(&targets, &paths.backups)?;
+    let result =
+        process_runner::run_cancellable(&mut command, Duration::from_secs(600), Some(cancellation))
+            .and_then(|output| {
+                if !output.status.success() {
+                    return Err(format!(
+                        "Pi package command failed ({}): {}",
+                        output.status,
+                        output.text()
+                    ));
+                }
+                validate_settings_files(&roots)?;
+                cancellation.commit()?;
+                Ok(PackageOperationResult {
+                    output: output.text(),
+                })
+            });
+    match result {
+        Ok(result) => {
+            snapshot.commit()?;
+            Ok(result)
+        }
+        Err(error) => Err(snapshot.restore_error(error)),
     }
-    Ok(PackageOperationResult { output: combined })
+}
+
+fn validate_settings_files(roots: &[PathBuf]) -> Result<(), String> {
+    for root in roots {
+        let path = root.join("settings.json");
+        if !path.exists() {
+            continue;
+        }
+        let value: Value =
+            serde_json::from_slice(&fs::read(&path).map_err(|error| error.to_string())?)
+                .map_err(|error| format!("invalid {}: {error}", path.display()))?;
+        if !value.is_object()
+            || value
+                .get("packages")
+                .is_some_and(|packages| !packages.is_array())
+        {
+            return Err(format!(
+                "invalid package settings schema: {}",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

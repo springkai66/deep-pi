@@ -5,12 +5,18 @@ mod bridge;
 mod credentials;
 mod dsh;
 mod dsh_api;
+mod durable_file;
 mod market;
+mod operation;
 mod package;
+mod process_runner;
 mod provider;
 mod pty;
+mod recovery;
 mod runtime;
+mod runtime_pointer;
 mod settings;
+mod snapshot;
 mod task;
 
 pub fn credential_helper(provider_id: &str) -> Result<(), String> {
@@ -53,6 +59,7 @@ pub fn run() {
         .manage(market::ModelCatalogCache::default())
         .manage(runtime::UpdateCache::default())
         .manage(runtime::RuntimeOperationLock::default())
+        .manage(operation::OperationManager::default())
         .manage(package::PackageOperationLock::default())
         .manage(pty::PtyManager::default())
         .setup(|app| {
@@ -64,6 +71,9 @@ pub fn run() {
                 project_root,
             )
             .map_err(std::io::Error::other)?;
+            snapshot::Snapshot::recover_pending(&paths.backups).map_err(std::io::Error::other)?;
+            paths.managed_pi_runtime().map_err(std::io::Error::other)?;
+            paths.managed_dsh_runtime().map_err(std::io::Error::other)?;
             let store = task::TaskStore::open(&paths.database).map_err(std::io::Error::other)?;
             bridge::install(&paths).map_err(std::io::Error::other)?;
             let settings =
@@ -87,6 +97,7 @@ pub fn run() {
             dsh::stop_dsh,
             package::list_pi_packages,
             package::package_operation,
+            operation::cancel_operation,
             provider::delete_pi_provider,
             provider::list_pi_providers,
             provider::list_provider_models,
@@ -100,6 +111,7 @@ pub fn run() {
             market::search_pi_models,
             market::search_pi_packages,
             pty::default_working_directory,
+            pty::acknowledge_pi_output,
             pty::start_pi_task,
             pty::write_pi_task,
             pty::resize_pi_task,

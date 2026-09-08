@@ -12,9 +12,11 @@
     type ColorMode,
   } from "$lib/settings";
   import type { TaskStatus } from "$lib/task";
+  import { createTerminalSession } from "$lib/terminal-session";
 
   interface Props {
     taskId: string;
+    runId?: string | null;
     title: string;
     status: TaskStatus;
     visible: boolean;
@@ -24,21 +26,15 @@
     onExit: (exitCode: number | null, error: string | null) => void;
   }
 
-  interface PtyOutput {
-    taskId: string;
-    data: string;
-  }
-
-  interface PtyExit {
-    taskId: string;
-    exitCode: number | null;
-    error: string | null;
-  }
-
-  let { taskId, title, status, visible, active, codeFont, colorMode, onExit }: Props = $props();
+  let { taskId, runId = null, title, status, visible, active, codeFont, colorMode, onExit }: Props = $props();
   let container: HTMLDivElement;
   let terminal: Terminal | undefined;
+  let session = $state<ReturnType<typeof createTerminalSession> | null>(null);
   let resizeTerminal: () => void = () => {};
+
+  $effect(() => {
+    session?.setRun(runId);
+  });
 
   function terminalTheme(light: boolean) {
     return light
@@ -143,20 +139,24 @@
       terminalInstance.loadAddon(imageAddon);
     }).catch(() => {});
 
-    const outputListener = listen<PtyOutput>("pty-output", ({ payload }) => {
-      if (payload.taskId === taskId) terminalInstance.write(decodeBase64(payload.data));
+    const connection = createTerminalSession(taskId, {
+      listen: <T,>(name: string, handler: (payload: T) => void) =>
+        listen<T>(name, ({ payload }) => handler(payload)),
+      acknowledge: (taskId, runId) => invoke("acknowledge_pi_output", { taskId, runId }),
+      output: (data) => terminalInstance.write(decodeBase64(data)),
+      exit: (exitCode, error) => {
+        terminalInstance.options.cursorBlink = false;
+        terminalInstance.writeln("");
+        terminalInstance.writeln(
+          error
+            ? `\x1b[31m${error}\x1b[0m`
+            : `\x1b[90mPi exited with code ${exitCode ?? "unknown"}.\x1b[0m`,
+        );
+        onExit(exitCode, error);
+      },
+      error: (error) => terminalInstance.writeln(`\r\nTerminal subscription failed: ${String(error)}`),
     });
-    const exitListener = listen<PtyExit>("pty-exit", ({ payload }) => {
-      if (payload.taskId !== taskId) return;
-      terminalInstance.options.cursorBlink = false;
-      terminalInstance.writeln("");
-      terminalInstance.writeln(
-        payload.error
-          ? `\x1b[31m${payload.error}\x1b[0m`
-          : `\x1b[90mPi exited with code ${payload.exitCode ?? "unknown"}.\x1b[0m`,
-      );
-      onExit(payload.exitCode, payload.error);
-    });
+    session = connection;
 
     terminalInstance.open(container);
     if (active) terminalInstance.focus();
@@ -207,14 +207,14 @@
 
     return () => {
       disposed = true;
+      connection.dispose();
+      session = null;
       resizeObserver.disconnect();
       dataDisposable.dispose();
       imageAddon?.dispose();
       terminalInstance.dispose();
       terminal = undefined;
       resizeTerminal = () => {};
-      void outputListener.then((unlisten) => unlisten());
-      void exitListener.then((unlisten) => unlisten());
     };
   });
 </script>

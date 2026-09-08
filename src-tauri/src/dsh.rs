@@ -140,6 +140,9 @@ fn start_dsh_inner(
     manager: &DshManager,
     paths: &AppPaths,
 ) -> Result<String, String> {
+    let lifecycle = app.state::<crate::runtime::RuntimeOperationLock>();
+    let _lifecycle = lifecycle.acquire()?;
+    crate::snapshot::Snapshot::ensure_ready(&paths.backups)?;
     let mut state = manager.process.lock().map_err(|_| lock_error())?;
     if let Some(child) = state.child.as_mut() {
         if child
@@ -156,7 +159,7 @@ fn start_dsh_inner(
     state.child = None;
     state.url = None;
 
-    let runtime = paths.dsh_runtime();
+    let runtime = paths.dsh_runtime()?;
     let cli = AppPaths::dsh_cli_path(&runtime);
     if !cli.is_file() {
         return Err("managed DSH runtime is not installed".into());
@@ -225,17 +228,17 @@ fn start_dsh_inner(
             error: None,
         },
     );
-    monitor_dsh(app, generation, url.clone());
+    monitor_dsh(app.clone(), generation, url.clone());
     Ok(url)
 }
 
 #[tauri::command]
-pub fn start_dsh(
-    app: AppHandle,
-    manager: State<'_, DshManager>,
-    paths: State<'_, AppPaths>,
-) -> Result<String, String> {
-    start_dsh_inner(app, &manager, &paths)
+pub async fn start_dsh(app: AppHandle) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        start_dsh_inner(app.clone(), &app.state(), &app.state())
+    })
+    .await
+    .map_err(|error| format!("DSH start worker failed: {error}"))?
 }
 
 pub fn prewarm_dsh(app: AppHandle) {
@@ -316,15 +319,22 @@ fn monitor_dsh(app: AppHandle, generation: u64, url: String) {
 }
 
 #[tauri::command]
-pub fn stop_dsh(app: AppHandle, manager: State<'_, DshManager>) -> Result<(), String> {
+pub async fn stop_dsh(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || stop_dsh_inner(app.clone(), app.state()))
+        .await
+        .map_err(|error| format!("DSH stop worker failed: {error}"))?
+}
+
+fn stop_dsh_inner(app: AppHandle, manager: State<'_, DshManager>) -> Result<(), String> {
     let mut state = manager.process.lock().map_err(|_| lock_error())?;
-    state.generation = state.generation.wrapping_add(1);
-    if let Some(mut child) = state.child.take() {
+    if let Some(child) = state.child.as_mut() {
         child
             .kill()
             .map_err(|error| format!("failed to stop DSH: {error}"))?;
         let _ = child.wait();
     }
+    state.generation = state.generation.wrapping_add(1);
+    state.child = None;
     state.url = None;
     drop(state);
     let _ = app.emit(

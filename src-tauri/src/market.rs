@@ -614,7 +614,17 @@ pub fn fetch_model_profile(
 }
 
 #[tauri::command]
-pub fn search_pi_models(
+pub async fn search_pi_models(
+    app: tauri::AppHandle,
+    request: ModelSearchRequest,
+) -> Result<Vec<PiModelSummary>, String> {
+    use tauri::Manager;
+    tauri::async_runtime::spawn_blocking(move || search_pi_models_inner(app.state(), request))
+        .await
+        .map_err(|error| format!("model search worker failed: {error}"))?
+}
+
+fn search_pi_models_inner(
     cache: State<'_, ModelCatalogCache>,
     request: ModelSearchRequest,
 ) -> Result<Vec<PiModelSummary>, String> {
@@ -634,12 +644,26 @@ pub fn search_pi_models(
 }
 
 #[tauri::command]
-pub fn pi_model_profile(request: ModelProfileRequest) -> Result<PiModelProfile, String> {
-    fetch_model_profile(&request.path, &request.provider, &request.model_id)
+pub async fn pi_model_profile(request: ModelProfileRequest) -> Result<PiModelProfile, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        fetch_model_profile(&request.path, &request.provider, &request.model_id)
+    })
+    .await
+    .map_err(|error| format!("model profile worker failed: {error}"))?
 }
 
 #[tauri::command]
-pub fn search_pi_packages(
+pub async fn search_pi_packages(
+    app: tauri::AppHandle,
+    request: PackageRequest,
+) -> Result<Vec<PiPackage>, String> {
+    use tauri::Manager;
+    tauri::async_runtime::spawn_blocking(move || search_pi_packages_inner(app.state(), request))
+        .await
+        .map_err(|error| format!("package search worker failed: {error}"))?
+}
+
+fn search_pi_packages_inner(
     cache: State<'_, MarketCache>,
     request: PackageRequest,
 ) -> Result<Vec<PiPackage>, String> {
@@ -653,8 +677,12 @@ pub fn search_pi_packages(
 }
 
 #[tauri::command]
-pub fn pi_package_metadata(request: PackageMetadataRequest) -> Result<PackageMetadata, String> {
-    fetch_package_metadata(&request.name)
+pub async fn pi_package_metadata(
+    request: PackageMetadataRequest,
+) -> Result<PackageMetadata, String> {
+    tauri::async_runtime::spawn_blocking(move || fetch_package_metadata(&request.name))
+        .await
+        .map_err(|error| format!("package metadata worker failed: {error}"))?
 }
 
 #[cfg(test)]

@@ -3,33 +3,150 @@ use std::{
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Condvar, Mutex},
     thread,
     time::Duration,
 };
 
 use base64::{engine::general_purpose::STANDARD, Engine};
-use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
+#[cfg(not(windows))]
+use portable_pty::ChildKiller;
+use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
+use uuid::Uuid;
 
 use crate::{
     app_paths::AppPaths,
     bridge,
+    runtime::RuntimeOperationLock,
+    settings::SettingsStore,
     task::{TaskRecord, TaskStatus, TaskStore},
 };
 
 const MAX_TERMINAL_DIMENSION: u16 = 1_000;
 
 struct PtyTask {
-    master: Box<dyn MasterPty + Send>,
+    master: Option<Box<dyn MasterPty + Send>>,
     writer: Box<dyn Write + Send>,
+    #[cfg(not(windows))]
     killer: Box<dyn ChildKiller + Send + Sync>,
+    #[cfg(windows)]
+    process: std::os::windows::io::OwnedHandle,
+    gate: Arc<OutputGate>,
+}
+
+impl PtyTask {
+    fn kill(&mut self) -> Result<(), String> {
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::System::Threading::{GetExitCodeProcess, TerminateProcess};
+            let handle = self.process.as_raw_handle();
+            if unsafe { TerminateProcess(handle, 1) } == 0 {
+                let error = std::io::Error::last_os_error();
+                let mut status = 259_u32;
+                if unsafe { GetExitCodeProcess(handle, &mut status) } == 0 || status == 259 {
+                    return Err(format!("failed to stop Pi: {error}"));
+                }
+            }
+            Ok(())
+        }
+        #[cfg(not(windows))]
+        self.killer.kill().map_err(|error| error.to_string())
+    }
+}
+
+#[cfg(windows)]
+fn owned_process(
+    child: &dyn portable_pty::Child,
+) -> Result<std::os::windows::io::OwnedHandle, String> {
+    use std::os::windows::io::BorrowedHandle;
+    let raw = child
+        .as_raw_handle()
+        .ok_or("PTY child process handle is unavailable")?;
+    // The child owns this handle throughout the duplication.
+    unsafe { BorrowedHandle::borrow_raw(raw) }
+        .try_clone_to_owned()
+        .map_err(|error| error.to_string())
+}
+
+struct OutputGate {
+    run_id: String,
+    ready: Mutex<bool>,
+    changed: Condvar,
+}
+
+impl OutputGate {
+    fn new(run_id: String) -> Self {
+        Self {
+            run_id,
+            ready: Mutex::new(false),
+            changed: Condvar::new(),
+        }
+    }
+
+    fn acknowledge(&self, run_id: &str) -> bool {
+        if self.run_id != run_id {
+            return false;
+        }
+        let Ok(mut ready) = self.ready.lock() else {
+            return false;
+        };
+        *ready = true;
+        self.changed.notify_all();
+        true
+    }
+
+    fn wait(&self, timeout: Duration) -> bool {
+        self.ready
+            .lock()
+            .ok()
+            .and_then(|ready| {
+                self.changed
+                    .wait_timeout_while(ready, timeout, |ready| !*ready)
+                    .ok()
+            })
+            .is_some_and(|(ready, _)| *ready)
+    }
 }
 
 #[derive(Default)]
 pub struct PtyManager {
     tasks: Mutex<HashMap<String, PtyTask>>,
+}
+
+impl PtyManager {
+    pub(crate) fn is_running(&self) -> Result<bool, String> {
+        Ok(!self.tasks.lock().map_err(|_| lock_error())?.is_empty())
+    }
+
+    pub(crate) fn attach_run_ids(&self, records: &mut [TaskRecord]) -> Result<(), String> {
+        let tasks = self.tasks.lock().map_err(|_| lock_error())?;
+        for record in records {
+            record.run_id = tasks.get(&record.id).map(|task| task.gate.run_id.clone());
+        }
+        Ok(())
+    }
+
+    fn finish_run(
+        &self,
+        store: &TaskStore,
+        task_id: &str,
+        run_id: &str,
+        status: TaskStatus,
+    ) -> Result<bool, String> {
+        let mut tasks = self.tasks.lock().map_err(|_| lock_error())?;
+        if !tasks
+            .get(task_id)
+            .is_some_and(|task| task.gate.run_id == run_id)
+        {
+            return Ok(false);
+        }
+        store.finish_if_active(task_id, status)?;
+        tasks.remove(task_id);
+        Ok(true)
+    }
 }
 
 #[derive(Deserialize)]
@@ -53,6 +170,7 @@ pub struct RestartPiTaskRequest {
 #[serde(rename_all = "camelCase")]
 struct PtyOutput {
     task_id: String,
+    run_id: String,
     data: String,
 }
 
@@ -60,6 +178,7 @@ struct PtyOutput {
 #[serde(rename_all = "camelCase")]
 struct PtyExit {
     task_id: String,
+    run_id: String,
     exit_code: Option<u32>,
     error: Option<String>,
 }
@@ -68,6 +187,7 @@ struct PtyExit {
 #[serde(rename_all = "camelCase")]
 struct TaskStatusUpdate {
     task_id: String,
+    run_id: String,
     status: TaskStatus,
 }
 
@@ -121,9 +241,15 @@ pub fn start_pi_task(
     manager: State<'_, PtyManager>,
     store: State<'_, TaskStore>,
     paths: State<'_, AppPaths>,
+    lifecycle: State<'_, RuntimeOperationLock>,
+    settings: State<'_, SettingsStore>,
     request: StartPiTaskRequest,
 ) -> Result<TaskRecord, String> {
-    let record = store.create_pi_task_for_project(&request.project_id, &request.title)?;
+    let _lifecycle = lifecycle.acquire()?;
+    crate::snapshot::Snapshot::ensure_ready(&paths.backups)?;
+    ensure_capacity(&manager, &settings)?;
+    let mut record = store.create_pi_task_for_project(&request.project_id, &request.title)?;
+    record.run_id = Some(Uuid::new_v4().to_string());
     if let Err(error) = launch_pi(app, &manager, &paths, &record, request.rows, request.cols) {
         let _ = store.finish_if_active(&record.id, TaskStatus::Failed);
         return Err(error);
@@ -137,8 +263,13 @@ pub fn restart_pi_task(
     manager: State<'_, PtyManager>,
     store: State<'_, TaskStore>,
     paths: State<'_, AppPaths>,
+    lifecycle: State<'_, RuntimeOperationLock>,
+    settings: State<'_, SettingsStore>,
     request: RestartPiTaskRequest,
 ) -> Result<TaskRecord, String> {
+    let _lifecycle = lifecycle.acquire()?;
+    crate::snapshot::Snapshot::ensure_ready(&paths.backups)?;
+    ensure_capacity(&manager, &settings)?;
     if manager
         .tasks
         .lock()
@@ -147,12 +278,36 @@ pub fn restart_pi_task(
     {
         return Err("Pi task is already running".into());
     }
-    let record = store.restart(&request.task_id)?;
+    let mut record = store.restart(&request.task_id)?;
+    record.run_id = Some(Uuid::new_v4().to_string());
     if let Err(error) = launch_pi(app, &manager, &paths, &record, request.rows, request.cols) {
         let _ = store.finish_if_active(&record.id, TaskStatus::Failed);
         return Err(error);
     }
     Ok(record)
+}
+
+fn ensure_capacity(manager: &PtyManager, settings: &SettingsStore) -> Result<(), String> {
+    if manager.tasks.lock().map_err(|_| lock_error())?.len()
+        >= usize::from(settings.get()?.max_concurrent_tasks)
+    {
+        return Err("maximum concurrent Pi tasks reached".into());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn acknowledge_pi_output(
+    manager: State<'_, PtyManager>,
+    task_id: String,
+    run_id: String,
+) -> Result<(), String> {
+    let tasks = manager.tasks.lock().map_err(|_| lock_error())?;
+    let task = tasks.get(&task_id).ok_or("Pi task was not found")?;
+    if !task.gate.acknowledge(&run_id) {
+        return Err("Pi run is no longer current".into());
+    }
+    Ok(())
 }
 
 fn launch_pi(
@@ -163,6 +318,7 @@ fn launch_pi(
     rows: u16,
     cols: u16,
 ) -> Result<(), String> {
+    let run_id = record.run_id.clone().ok_or("Pi run id is missing")?;
     let cwd = PathBuf::from(&record.project_path);
     if !cwd.is_dir() {
         return Err("task working directory does not exist".into());
@@ -171,7 +327,7 @@ fn launch_pi(
         .openpty(normalize_size(rows, cols)?)
         .map_err(|error| format!("failed to create PTY: {error}"))?;
 
-    let mut command = if let Some(pi_cli) = paths.pi_cli() {
+    let mut command = if let Some(pi_cli) = paths.pi_cli()? {
         let mut command = CommandBuilder::new(paths.node_executable());
         command.arg(pi_cli);
         command
@@ -183,19 +339,14 @@ fn launch_pi(
     command.args(["--session-id", &record.session_id, "--name", &record.title]);
     command.env("PI_CODING_AGENT_DIR", &paths.pi_home);
     command.env("DEEPPI_TASK_ID", &record.id);
-    let state_file = bridge::state_file(paths, &record.id)?;
-    let pipe_name = bridge::pipe_name(paths, &record.id)?;
+    let state_file = bridge::state_file(paths, &run_id)?;
+    let pipe_name = bridge::pipe_name(paths, &run_id)?;
     let _ = fs::remove_file(&state_file);
     command.env("DEEPPI_STATE_FILE", &state_file);
     #[cfg(windows)]
     command.env("DEEPPI_BRIDGE_PIPE", &pipe_name);
     command.cwd(cwd);
 
-    let mut child = pair
-        .slave
-        .spawn_command(command)
-        .map_err(|error| format!("failed to start Pi: {error}"))?;
-    let killer = child.clone_killer();
     let mut reader = pair
         .master
         .try_clone_reader()
@@ -205,22 +356,58 @@ fn launch_pi(
         .take_writer()
         .map_err(|error| format!("failed to write PTY: {error}"))?;
 
-    manager.tasks.lock().map_err(|_| lock_error())?.insert(
+    let mut tasks = manager.tasks.lock().map_err(|_| lock_error())?;
+    let mut child = pair
+        .slave
+        .spawn_command(command)
+        .map_err(|error| format!("failed to start Pi: {error}"))?;
+    #[cfg(not(windows))]
+    let killer = child.clone_killer();
+    #[cfg(windows)]
+    let process = match owned_process(child.as_ref()) {
+        Ok(process) => process,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+    };
+    let gate = Arc::new(OutputGate::new(run_id.clone()));
+    tasks.insert(
         record.id.clone(),
         PtyTask {
-            master: pair.master,
+            master: Some(pair.master),
             writer,
+            #[cfg(not(windows))]
             killer,
+            #[cfg(windows)]
+            process,
+            gate: gate.clone(),
         },
     );
+    drop(tasks);
 
-    watch_bridge_status(app.clone(), record.id.clone(), state_file);
+    watch_bridge_status(app.clone(), record.id.clone(), run_id.clone(), state_file);
     #[cfg(windows)]
-    watch_bridge_pipe(app.clone(), record.id.clone(), pipe_name);
+    watch_bridge_pipe(app.clone(), record.id.clone(), run_id.clone(), pipe_name);
 
     let output_app = app.clone();
     let output_task_id = record.id.clone();
-    thread::spawn(move || {
+    let output_run_id = run_id.clone();
+    let output_thread = thread::spawn(move || {
+        if !gate.wait(Duration::from_secs(30)) {
+            if let Some(manager) = output_app.try_state::<PtyManager>() {
+                if let Ok(mut tasks) = manager.tasks.lock() {
+                    if let Some(task) = tasks
+                        .get_mut(&output_task_id)
+                        .filter(|task| task.gate.run_id == output_run_id)
+                    {
+                        let _ = task.kill();
+                    }
+                }
+            }
+            return Some("terminal did not acknowledge its output subscription".to_string());
+        }
         let mut buffer = [0_u8; 8 * 1024];
         loop {
             match reader.read(&mut buffer) {
@@ -228,6 +415,7 @@ fn launch_pi(
                 Ok(read) => {
                     let payload = PtyOutput {
                         task_id: output_task_id.clone(),
+                        run_id: output_run_id.clone(),
                         data: STANDARD.encode(&buffer[..read]),
                     };
                     if output_app.emit("pty-output", payload).is_err() {
@@ -235,77 +423,104 @@ fn launch_pi(
                     }
                 }
                 Err(error) => {
-                    let _ = output_app.emit(
-                        "pty-exit",
-                        PtyExit {
-                            task_id: output_task_id.clone(),
-                            exit_code: None,
-                            error: Some(format!("PTY read failed: {error}")),
-                        },
-                    );
-                    break;
+                    return Some(format!("PTY read failed: {error}"));
                 }
             }
         }
+        None
     });
 
     let exit_app = app;
     let exit_task_id = record.id.clone();
     thread::spawn(move || {
         let result = child.wait();
-        if let Some(state) = exit_app.try_state::<PtyManager>() {
-            if let Ok(mut tasks) = state.tasks.lock() {
-                tasks.remove(&exit_task_id);
-            }
-        }
-        let (exit_code, error) = match result {
+        let console = exit_app.try_state::<PtyManager>().and_then(|state| {
+            state
+                .tasks
+                .lock()
+                .ok()?
+                .get_mut(&exit_task_id)
+                .filter(|task| task.gate.run_id == run_id)
+                .and_then(|task| task.master.take())
+        });
+        // ClosePseudoConsole may wait for the reader, so never hold the task-map lock here.
+        drop(console);
+        let output_error = output_thread
+            .join()
+            .unwrap_or_else(|_| Some("PTY reader panicked".into()));
+        let (exit_code, mut error) = match result {
             Ok(status) => (Some(status.exit_code()), None),
             Err(error) => (None, Some(format!("failed to wait for Pi: {error}"))),
         };
+        error = error.or(output_error);
         let final_status = if error.is_none() && exit_code == Some(0) {
             TaskStatus::Completed
         } else {
             TaskStatus::Failed
         };
-        if let Some(store) = exit_app.try_state::<TaskStore>() {
-            let _ = store.finish_if_active(&exit_task_id, final_status);
+        if let (Some(state), Some(store)) = (
+            exit_app.try_state::<PtyManager>(),
+            exit_app.try_state::<TaskStore>(),
+        ) {
+            match state.finish_run(&store, &exit_task_id, &run_id, final_status) {
+                Ok(true) => {
+                    let _ = exit_app.emit(
+                        "pty-exit",
+                        PtyExit {
+                            task_id: exit_task_id,
+                            run_id,
+                            exit_code,
+                            error,
+                        },
+                    );
+                }
+                Err(error) => log::error!("event=pty_finish task={} error={}", exit_task_id, error),
+                Ok(false) => {}
+            }
         }
-        let _ = exit_app.emit(
-            "pty-exit",
-            PtyExit {
-                task_id: exit_task_id,
-                exit_code,
-                error,
-            },
-        );
     });
     Ok(())
 }
 
-fn task_is_active(app: &AppHandle, task_id: &str) -> bool {
+fn task_is_active(app: &AppHandle, task_id: &str, run_id: &str) -> bool {
     app.try_state::<PtyManager>().is_some_and(|manager| {
-        manager
-            .tasks
-            .lock()
-            .is_ok_and(|tasks| tasks.contains_key(task_id))
+        manager.tasks.lock().is_ok_and(|tasks| {
+            tasks
+                .get(task_id)
+                .is_some_and(|task| task.gate.run_id == run_id)
+        })
     })
 }
 
 fn apply_bridge_status(
     app: &AppHandle,
     task_id: &str,
+    run_id: &str,
     status: TaskStatus,
     last_status: &mut Option<TaskStatus>,
 ) {
     if Some(status) == *last_status {
         return;
     }
+    let Some(manager) = app.try_state::<PtyManager>() else {
+        return;
+    };
+    let Ok(tasks) = manager.tasks.lock() else {
+        return;
+    };
+    if !tasks
+        .get(task_id)
+        .is_some_and(|task| task.gate.run_id == run_id)
+    {
+        return;
+    }
     if let Some(store) = app.try_state::<TaskStore>() {
-        if store.set_active_status(task_id, status).is_ok() {
+        if store.set_active_status(task_id, status) == Ok(true) {
             let _ = app.emit(
                 "task-status",
                 TaskStatusUpdate {
                     task_id: task_id.to_owned(),
+                    run_id: run_id.to_owned(),
                     status,
                 },
             );
@@ -314,18 +529,18 @@ fn apply_bridge_status(
     }
 }
 
-fn watch_bridge_status(app: AppHandle, task_id: String, state_file: PathBuf) {
+fn watch_bridge_status(app: AppHandle, task_id: String, run_id: String, state_file: PathBuf) {
     thread::spawn(move || {
         let mut last_status = None;
         loop {
-            if !task_is_active(&app, &task_id) {
+            if !task_is_active(&app, &task_id, &run_id) {
                 break;
             }
             if let Some(status) = fs::read_to_string(&state_file)
                 .ok()
                 .and_then(|value| parse_bridge_status(&value))
             {
-                apply_bridge_status(&app, &task_id, status, &mut last_status);
+                apply_bridge_status(&app, &task_id, &run_id, status, &mut last_status);
             }
             thread::sleep(Duration::from_millis(200));
         }
@@ -334,7 +549,7 @@ fn watch_bridge_status(app: AppHandle, task_id: String, state_file: PathBuf) {
 }
 
 #[cfg(windows)]
-fn watch_bridge_pipe(app: AppHandle, task_id: String, pipe_name: String) {
+fn watch_bridge_pipe(app: AppHandle, task_id: String, run_id: String, pipe_name: String) {
     thread::spawn(move || {
         use std::{
             ffi::OsStr,
@@ -358,7 +573,7 @@ fn watch_bridge_pipe(app: AppHandle, task_id: String, pipe_name: String) {
             .chain(Some(0))
             .collect::<Vec<_>>();
         let mut last_status = None;
-        while task_is_active(&app, &task_id) {
+        while task_is_active(&app, &task_id, &run_id) {
             let pipe = unsafe {
                 CreateNamedPipeW(
                     wide_name.as_ptr(),
@@ -377,7 +592,7 @@ fn watch_bridge_pipe(app: AppHandle, task_id: String, pipe_name: String) {
             }
 
             let connected = loop {
-                if !task_is_active(&app, &task_id) {
+                if !task_is_active(&app, &task_id, &run_id) {
                     unsafe { CloseHandle(pipe) };
                     return;
                 }
@@ -400,7 +615,13 @@ fn watch_bridge_pipe(app: AppHandle, task_id: String, pipe_name: String) {
 
             let mut buffer = [0_u8; 128];
             let mut read = 0_u32;
+            let started = std::time::Instant::now();
             loop {
+                if !task_is_active(&app, &task_id, &run_id)
+                    || started.elapsed() > Duration::from_secs(1)
+                {
+                    break;
+                }
                 if unsafe {
                     ReadFile(
                         pipe,
@@ -422,7 +643,7 @@ fn watch_bridge_pipe(app: AppHandle, task_id: String, pipe_name: String) {
                 if let Some(status) =
                     parse_bridge_status(&String::from_utf8_lossy(&buffer[..read as usize]))
                 {
-                    apply_bridge_status(&app, &task_id, status, &mut last_status);
+                    apply_bridge_status(&app, &task_id, &run_id, status, &mut last_status);
                 }
             }
             unsafe {
@@ -466,6 +687,8 @@ pub fn resize_pi_task(
         .get(&task_id)
         .ok_or_else(|| "Pi task was not found".to_string())?;
     task.master
+        .as_ref()
+        .ok_or("Pi task is exiting")?
         .resize(size)
         .map_err(|error| format!("failed to resize Pi: {error}"))
 }
@@ -480,10 +703,8 @@ pub fn stop_pi_task(
     let task = tasks
         .get_mut(&task_id)
         .ok_or_else(|| "Pi task was not found".to_string())?;
-    task.killer
-        .kill()
-        .map_err(|error| format!("failed to stop Pi: {error}"))?;
-    tasks.remove(&task_id);
+    task.kill()?;
+    task.gate.acknowledge(&task.gate.run_id);
     store.set_status(&task_id, TaskStatus::Cancelled)
 }
 
@@ -493,15 +714,14 @@ pub fn stop_all_pi_tasks(
     store: State<'_, TaskStore>,
 ) -> Result<(), String> {
     let mut tasks = manager.tasks.lock().map_err(|_| lock_error())?;
-    let running = tasks.drain().collect::<Vec<_>>();
-    drop(tasks);
     let mut errors = Vec::new();
-    for (task_id, mut task) in running {
-        if let Err(error) = task.killer.kill() {
+    for (task_id, task) in tasks.iter_mut() {
+        if let Err(error) = task.kill() {
             errors.push(format!("{task_id}: {error}"));
             continue;
         }
-        if let Err(error) = store.set_status(&task_id, TaskStatus::Cancelled) {
+        task.gate.acknowledge(&task.gate.run_id);
+        if let Err(error) = store.set_status(task_id, TaskStatus::Cancelled) {
             errors.push(format!("{task_id}: {error}"));
         }
     }
@@ -519,7 +739,8 @@ impl Drop for PtyManager {
     fn drop(&mut self) {
         if let Ok(mut tasks) = self.tasks.lock() {
             for task in tasks.values_mut() {
-                let _ = task.killer.kill();
+                task.gate.acknowledge(&task.gate.run_id);
+                let _ = task.kill();
             }
         }
     }
@@ -536,6 +757,117 @@ mod tests {
         terminal_input_bytes, PtyManager, PtyTask,
     };
     use crate::task::TaskStatus;
+
+    #[test]
+    fn rejects_output_acknowledgement_from_an_old_run() {
+        let gate = super::OutputGate::new("new-run".into());
+        assert!(!gate.acknowledge("old-run"));
+        assert!(gate.acknowledge("new-run"));
+        assert!(gate.wait(Duration::from_millis(1)));
+    }
+
+    #[test]
+    fn output_wait_is_bounded_when_frontend_never_subscribes() {
+        let gate = super::OutputGate::new("run".into());
+        assert!(!gate.wait(Duration::from_millis(1)));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn old_exit_cannot_remove_or_finish_the_new_run() {
+        let store = crate::task::TaskStore::in_memory().unwrap();
+        let record = store.create_pi_task("new", ".").unwrap();
+        let pair = native_pty_system()
+            .openpty(normalize_size(24, 80).unwrap())
+            .unwrap();
+        let mut command = CommandBuilder::new("powershell.exe");
+        command.args(["-NoProfile", "-Command", "Start-Sleep -Seconds 30"]);
+        let mut child = pair.slave.spawn_command(command).unwrap();
+        let process = super::owned_process(child.as_ref()).unwrap();
+        let manager = PtyManager {
+            tasks: Mutex::new(HashMap::from([(
+                record.id.clone(),
+                PtyTask {
+                    writer: pair.master.take_writer().unwrap(),
+                    master: Some(pair.master),
+                    process,
+                    gate: std::sync::Arc::new(super::OutputGate::new("new-run".into())),
+                },
+            )])),
+        };
+        assert!(!manager
+            .finish_run(&store, &record.id, "old-run", TaskStatus::Completed)
+            .unwrap());
+        assert!(manager.is_running().unwrap());
+        assert_eq!(
+            store.get(&record.id).unwrap().unwrap().status,
+            TaskStatus::Running
+        );
+        let mut records = store.list().unwrap();
+        manager.attach_run_ids(&mut records).unwrap();
+        assert_eq!(records[0].run_id.as_deref(), Some("new-run"));
+        drop(manager);
+        child.wait().unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn closing_console_drains_output_after_an_immediate_exit() {
+        use std::io::{Read, Write};
+        let pair = native_pty_system()
+            .openpty(normalize_size(24, 80).unwrap())
+            .unwrap();
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let mut writer = pair.master.take_writer().unwrap();
+        let mut command = CommandBuilder::new("powershell.exe");
+        command.args([
+            "-NoProfile",
+            "-Command",
+            "[Console]::Write('ready'); exit 0",
+        ]);
+        let mut child = pair.slave.spawn_command(command).unwrap();
+        drop(pair.slave);
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let output = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            while let Ok(read) = reader.read(&mut buffer) {
+                if read == 0 {
+                    break;
+                }
+                let scan_start = bytes.len().saturating_sub(3);
+                bytes.extend_from_slice(&buffer[..read]);
+                // ConPTY requests a cursor position before allowing the child to write.
+                if bytes[scan_start..]
+                    .windows(4)
+                    .any(|value| value == b"\x1b[6n")
+                {
+                    writer.write_all(b"\x1b[1;1R").unwrap();
+                    writer.flush().unwrap();
+                }
+            }
+            sender.send(bytes).unwrap();
+        });
+        let exited = (0..200).any(|_| {
+            if child.try_wait().unwrap().is_some() {
+                true
+            } else {
+                thread::sleep(Duration::from_millis(25));
+                false
+            }
+        });
+        if !exited {
+            let _ = child.kill();
+        }
+        drop(pair.master);
+        let bytes = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            exited,
+            "child did not complete after terminal cursor response"
+        );
+        assert!(String::from_utf8_lossy(&bytes).contains("ready"));
+        output.join().unwrap();
+    }
 
     #[test]
     fn preserves_unicode_terminal_input_as_utf8() {
@@ -569,7 +901,7 @@ mod tests {
             .slave
             .spawn_command(command)
             .expect("test child should start");
-        let killer = child.clone_killer();
+        let process = super::owned_process(child.as_ref()).unwrap();
         let writer = pair
             .master
             .take_writer()
@@ -578,9 +910,10 @@ mod tests {
             tasks: Mutex::new(HashMap::from([(
                 "drop-test".to_string(),
                 PtyTask {
-                    master: pair.master,
+                    master: Some(pair.master),
                     writer,
-                    killer,
+                    process,
+                    gate: std::sync::Arc::new(super::OutputGate::new("test-run".into())),
                 },
             )])),
         };

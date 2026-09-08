@@ -66,6 +66,7 @@ impl FromStr for TaskStatus {
 #[serde(rename_all = "camelCase")]
 pub struct TaskRecord {
     pub id: String,
+    pub run_id: Option<String>,
     pub title: String,
     pub agent: String,
     pub status: TaskStatus,
@@ -118,7 +119,7 @@ impl TaskStore {
     }
 
     #[cfg(test)]
-    fn in_memory() -> Result<Self, String> {
+    pub(crate) fn in_memory() -> Result<Self, String> {
         let store = Self {
             connection: Mutex::new(
                 Connection::open_in_memory()
@@ -574,7 +575,7 @@ impl TaskStore {
         ensure_updated(affected)
     }
 
-    pub fn set_active_status(&self, id: &str, status: TaskStatus) -> Result<(), String> {
+    pub fn set_active_status(&self, id: &str, status: TaskStatus) -> Result<bool, String> {
         if !matches!(status, TaskStatus::Running | TaskStatus::Waiting) {
             return Err("bridge status must be running or waiting".into());
         }
@@ -586,7 +587,7 @@ impl TaskStore {
                  WHERE id = ?2 AND status IN ('queued', 'running', 'waiting')",
                 params![status.as_str(), id],
             )
-            .map(|_| ())
+            .map(|affected| affected > 0)
             .map_err(|error| format!("failed to update active task status: {error}"))
     }
 
@@ -751,6 +752,7 @@ fn task_from_row(row: &Row<'_>) -> rusqlite::Result<TaskRecord> {
     let status: String = row.get(3)?;
     Ok(TaskRecord {
         id: row.get(0)?,
+        run_id: None,
         title: row.get(1)?,
         agent: row.get(2)?,
         status: TaskStatus::from_str(&status).map_err(|error| {
@@ -804,8 +806,13 @@ pub fn touch_project(store: State<'_, TaskStore>, project_id: String) -> Result<
 }
 
 #[tauri::command]
-pub fn list_tasks(store: State<'_, TaskStore>) -> Result<Vec<TaskRecord>, String> {
-    store.list()
+pub fn list_tasks(
+    store: State<'_, TaskStore>,
+    manager: State<'_, crate::pty::PtyManager>,
+) -> Result<Vec<TaskRecord>, String> {
+    let mut records = store.list()?;
+    manager.attach_run_ids(&mut records)?;
+    Ok(records)
 }
 
 #[tauri::command]

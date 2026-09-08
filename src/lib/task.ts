@@ -7,6 +7,7 @@ export type TaskStatus =
 
 export interface Task {
   id: string;
+  runId?: string | null;
   title: string;
   agent: "pi" | "dsh";
   status: TaskStatus;

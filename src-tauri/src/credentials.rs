@@ -154,7 +154,19 @@ pub fn delete_provider_credential(request: ProviderCredentialRequest) -> Result<
 }
 
 #[tauri::command]
-pub fn test_provider_connection(
+pub async fn test_provider_connection(
+    app: tauri::AppHandle,
+    request: ProviderCredentialRequest,
+) -> Result<ProviderConnectionResult, String> {
+    use tauri::Manager;
+    tauri::async_runtime::spawn_blocking(move || {
+        test_provider_connection_inner(app.state(), request)
+    })
+    .await
+    .map_err(|error| format!("provider connection worker failed: {error}"))?
+}
+
+fn test_provider_connection_inner(
     paths: State<'_, AppPaths>,
     request: ProviderCredentialRequest,
 ) -> Result<ProviderConnectionResult, String> {

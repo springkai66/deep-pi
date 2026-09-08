@@ -62,36 +62,44 @@ impl AppPaths {
         }
     }
 
-    pub fn managed_pi_runtime(&self) -> PathBuf {
-        self.runtimes.join("pi").join("current")
+    pub fn managed_pi_runtime(&self) -> Result<PathBuf, String> {
+        crate::runtime_pointer::current(&self.runtimes.join("pi"))
     }
 
-    pub fn pi_cli(&self) -> Option<PathBuf> {
+    pub fn pi_cli(&self) -> Result<Option<PathBuf>, String> {
         let cli = self
-            .managed_pi_runtime()
+            .managed_pi_runtime()?
             .join("node_modules")
             .join("@earendil-works")
             .join("pi-coding-agent")
             .join("dist")
             .join("bundle")
             .join("cli.js");
-        cli.is_file().then_some(cli)
+        if cli.is_file() {
+            Ok(Some(cli))
+        } else if self.runtimes.join("pi/active.json").exists() {
+            Err("active Pi runtime has no executable entry".into())
+        } else {
+            Ok(None)
+        }
     }
 
-    pub fn managed_dsh_runtime(&self) -> PathBuf {
-        self.runtimes.join("dsh").join("current")
+    pub fn managed_dsh_runtime(&self) -> Result<PathBuf, String> {
+        crate::runtime_pointer::current(&self.runtimes.join("dsh"))
     }
 
     pub fn development_dsh_runtime(&self) -> PathBuf {
         self.project_root.join(".deeppi-runtime").join("dsh")
     }
 
-    pub fn dsh_runtime(&self) -> PathBuf {
-        let managed = self.managed_dsh_runtime();
+    pub fn dsh_runtime(&self) -> Result<PathBuf, String> {
+        let managed = self.managed_dsh_runtime()?;
         if Self::dsh_cli_path(&managed).is_file() {
-            managed
+            Ok(managed)
+        } else if self.runtimes.join("dsh/active.json").exists() {
+            Err("active DSH runtime has no executable entry".into())
         } else {
-            self.development_dsh_runtime()
+            Ok(self.development_dsh_runtime())
         }
     }
 
@@ -180,7 +188,7 @@ mod tests {
         std::fs::write(&pi, "").expect("Pi marker should be written");
 
         assert_eq!(paths.node_executable(), node);
-        assert_eq!(paths.pi_cli(), Some(pi));
+        assert_eq!(paths.pi_cli().unwrap(), Some(pi));
 
         std::fs::remove_dir_all(root).expect("test paths should be removed");
     }
