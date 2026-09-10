@@ -23,3 +23,6 @@ vite.config.ts.timestamp-*
 /static/svelte.svg
 /static/tauri.svg
 /static/vite.svg
+
+# pi goal state is local agent data, not part of the source distribution
+/.pi
