@@ -1,7 +1,11 @@
 <script lang="ts">
   import { createDialogQueue } from "$lib/dialog";
+  import { createWindowCloseHandler } from "$lib/window-close";
+  import { loadAppStartup } from "$lib/startup";
+  let gitIndexBusy = $state(false);
   import { createOperationRunner, type OperationState } from "$lib/operation";
-  import { invoke } from "@tauri-apps/api/core";
+  import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
+  import { createProjectWatch, type ProjectWatchEvent } from "$lib/project-watch";
   import { listen } from "@tauri-apps/api/event";
   import { open } from "@tauri-apps/plugin-dialog";
   import { LogicalPosition, LogicalSize } from "@tauri-apps/api/dpi";
@@ -15,8 +19,22 @@
     PanelTop,
     Plus,
     RotateCcw,
+    Settings2,
+    Globe,
+    GitBranch,
   } from "@lucide/svelte";
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
+  import AppMenu from "$lib/AppMenu.svelte";
+  import FileSidebar from "$lib/FileSidebar.svelte";
+  import { createFileWorkspace, type FileDocument, type FileSaveResult } from "$lib/file-workspace";
+  import type { FilePreview } from "$lib/files";
+  import GitSidebar from "$lib/GitSidebar.svelte";
+  import GitDiffView from "$lib/GitDiffView.svelte";
+  import type { GitDiffSelection } from "$lib/git-diff";
+  import type { GitDiffArea } from "$lib/git-status";
+  import ChatPane from "$lib/ChatPane.svelte";
+  import { hostCommandEnabled, hostShortcutDecision, shortcutLabel, shortcutAria, type HostCommand, type HostShortcutContext } from "$lib/shortcuts";
+  import { createTaskModeSwitcher, type InteractionMode } from "$lib/task-mode";
   import AppDialog from "$lib/AppDialog.svelte";
   import { checkAppUpdate, installAppUpdate, type AppUpdateState, type Update } from "$lib/app-update";
   import type { DialogRequest, DialogValue } from "$lib/dialog";
@@ -24,9 +42,10 @@
   import PiMarketplace from "$lib/PiMarketplace.svelte";
   import PiProviderSettings from "$lib/PiProviderSettings.svelte";
   import PiSettings from "$lib/PiSettings.svelte";
+  import type { SettingsCategory } from "$lib/settings-navigation";
+  import { createSettingsSaver } from "$lib/settings-save";
   import TaskSidebar from "$lib/TaskSidebar.svelte";
   import TaskTabs from "$lib/TaskTabs.svelte";
-  import TerminalPane from "$lib/TerminalPane.svelte";
   import type { RuntimeComponent, RuntimeUpdate } from "$lib/runtime";
   import {
     DEFAULT_APP_SETTINGS,
@@ -72,23 +91,251 @@
   });
   let pendingAppUpdate: Update | null = null;
   let settings = $state<AppSettings>({ ...DEFAULT_APP_SETTINGS });
+  let settingsSaving = $state(false);
+  const settingsSaver = createSettingsSaver(
+    (next) => invoke("save_settings", { settings: next }), showError, (busy) => { settingsSaving = busy; },
+  );
   let terminalTaskIds = $state<string[]>([]);
   let paneTaskIds = $state<string[]>([]);
   let activeTaskId = $state<string | null>(null);
   let selectedProjectId = $state<string | null>(null);
   let isStarting = $state(false);
+  let startupPending = $state(true);
+  let startupFailure = $state("");
+  let pageDisposed = false;
   let errorMessage = $state("");
-  let layout = $state<LayoutMode>("split");
-  let view = $state<"workspace" | "settings" | "market" | "models">("workspace");
+  let layout = $state<LayoutMode>("single");
+  let view = $state<"workspace" | "settings">("workspace");
+  let settingsCategory = $state<SettingsCategory>("general");
+  let diagnosticsBusy = $state(false);
+  let settingsPackageBusy = $state(false);
   let activeAgent = $state<"pi" | "dsh">("pi");
   let isDshStarting = $state(false);
   let dshHostError = $state<string | null>(null);
   let dialogRequest = $state<DialogRequest | null>(null);
   const dialogs = createDialogQueue((request) => { dialogRequest = request; });
-  let isClosing = false;
+  let switchingTasks = $state(new Set<string>());
+  const modeSwitcher = createTaskModeSwitcher({
+    confirm: (task, target) => confirmDialog(
+      target === "rpc" ? "切换到对话模式" : "切换到终端兼容模式",
+      `停止“${task.title}”的当前进程，并使用同一个 Pi 会话继续吗？当前未完成的响应可能中断。`,
+    ),
+    stop: (task) => invoke(task.interactionMode === "rpc" ? "stop_rpc_task" : "stop_pi_run", {
+      taskId: task.id, runId: task.runId,
+    }),
+    restart: (task, mode) => requestTaskRestart(task, mode),
+    busyChanged: (id, busy) => {
+      const next = new Set(switchingTasks);
+      if (busy) next.add(id); else next.delete(id);
+      switchingTasks = next;
+    },
+  });
+  // Assigned through `bind:this` on the workspace element below; oxlint does not
+  // see template bindings, so the assignment is suppressed for this declaration.
+  // eslint-disable-next-line no-unassigned-vars
   let workspace: HTMLElement;
-  let dshWebview: Webview | null = null;
+  let dshWebview = $state.raw<Webview | null>(null);
   let nextTaskNumber = 1;
+  let sidebarVisible = $state(true);
+  let gitVisible = $state(false);
+  const showGit = $derived(gitVisible && activeAgent === "pi" && view === "workspace");
+  let sidebarMode = $state<"tasks" | "files">("tasks");
+  let fileSidebarVisited = $state(false);
+  let fileSearchFocusToken = $state(0);
+  let filesRefreshToken = $state(0);
+  let gitWatchRefreshToken = $state(0);
+  let watchRetry = $state(0);
+  let watchError = $state("");
+  $effect(() => {
+    const projectId = selectedProjectId;
+    void watchRetry;
+    watchError = "";
+    if (!projectId || !isTauri()) return;
+    const watch = createProjectWatch(projectId, {
+      start: (watchId, callback) => {
+        const channel = new Channel<ProjectWatchEvent>();
+        channel.onmessage = callback;
+        return invoke("start_project_watch", { projectId, watchId, channel });
+      },
+      close: (watchId) => invoke("stop_project_watch", { projectId, watchId }),
+      ping: (watchId) => invoke("ping_project_watch", { projectId, watchId }),
+      changed: (files, git) => { if (files) filesRefreshToken++; if (git) gitWatchRefreshToken++; },
+      status: (error) => { watchError = error; },
+    });
+    void watch.start();
+    return () => { void watch.dispose(); };
+  });
+  let composerFocusToken = $state(0);
+  let openedFile = $state<{ projectId: string; path: string; line?: number; column?: number } | null>(null);
+  let fileDocuments = $state.raw<FileDocument[]>([]);
+  let editorModule = $state.raw<Promise<typeof import("$lib/FileEditor.svelte")> | null>(null);
+  let fileEditor = $state<{ save(asNew?: boolean): Promise<void> }>();
+  let closingWindow = $state(false);
+  let recoveryBusy = $state(false);
+  let recoveryProject = $state<{ id: string; name: string } | null>(null);
+  let recoveryModule = $state.raw<Promise<typeof import("$lib/FileRecoveryPanel.svelte")> | null>(null);
+  const fileWorkspace = createFileWorkspace({
+    read: (projectId, relativePath) => invoke<FilePreview>("read_project_file", { projectId, relativePath }),
+    save: (projectId, relativePath, content, expectedVersion) => invoke<FileSaveResult>("save_project_file", { projectId, relativePath, content, expectedVersion }),
+    chooseClose: async (documents) => {
+      const result = await dialogs.request({
+        kind: "choice", title: "未保存的文件",
+        message: documents.map((doc) => `${projects.find((project) => project.id === doc.projectId)?.name ?? doc.projectId} / ${doc.path}`).join("\n"),
+        choices: [{ value: "save", label: "保存后继续" }, { value: "discard", label: "放弃未保存的修改" }],
+      });
+      return result === "save" || result === "discard" ? result : null;
+    },
+    changed: (documents) => { fileDocuments = documents; },
+    saved: (projectId) => { if (projectId === selectedProjectId) filesRefreshToken++; },
+  });
+  const fileSaving = $derived(fileDocuments.some((doc) => doc.saving || doc.locked));
+  let openedDiff = $state<GitDiffSelection | null>(null);
+  const inspectingFile = $derived(!!openedFile || !!openedDiff);
+  let searchFocusToken = $state(0);
+  let menuOpen = $state(false);
+  let dshVisibility = Promise.resolve();
+  const showSidebar = $derived(activeAgent === "pi" && view === "workspace" && sidebarVisible);
+  const activeTask = $derived(tasks.find((task) => task.id === activeTaskId));
+  let terminalModule = $state.raw<Promise<typeof import("$lib/TerminalPane.svelte")> | null>(null);
+  function loadTerminalModule() {
+    terminalModule = import("$lib/TerminalPane.svelte");
+    void terminalModule.catch(() => {});
+  }
+  $effect(() => {
+    if (allTerminalTasks.some((task) => task.interactionMode !== "rpc") && !terminalModule) {
+      loadTerminalModule();
+    }
+  });
+
+  // Serialize visibility requests because native child Webviews cover HTML menus.
+  $effect(() => {
+    const child = dshWebview;
+    const visible = activeAgent === "dsh" && !menuOpen && !dialogRequest && !closingWindow && !recoveryProject;
+    dshVisibility = dshVisibility.then(async () => {
+      if (child) {
+        if (visible) await child.show();
+        else await child.hide();
+      }
+    }).catch((error) => { console.error("DSH visibility:", error); });
+  });
+
+  async function focusTaskSearch() {
+    await showPi();
+    sidebarVisible = true;
+    sidebarMode = "tasks";
+    await tick();
+    searchFocusToken++;
+  }
+
+  async function focusFileSearch() {
+    await showPi();
+    sidebarVisible = true;
+    sidebarMode = "files";
+    fileSidebarVisited = true;
+    await tick();
+    fileSearchFocusToken++;
+  }
+
+  function openFile(path: string, line?: number, column?: number) {
+    openedDiff = null;
+    if (selectedProjectId) {
+      if (!editorModule) editorModule = import("$lib/FileEditor.svelte");
+      openedFile = { projectId: selectedProjectId, path, line, column };
+      void fileWorkspace.open(selectedProjectId, path).catch(showError);
+    }
+  }
+
+  function openGitDiff(path: string, area: GitDiffArea) {
+    if (!selectedProjectId) return;
+    openedFile = null;
+    openedDiff = { projectId: selectedProjectId, path, area };
+    if (window.innerWidth <= 1100) gitVisible = false;
+  }
+
+  function shortcutContext(): HostShortcutContext {
+    const fileId = openedFile ? fileWorkspace.id(openedFile.projectId, openedFile.path) : null;
+    return {
+      pi: activeAgent === "pi", workspace: view === "workspace", rpc: activeTask?.interactionMode === "rpc",
+      fileOpen: !!openedFile, fileReady: !!fileEditor && !!fileId && fileDocuments.some((doc) => doc.id === fileId && !!doc.state),
+      fileBusy: fileSaving, navigationLocked: view === "settings" && (settingsPackageBusy || diagnosticsBusy),
+      modal: !!dialogRequest, recovery: !!recoveryProject, closing: closingWindow,
+    };
+  }
+
+  function runHostCommand(command: HostCommand) {
+    if (!hostCommandEnabled(command, shortcutContext())) return;
+    if (command === "save" || command === "saveAs") { void fileEditor?.save(command === "saveAs"); return; }
+    if (command === "tasks") void focusTaskSearch();
+    else if (command === "files") void focusFileSearch();
+    else if (command === "settings") openSettings();
+    else if (command === "composer") {
+      openedFile = null;
+      openedDiff = null;
+      void tick().then(() => { composerFocusToken++; });
+    }
+    else sidebarVisible = !sidebarVisible;
+  }
+
+  function handleShortcut(event: KeyboardEvent) {
+    if (startupPending || startupFailure) return;
+    const decision = hostShortcutDecision(event, shortcutContext(), menuOpen);
+    if (decision.consume) { event.preventDefault(); event.stopPropagation(); }
+    if (decision.command) runHostCommand(decision.command);
+  }
+
+  function shortcutMenu(command: HostCommand) {
+    return {
+      shortcut: shortcutLabel(command), shortcutAria: shortcutAria(command),
+      disabled: !hostCommandEnabled(command, shortcutContext()), action: () => runHostCommand(command),
+    };
+  }
+
+  const menus = $derived.by(() => [
+    { label: "文件", items: [
+      { label: "打开项目目录…", action: () => void addProject() },
+      { label: "搜索文件", ...shortcutMenu("files") },
+      { label: "恢复副本…", disabled: !selectedProjectId || recoveryBusy, action: () => {
+        const project = projects.find((candidate) => candidate.id === selectedProjectId);
+        if (!project || recoveryBusy || closingWindow) return;
+        recoveryModule ??= import("$lib/FileRecoveryPanel.svelte");
+        recoveryProject = { id: project.id, name: project.name };
+      } },
+      { label: "保存文件", ...shortcutMenu("save") },
+      { label: "文件另存为…", ...shortcutMenu("saveAs") },
+      { label: "新建任务", disabled: !canStart || activeAgent !== "pi", action: () => void startTask() },
+      { label: "新建终端任务", disabled: !canStart || activeAgent !== "pi", action: () => void startTask(selectedProjectId, "tui") },
+    ] },
+    { label: "编辑", items: [
+      { label: "搜索任务", ...shortcutMenu("tasks") },
+      { label: "重命名当前任务…", disabled: !activeTask || activeAgent !== "pi", action: () => { if (activeTask) void renameTask(activeTask); } },
+      { label: "聚焦对话输入", ...shortcutMenu("composer") },
+    ] },
+    { label: "视图", items: [
+      { label: "切换到对话模式", disabled: !activeTask || activeAgent !== "pi" || activeTask.interactionMode === "rpc" || switchingTasks.has(activeTask.id),
+        action: () => { if (activeTask) void switchTaskMode(activeTask, "rpc"); } },
+      { label: "切换到终端兼容模式", disabled: !activeTask || activeAgent !== "pi" || activeTask.interactionMode !== "rpc" || switchingTasks.has(activeTask.id),
+        action: () => { if (activeTask) void switchTaskMode(activeTask, "tui"); } },
+      { label: sidebarVisible ? "隐藏项目侧栏" : "显示项目侧栏", ...shortcutMenu("sidebar") },
+      { label: gitVisible ? "隐藏 Git 变更栏" : "显示 Git 变更栏", disabled: activeAgent !== "pi" || view !== "workspace", action: () => { gitVisible = !gitVisible; } },
+      { label: "Pi 工作区", action: () => void showPi() },
+      { label: "DSH 工作区", action: () => void showDsh() },
+      { label: "单任务布局", disabled: activeAgent !== "pi", action: () => changeLayout("single") },
+      { label: "双列布局", disabled: activeAgent !== "pi", action: () => changeLayout("split") },
+      { label: "网格布局", disabled: activeAgent !== "pi", action: () => changeLayout("grid") },
+    ] },
+    { label: "设置", items: [
+      { label: "应用设置", ...shortcutMenu("settings") },
+      { label: "外观", action: () => openSettingsCategory("appearance") },
+      { label: "模型与凭据", action: () => openSettingsCategory("models") },
+      { label: "运行时与更新", action: () => openSettingsCategory("runtime") },
+      { label: "Pi 扩展", action: () => openSettingsCategory("extensions") },
+      { label: "高级与诊断", action: () => openSettingsCategory("advanced") },
+    ] },
+    { label: "帮助", items: [
+      { label: "检查应用更新", action: () => { openSettingsCategory("runtime"); void checkDeepPiUpdate(); } },
+      { label: "关于 DeepPi", action: () => { void dialogs.request({ kind: "alert", title: "DeepPi", message: "Pi Coding Agent 与 DeepSeek Harness 桌面工作台。", confirmLabel: "关闭" }); } },
+    ] },
+  ]);
 
   const piTasks = $derived(tasks.filter((task) => task.agent === "pi"));
   const selectedProject = $derived(
@@ -108,7 +355,7 @@
   const projectTerminalIds = $derived(terminalTasks.map((task) => task.id));
   const paneCapacity = $derived(layout === "single" ? 1 : layout === "split" ? 2 : 4);
   const canStart = $derived(
-    !isStarting &&
+    !startupPending && !startupFailure && !isStarting && !closingWindow &&
       runningCount < settings.maxConcurrentTasks &&
       selectedProjectId !== null,
   );
@@ -247,30 +494,52 @@
   }
 
   onMount(() => {
-    void checkUpdates();
-    void checkDeepPiUpdate();
-    void Promise.all([
-      invoke<string>("default_working_directory"),
-      invoke<Task[]>("list_tasks"),
-      invoke<Project[]>("list_projects"),
-      invoke<RuntimeComponent[]>("runtime_status"),
-      invoke<AppSettings>("get_settings"),
-    ])
-      .then(([cwd, storedTasks, storedProjects, runtimeStatus, storedSettings]) => {
-        settings = storedSettings;
+    window.addEventListener("keydown", handleShortcut, true);
+    if (!isTauri()) {
+      startupPending = false;
+      return () => {
+        window.removeEventListener("keydown", handleShortcut, true);
+        dialogs.dispose();
+      };
+    }
+    let disposed = false;
+    pageDisposed = false;
+    let nativeReady = false;
+    let updateTimer: ReturnType<typeof setTimeout> | undefined;
+    const initialization = invoke<void>("await_startup").then(() => { nativeReady = true; });
+    const startup = loadAppStartup({
+      settings: async () => { await initialization; return invoke<AppSettings>("get_settings"); },
+      tasks: async () => { await initialization; return invoke<Task[]>("list_tasks"); },
+      projects: async () => { await initialization; return invoke<Project[]>("list_projects"); },
+      runtimes: async () => { await initialization; return invoke<RuntimeComponent[]>("runtime_status"); },
+      applySettings: (value) => { settings = value; },
+      applyRuntimes: (value) => { runtimes = value; },
+      applyWorkspace: (storedTasks, storedProjects, storedSettings) => {
         tasks = storedTasks;
         projects = storedProjects;
-        runtimes = runtimeStatus;
+        terminalTaskIds = storedTasks.filter((task) => task.agent === "pi" && task.runId).map((task) => task.id);
         nextTaskNumber = storedTasks.length + 1;
         selectedProjectId =
           storedProjects.find((project) => project.path === storedSettings.lastProject)?.id ??
           storedProjects[0]?.id ??
           null;
-        if (storedProjects.length === 0) {
-          void cwd;
-        }
-      })
-      .catch(showError);
+      },
+      error: (scope, error) => {
+        if (scope === "workspace") startupFailure = String(error);
+        else errorMessage = String(error);
+      },
+    });
+    void startup.ready.then((ready) => {
+      if (disposed) return;
+      startupPending = false;
+      if (ready) {
+        // Network update checks are optional background work, not a startup dependency.
+        updateTimer = setTimeout(() => {
+          void checkUpdates();
+          void checkDeepPiUpdate();
+        }, 30_000);
+      }
+    });
 
     const systemTheme = window.matchMedia("(prefers-color-scheme: light)");
     const handleSystemThemeChange = () => {
@@ -279,40 +548,27 @@
     systemTheme.addEventListener("change", handleSystemThemeChange);
 
     const appWindow = getCurrentWindow();
-    const closeListener = appWindow.onCloseRequested(async (event) => {
-      if (isClosing) return;
-      event.preventDefault();
-
-      let behavior: CloseBehavior | null = settings.closeBehavior;
-      if (behavior === "ask") {
-        behavior = await closeChoiceDialog();
-        if (!behavior) return;
-        updateSettings({ ...settings, closeBehavior: behavior });
-      }
-      if (behavior === "minimize") {
-        await appWindow.minimize();
-        return;
-      }
-
-      const hasActiveTasks = tasks.some((task) =>
-        ["running", "waiting"].includes(task.status),
-      );
-      if (
-        hasActiveTasks &&
-        !(await confirmDialog("退出 DeepPi", "仍有活动任务，停止任务并退出吗？"))
-      ) {
-        return;
-      }
-      isClosing = true;
-      try {
-        await invoke("stop_all_pi_tasks");
-        await invoke("stop_dsh");
-        await appWindow.destroy();
-      } catch (error) {
-        isClosing = false;
-        showError(error);
-      }
-    });
+    const closeListener = appWindow.onCloseRequested(createWindowCloseHandler({
+      behavior: () => nativeReady ? settings.closeBehavior : "exit",
+      blocked: () => diagnosticsBusy || recoveryBusy || fileWorkspace.busy() || switchingTasks.size > 0 || gitIndexBusy || settingsPackageBusy || busyRuntime !== null,
+      blockedReason: () => diagnosticsBusy ? "诊断操作正在处理，请完成或取消后再关闭窗口" : recoveryBusy || fileWorkspace.busy() ? "项目文件正在处理，请完成后再关闭窗口" : settingsPackageBusy || busyRuntime !== null ? "组件操作正在处理，请完成或取消后再关闭窗口" : gitIndexBusy ? "Git 写入正在处理，请完成后再关闭窗口" : "任务正在切换模式，请完成后再关闭窗口",
+      hasActiveTasks: () => tasks.some((task) => ["running", "waiting"].includes(task.status)),
+      choose: closeChoiceDialog,
+      confirm: () => confirmDialog("退出 DeepPi", "仍有活动任务，停止任务并退出吗？"),
+      remember: (behavior) => updateSettings({ ...settings, closeBehavior: behavior }),
+      minimize: () => appWindow.minimize(),
+      prepareExit: async () => {
+        await settingsSaver.flush();
+        const release = await fileWorkspace.prepareExit();
+        if (!release) return false;
+        closingWindow = true;
+        return () => { closingWindow = false; release(); };
+      },
+      stopPi: () => nativeReady ? invoke("stop_all_pi_tasks") : Promise.resolve(),
+      stopDsh: () => nativeReady ? invoke("stop_dsh") : Promise.resolve(),
+      destroy: () => appWindow.destroy(),
+      error: showError,
+    }));
     const dshTaskListener = listen<Task[]>("dsh-tasks", ({ payload }) => {
       tasks = [...tasks.filter((task) => task.agent !== "dsh"), ...payload];
     });
@@ -328,19 +584,33 @@
     const statusListener = listen<TaskStatusUpdate>("task-status", ({ payload }) => {
       const task = tasks.find((candidate) => candidate.id === payload.taskId);
       if (task && task.runId === payload.runId && ["running", "waiting"].includes(task.status)) {
+        if (task.status === "running" && payload.status !== "running" && task.projectId === selectedProjectId) filesRefreshToken++;
         task.status = payload.status;
+      }
+    });
+    const rpcExitListener = listen<TaskStatusUpdate>("rpc-task-exit", ({ payload }) => {
+      const task = tasks.find((candidate) => candidate.id === payload.taskId);
+      if (task?.runId === payload.runId) {
+        task.status = payload.status;
+        dialogs.cancelScope(`rpc:${task.id}:${task.runId}`);
       }
     });
     const observer = new ResizeObserver(() => void syncDshBounds());
     observer.observe(workspace);
 
     return () => {
+      disposed = true;
+      pageDisposed = true;
+      startup.dispose();
+      clearTimeout(updateTimer);
+      window.removeEventListener("keydown", handleShortcut, true);
       observer.disconnect();
       systemTheme.removeEventListener("change", handleSystemThemeChange);
       void closeListener.then((unlisten) => unlisten());
       void dshTaskListener.then((unlisten) => unlisten());
       void dshStatusListener.then((unlisten) => unlisten());
       void statusListener.then((unlisten) => unlisten());
+      void rpcExitListener.then((unlisten) => unlisten());
       dialogs.dispose();
       void dshWebview?.close();
     };
@@ -379,7 +649,7 @@
 
   function updateSettings(next: AppSettings) {
     settings = next;
-    void invoke("save_settings", { settings: next }).catch(showError);
+    settingsSaver.enqueue(next);
   }
 
   function inputDialog(title: string, message: string, initialValue: string) {
@@ -399,10 +669,12 @@
   }
 
   function selectProject(project: Project) {
+    openedFile = null;
+    openedDiff = null;
     selectedProjectId = project.id;
     settings = { ...settings, lastProject: project.path };
     void invoke("touch_project", { projectId: project.id }).catch(showError);
-    void invoke("save_settings", { settings }).catch(showError);
+    settingsSaver.enqueue(settings);
     applyPaneSelection(
       changePaneCapacity({
         current: paneTaskIds.filter((id) => projectTerminalIds.includes(id)),
@@ -437,6 +709,7 @@
   }
 
   async function removeProject(project: Project) {
+    if (recoveryBusy) { showError("恢复副本正在处理，请完成后再移除项目。"); return; }
     if (
       !(await confirmDialog(
         "移除项目",
@@ -446,9 +719,12 @@
     ) {
       return;
     }
+    if (recoveryBusy || !await fileWorkspace.prepareClose(project.id)) return;
+    if (recoveryBusy) return;
     try {
-      await invoke("remove_project", { projectId: project.id });
+      await fileWorkspace.removeProject(project.id, () => invoke("remove_project", { projectId: project.id }));
       projects = projects.filter((candidate) => candidate.id !== project.id);
+      if (recoveryProject?.id === project.id) recoveryProject = null;
       if (selectedProjectId !== project.id) return;
 
       const nextProject = projects[0];
@@ -458,7 +734,7 @@
         selectedProjectId = null;
         settings = { ...settings, lastProject: null };
         applyPaneSelection({ panes: [], active: null });
-        void invoke("save_settings", { settings }).catch(showError);
+        settingsSaver.enqueue(settings);
       }
     } catch (error) {
       showError(error);
@@ -466,10 +742,14 @@
   }
 
   function openTask(task: Task) {
+    if (!canLeaveSettings()) return;
     if (task.agent === "dsh") {
       void showDsh();
       return;
     }
+    openedFile = null;
+    openedDiff = null;
+    view = "workspace";
     if (task.projectId) {
       const project = projects.find((candidate) => candidate.id === task.projectId);
       if (project && selectedProjectId !== project.id) selectProject(project);
@@ -541,9 +821,11 @@
   }
 
   async function showDsh() {
+    if (!canLeaveSettings()) return;
     if (isDshStarting) return;
     activeAgent = "dsh";
     view = "workspace";
+    await tick();
     if (dshWebview) {
       await dshWebview.show();
       await dshWebview.setFocus();
@@ -564,7 +846,8 @@
         height: Math.max(1, bounds.height),
       });
       dshWebview = await waitForDshWebview();
-      await dshWebview.setFocus();
+      if (activeAgent !== "dsh" || menuOpen || dialogRequest) await dshWebview.hide();
+      else await dshWebview.setFocus();
       await syncDshBounds();
     } catch (error) {
       activeAgent = "pi";
@@ -576,36 +859,41 @@
   }
 
   async function showPi() {
+    if (!canLeaveSettings()) return;
     activeAgent = "pi";
     view = "workspace";
     await dshWebview?.hide();
   }
 
   function openSettings() {
+    activeAgent = "pi";
+    void dshWebview?.hide();
     view = "settings";
   }
 
   function closeSettings() {
+    if (!canLeaveSettings()) return;
     view = "workspace";
   }
 
-  function openMarket() {
-    view = "market";
+  function canLeaveSettings() {
+    if (view === "settings" && diagnosticsBusy) {
+      showError("诊断操作正在处理，请先完成或取消操作");
+      return false;
+    }
+    if (view === "settings" && settingsPackageBusy) {
+      showError("扩展操作正在处理，请先完成或取消操作");
+      return false;
+    }
+    return true;
   }
 
-  function openModels() {
-    view = "models";
+  function openSettingsCategory(category: SettingsCategory) {
+    settingsCategory = category;
+    openSettings();
   }
 
-  function closeMarket() {
-    view = "settings";
-  }
-
-  function closeModels() {
-    view = "settings";
-  }
-
-  async function startTask(projectId: string | null = selectedProjectId) {
+  async function startTask(projectId: string | null = selectedProjectId, mode: "rpc" | "tui" = "rpc") {
     const project = projects.find((candidate) => candidate.id === projectId);
     if (!project) {
       showError("请先添加并选择一个 Pi 项目目录");
@@ -627,7 +915,7 @@
       }
       if (runningCount >= settings.maxConcurrentTasks) return;
       const title = `Pi Task ${nextTaskNumber++}`;
-      const task = await invoke<Task>("start_pi_task", {
+      const task = await invoke<Task>(mode === "rpc" ? "start_rpc_task" : "start_pi_task", {
         request: { projectId: project.id, title, rows: 32, cols: 100 },
       });
       tasks.unshift(task);
@@ -641,8 +929,13 @@
   }
 
   async function stopTask(task: Task) {
+    if (modeSwitcher.isBusy(task.id)) return;
     try {
-      await invoke("stop_pi_task", { taskId: task.id });
+      if (task.interactionMode === "rpc") {
+        await invoke("stop_rpc_task", { taskId: task.id, runId: task.runId });
+      } else {
+        await invoke("stop_pi_run", { taskId: task.id, runId: task.runId });
+      }
       task.status = "cancelled";
     } catch (error) {
       showError(error);
@@ -666,20 +959,40 @@
     }
   }
 
-  async function restartTask(task: Task) {
+  function requestTaskRestart(task: Task, mode: InteractionMode) {
+    return invoke<Task>(mode === "rpc" ? "start_rpc_task" : "restart_pi_task", {
+      request: { taskId: task.id, projectId: task.projectId, title: task.title, rows: 32, cols: 100 },
+    });
+  }
+
+  function applyTaskRestart(task: Task, restarted: Task) {
+    Object.assign(task, restarted);
+    if (!terminalTaskIds.includes(task.id)) terminalTaskIds.push(task.id);
+    openTask(task);
+  }
+
+  async function restartTask(task: Task, mode = task.interactionMode ?? "tui") {
+    if (modeSwitcher.isBusy(task.id)) return;
+    if (task.piEnvironment && task.piEnvironment !== "managed") {
+      showError("该任务来自旧版本机 Pi 环境，当前稳定版仅支持 DeepPi 托管任务，本机会话记录已保留。");
+      return;
+    }
     try {
-      const restarted = await invoke<Task>("restart_pi_task", {
-        request: { taskId: task.id, rows: 32, cols: 100 },
-      });
-      Object.assign(task, restarted);
-      if (!terminalTaskIds.includes(task.id)) terminalTaskIds.push(task.id);
-      openTask(task);
+      applyTaskRestart(task, await requestTaskRestart(task, mode));
     } catch (error) {
       showError(error);
     }
   }
 
+  async function switchTaskMode(task: Task, mode: InteractionMode) {
+    try {
+      const restarted = await modeSwitcher.switch(task, mode);
+      if (restarted) applyTaskRestart(task, restarted);
+    } catch (error) { showError(error); }
+  }
+
   async function archiveTask(task: Task) {
+    if (modeSwitcher.isBusy(task.id)) return;
     try {
       await invoke("archive_task", { taskId: task.id });
       task.archivedAt = Date.now();
@@ -699,6 +1012,7 @@
   }
 
   async function deleteTask(task: Task) {
+    if (modeSwitcher.isBusy(task.id)) return;
     if (!(await confirmDialog("删除任务", `永久删除“${task.title}”的 DeepPi 任务记录吗？`))) return;
     try {
       await invoke("delete_task", { taskId: task.id });
@@ -712,17 +1026,26 @@
 
 <svelte:head><title>DeepPi</title></svelte:head>
 
-<div class:dsh-mode={activeAgent === "dsh"} class="app-shell">
+{#if startupPending || startupFailure}
+  <section class="startup-status" aria-label="工作区启动" aria-live="polite">
+    {#if startupFailure}
+      <p role="alert">{startupFailure}</p>
+      <button type="button" onclick={() => window.location.reload()}><RotateCcw size={16} />重新加载</button>
+    {:else}
+      <p role="status">正在加载工作区…</p>
+    {/if}
+  </section>
+{/if}
+<div class:dsh-mode={activeAgent === "dsh"} class:sidebar-hidden={!showSidebar} class:git-visible={showGit} class="app-shell" inert={closingWindow || startupPending || !!startupFailure} aria-busy={closingWindow || startupPending}>
   <header class="topbar">
     <div class="brand"><Bot size={18} strokeWidth={1.8} /><strong>DeepPi</strong></div>
 
-    <div class="agent-switch" aria-label="Agent">
-      <button class:selected={activeAgent === "pi"} type="button" title={runtimeTitle("pi")} onclick={showPi}>Pi</button>
-      <button class:selected={activeAgent === "dsh"} type="button" title={runtimeTitle("dsh")} onclick={showDsh}>DSH</button>
-    </div>
+    <AppMenu {menus} onOpenChange={(open) => { menuOpen = open; }} />
 
     {#if activeAgent === "pi"}
       <div class="toolbar">
+        <button class:active={showGit} type="button" aria-label="切换 Git 变更栏" title="Git 变更"
+          aria-pressed={showGit} onclick={() => { if (!canLeaveSettings()) return; view = "workspace"; gitVisible = !gitVisible; }}><GitBranch size={16} /></button>
         <button class:active={layout === "single"} type="button" aria-label="单任务布局" title="单任务布局" onclick={() => changeLayout("single")}>
           <PanelTop size={16} />
         </button>
@@ -739,7 +1062,29 @@
     {/if}
   </header>
 
-  {#if activeAgent === "pi"}
+  <nav class="activity-rail" aria-label="工作区导航">
+    <button type="button" class:active={activeAgent === "pi" && view === "workspace"} aria-label="Pi 工作区" title={runtimeTitle("pi")} onclick={showPi}><Bot size={21} /><span>Pi</span></button>
+    <button type="button" class:active={activeAgent === "dsh"} aria-label="DSH 工作区" title={runtimeTitle("dsh")} onclick={showDsh}><Globe size={21} /><span>DSH</span></button>
+    <button type="button" class="rail-settings" class:active={view !== "workspace"} aria-label="设置" aria-keyshortcuts={shortcutAria("settings")} title={`设置 (${shortcutLabel("settings")})`} onclick={openSettings}><Settings2 size={21} /></button>
+  </nav>
+  <aside class="project-sidebar" class:panel-hidden={!showSidebar} aria-label="项目侧栏">
+    <div class="sidebar-tabs" role="tablist" aria-label="项目视图">
+      <button id="tasks-tab" type="button" role="tab" aria-selected={sidebarMode === "tasks"}
+        aria-controls="tasks-panel" onclick={() => { sidebarMode = "tasks"; }}>任务</button>
+      <button id="files-tab" type="button" role="tab" aria-selected={sidebarMode === "files"}
+        aria-controls="files-panel" onclick={() => { sidebarMode = "files"; fileSidebarVisited = true; }}>文件</button>
+    </div>
+    {#if sidebarMode === "files"}
+      <div class="file-project-selector">
+        <select aria-label="文件所属项目" value={selectedProjectId ?? ""}
+          onchange={(event) => { const project = projects.find((item) => item.id === event.currentTarget.value); if (project) selectProject(project); }}>
+          {#if !projects.length}<option value="">未选择项目</option>{/if}
+          {#each projects as project (project.id)}<option value={project.id}>{project.name}</option>{/each}
+        </select>
+        <button type="button" aria-label="添加项目目录" title="添加项目目录" onclick={addProject}><FolderPlus size={16} /></button>
+      </div>
+    {/if}
+    <div id="tasks-panel" role="tabpanel" aria-labelledby="tasks-tab" class="sidebar-panel" class:panel-hidden={sidebarMode !== "tasks"}>
     <TaskSidebar
       {projects}
       tasks={piTasks}
@@ -755,12 +1100,20 @@
       onDelete={deleteTask}
       onAddSession={(project) => void startTask(project.id)}
       onRemoveProject={removeProject}
-      onOpenSettings={openSettings}
-      settingsActive={view !== "workspace"}
+      searchFocusToken={sidebarMode === "tasks" && showSidebar ? searchFocusToken : 0}
     />
-  {/if}
+    </div>
+    <div id="files-panel" role="tabpanel" aria-labelledby="files-tab" class="sidebar-panel" class:panel-hidden={sidebarMode !== "files"}>
+      {#if fileSidebarVisited}
+        <FileSidebar project={selectedProject} onOpen={openFile}
+          visible={sidebarMode === "files" && showSidebar} refreshToken={filesRefreshToken}
+          {watchError} onRetryWatch={() => { watchRetry++; }}
+          searchFocusToken={sidebarMode === "files" && showSidebar ? fileSearchFocusToken : 0} />
+      {/if}
+    </div>
+  </aside>
 
-  <main class="workspace" bind:this={workspace}>
+  <main class="workspace" class:settings-view={view === "settings"} bind:this={workspace}>
     {#if activeAgent === "dsh"}
       <div class="dsh-placeholder" aria-live="polite">
         {#if isDshStarting}
@@ -774,6 +1127,12 @@
       </div>
     {:else if view === "settings"}
       <PiSettings
+        saving={settingsSaving}
+        closeBlocked={settingsPackageBusy || diagnosticsBusy}
+        onDiagnosticsBusy={(busy) => { diagnosticsBusy = busy; }}
+        confirmDiagnosticsClear={() => confirmDialog("清空诊断记录", "清空本次应用运行的 Pi RPC 诊断记录？不会删除任务和会话。")}
+        category={settingsCategory}
+        onCategoryChange={(category) => { settingsCategory = category; }}
         settings={settings}
         runtimes={runtimes}
         updates={updates}
@@ -783,6 +1142,7 @@
         onCancelRuntime={() => void cancelRuntime()}
         {appUpdate}
         onChangeSettings={updateSettings}
+        onEditorSaved={(externalEditor) => { settings = { ...settings, externalEditor }; }}
         onCheckUpdates={() => void checkUpdates(true)}
         onCheckAppUpdate={() => void checkDeepPiUpdate()}
         onInstallAppUpdate={() => void installDeepPiUpdate()}
@@ -791,22 +1151,14 @@
         onSnoozeRuntime={(update) => snoozeRuntime(update)}
         onSkipRuntime={(update) => skipRuntime(update)}
         onClose={closeSettings}
-        onOpenModels={openModels}
-        onOpenMarket={openMarket}
-      />
-    {:else if view === "market"}
-      <PiMarketplace
-        projectPath={selectedProject?.path ?? null}
-        confirm={confirmDialog}
-        onClose={closeMarket}
-        onError={showError}
-      />
-    {:else if view === "models"}
-      <PiProviderSettings
-        confirm={confirmDialog}
-        onClose={closeModels}
-        onError={showError}
-      />
+      >
+        {#snippet models()}
+          <PiProviderSettings embedded confirm={confirmDialog} onClose={closeSettings} onError={showError} />
+        {/snippet}
+        {#snippet extensions()}
+          <PiMarketplace embedded projectPath={selectedProject?.path ?? null} confirm={confirmDialog} onClose={closeSettings} onError={showError} onBusyChange={(busy) => { settingsPackageBusy = busy; }} />
+        {/snippet}
+      </PiSettings>
     {:else if !selectedProject}
       <div class="empty-state">
         <Bot size={32} strokeWidth={1.4} />
@@ -835,7 +1187,8 @@
         onRestore={restoreTask}
         onDelete={deleteTask}
       />
-      <div class="workspace-content">
+    {/if}
+      <div class="workspace-content" class:panel-hidden={activeAgent !== "pi" || view !== "workspace" || terminalTasks.length === 0 || !selectedProject}>
         <div
           class:single={layout === "single"}
           class:split={layout === "split"}
@@ -844,22 +1197,100 @@
           class="terminal-grid"
         >
           {#each allTerminalTasks as task (task.id)}
-            <TerminalPane
+            {#if task.interactionMode === "rpc"}
+              <ChatPane
+                taskId={task.id} runId={task.runId} title={task.title}
+                switching={switchingTasks.has(task.id)}
+                visible={activeAgent === "pi" && view === "workspace" && !inspectingFile && task.projectId === selectedProjectId && paneTaskIds.includes(task.id)}
+                active={task.id === activeTaskId}
+                focusToken={composerFocusToken}
+                onUseTerminal={() => void switchTaskMode(task, "tui")}
+                onDialog={(request) => dialogs.request(request)}
+                onCancelDialogs={(scope) => dialogs.cancelScope(scope)}
+                onActivity={(busy) => {
+                  if (task.status === "running" && !busy && task.projectId === selectedProjectId) filesRefreshToken++;
+                  if (["running", "waiting"].includes(task.status)) task.status = busy ? "running" : "waiting";
+                }}
+              />
+            {:else}
+            {#if terminalModule}
+            {#await terminalModule}
+              <section class="terminal-pane" class:panel-hidden={activeAgent !== "pi" || view !== "workspace" || inspectingFile || task.projectId !== selectedProjectId || !paneTaskIds.includes(task.id)}>
+                <p role="status">正在加载终端…</p>
+              </section>
+            {:then terminal}
+            <terminal.default
+              transitioning={switchingTasks.has(task.id)}
               runId={task.runId}
               taskId={task.id}
               title={task.title}
               status={task.status}
               codeFont={settings.codeFont}
               colorMode={settings.colorMode}
-              visible={activeAgent === "pi" && task.projectId === selectedProjectId && paneTaskIds.includes(task.id)}
+              visible={activeAgent === "pi" && view === "workspace" && !inspectingFile && task.projectId === selectedProjectId && paneTaskIds.includes(task.id)}
               active={task.id === activeTaskId}
-              onExit={(exitCode, error) => markExited(task, exitCode, error)}
+              onExit={(exitCode, error, exitedRunId) => { if (task.runId === exitedRunId) markExited(task, exitCode, error); }}
+              onUseConversation={() => void switchTaskMode(task, "rpc")}
             />
+            {:catch}
+              <section class="terminal-pane" class:panel-hidden={activeAgent !== "pi" || view !== "workspace" || inspectingFile || task.projectId !== selectedProjectId || !paneTaskIds.includes(task.id)}>
+                <p role="alert">终端组件加载失败</p>
+                <button type="button" title="重新加载终端组件" aria-label="重新加载终端组件" onclick={loadTerminalModule}><RotateCcw size={16} /></button>
+              </section>
+            {/await}
+            {/if}
+            {/if}
           {/each}
         </div>
       </div>
+    {#if openedFile && editorModule}
+      {#await editorModule then module}
+        <module.default bind:this={fileEditor} documents={fileDocuments} controller={fileWorkspace}
+          projectId={openedFile.projectId} path={openedFile.path} line={openedFile.line} column={openedFile.column}
+          visible={openedFile.projectId === selectedProjectId && activeAgent === "pi" && view === "workspace"}
+          editorConfigured={!!settings.externalEditor} refreshToken={filesRefreshToken}
+          onConfigureEditor={() => openSettingsCategory("advanced")}
+          onSelect={(path) => openFile(path)} onHide={() => { openedFile = null; }}
+          requestDialog={(request) => dialogs.request(request)} />
+      {:catch error}
+        <p role="alert">编辑器加载失败：{String(error)}</p>
+      {/await}
+    {/if}
+    {#if openedDiff && openedDiff.projectId === selectedProjectId && activeAgent === "pi" && view === "workspace"}
+      <GitDiffView selection={openedDiff} refreshToken={filesRefreshToken + gitWatchRefreshToken} onClose={() => { openedDiff = null; }} />
+    {/if}
+    {#if recoveryProject && recoveryModule}
+      {#await recoveryModule then module}
+        {#key recoveryProject.id}
+          <module.default projectId={recoveryProject.id} projectName={recoveryProject.name}
+            onClose={() => { if (!recoveryBusy) recoveryProject = null; }}
+            onBusyChange={(busy) => { recoveryBusy = busy; }}
+            canOperate={() => !closingWindow && !fileSaving && !fileWorkspace.busy() && !gitIndexBusy}
+            onChanged={(projectId) => { if (projectId === selectedProjectId) filesRefreshToken++; }}
+            requestDialog={(request) => dialogs.request(request)} />
+        {/key}
+      {:catch error}
+        <section class="recovery-error" role="alert">
+          <p>恢复副本界面加载失败：{String(error)}</p>
+          <button onclick={() => { recoveryProject = null; recoveryModule = null; }}>关闭</button>
+        </section>
+      {/await}
     {/if}
   </main>
+  <GitSidebar projectId={selectedProjectId}
+    visible={showGit} refreshToken={filesRefreshToken + gitWatchRefreshToken}
+    selected={openedDiff?.projectId === selectedProjectId ? openedDiff : null} onOpen={openGitDiff}
+    onBusyChange={(busy) => { gitIndexBusy = busy; }}
+    onChanged={(projectId, path) => {
+      if (openedDiff?.projectId === projectId && (!path || openedDiff.path === path)) openedDiff = null;
+      if (selectedProjectId === projectId) filesRefreshToken++;
+    }}
+    onClose={() => { gitVisible = false; }} />
 
   <AppDialog request={dialogRequest} onResolve={resolveDialog} />
 </div>
+
+<style>
+  .recovery-error { position: absolute; inset: 0; z-index: 15; padding: 16px; background: var(--page-bg); overflow: auto; }
+  .recovery-error p { overflow-wrap: anywhere; }
+</style>

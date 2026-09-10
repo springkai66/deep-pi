@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
+  import { invoke as nativeInvoke } from "@tauri-apps/api/core";
   import { PackageOpen, RefreshCw, Search, Trash2, X, ArrowUpCircle } from "@lucide/svelte";
-  import { onMount } from "svelte";
+  import { onDestroy, onMount } from "svelte";
   import { createOperationRunner, type OperationState } from "$lib/operation";
 
   interface PiPackage {
@@ -29,15 +29,21 @@
     confirm: (title: string, message: string, confirmLabel?: string) => Promise<boolean>;
     onClose: () => void;
     onError: (error: unknown) => void;
+    embedded?: boolean;
+    onBusyChange?: (busy: boolean) => void;
+    invokeCommand?: typeof nativeInvoke;
   }
 
-  let { projectPath, confirm, onClose, onError }: Props = $props();
+  let { projectPath, confirm, onClose, onError, embedded = false, onBusyChange = () => {}, invokeCommand = nativeInvoke }: Props = $props();
+  const invoke = <T,>(command: string, args?: Parameters<typeof nativeInvoke>[1]) => invokeCommand<T>(command, args);
   let query = $state("");
   let packages = $state<PiPackage[]>([]);
   let installed = $state<InstalledPackage[]>([]);
   let scope = $state<"global" | "project">("global");
   let isLoading = $state(false);
   let busyPackage = $state<string | null>(null);
+  $effect(() => onBusyChange(busyPackage !== null));
+  onDestroy(() => onBusyChange(false));
   let statusMessage = $state("");
   let operationState = $state<OperationState | null>(null);
   const operations = createOperationRunner(invoke, (state) => { operationState = state; });
@@ -45,7 +51,6 @@
   let installedGeneration = 0;
 
   const canUseProjectScope = $derived(projectPath !== null);
-  const managedInstalled = $derived(installed.filter((pkg) => pkg.environment === "managed"));
 
   onMount(() => {
     void search();
@@ -74,7 +79,7 @@
       const result = await invoke<InstalledPackage[]>("list_pi_packages", {
         scope,
         projectPath,
-        environment: scope === "global" ? "all" : "managed",
+        environment: "managed",
       });
       if (generation === installedGeneration) installed = result;
     } catch (error) {
@@ -91,11 +96,7 @@
       const source = pkg.source.replace(/^npm:/, "");
       return source === name || source.startsWith(`${name}@`);
     });
-    return matches.find((pkg) => pkg.environment === "managed") ?? matches[0] ?? null;
-  }
-
-  function environmentLabel(environment: InstalledPackage["environment"]) {
-    return environment === "native" ? "本机 Pi" : "DeepPi 托管";
+    return matches[0] ?? null;
   }
 
   function formatDownloads(value: number) {
@@ -134,7 +135,7 @@
 
   async function updateAll() {
     if (busyPackage) return;
-    if (managedInstalled.length === 0) return;
+    if (installed.length === 0) return;
     busyPackage = "all";
     try {
       if (!(await confirm("更新 Pi Packages", `更新当前${scope === "global" ? "全局" : "项目"}范围的全部 Package 吗？`, "全部更新"))) return;
@@ -150,14 +151,10 @@
 
   async function update(pkg: InstalledPackage) {
     if (busyPackage) return;
-    if (pkg.environment === "native") {
-      onError("本机 Pi 全局扩展仅支持查看，请在本机 Pi 中管理");
-      return;
-    }
     busyPackage = pkg.source;
     try {
       if (!(await confirm("更新 Pi Package", `更新 ${pkg.source} 吗？`, "更新"))) return;
-      await operations.run("package_operation", { operation: "update", spec: pkg.source, scope, projectPath, environment: pkg.environment });
+      await operations.run("package_operation", { operation: "update", spec: pkg.source, scope, projectPath, environment: "managed" });
       statusMessage = `${pkg.source} 已更新`;
       await refreshInstalled();
     } catch (error) {
@@ -169,14 +166,10 @@
 
   async function remove(pkg: InstalledPackage) {
     if (busyPackage) return;
-    if (pkg.environment === "native") {
-      onError("本机 Pi 全局扩展仅支持查看，请在本机 Pi 中管理");
-      return;
-    }
     busyPackage = pkg.source;
     try {
       if (!(await confirm("卸载 Pi Package", `卸载 ${pkg.source} 吗？`, "卸载"))) return;
-      await operations.run("package_operation", { operation: "remove", spec: pkg.source, scope, projectPath, environment: pkg.environment });
+      await operations.run("package_operation", { operation: "remove", spec: pkg.source, scope, projectPath, environment: "managed" });
       statusMessage = `${pkg.source} 已卸载`;
       await refreshInstalled();
     } catch (error) {
@@ -196,15 +189,15 @@
   }
 </script>
 
-<section class="market-page" aria-label="Pi 扩展市场">
+<section class="market-page" class:embedded aria-label="Pi 扩展市场">
   <header class="market-header">
-    <div class="market-title">
+    {#if !embedded}<div class="market-title">
       <button class="icon-button" type="button" aria-label="返回工作区" title="返回" disabled={busyPackage !== null} onclick={onClose}>
         <X size={17} />
       </button>
       <PackageOpen size={18} />
       <h1>Pi 扩展市场</h1>
-    </div>
+    </div>{/if}
     <div class="scope-switch" aria-label="安装范围">
       <button class:active={scope === "global"} type="button" disabled={busyPackage !== null} onclick={() => { scope = "global"; void refreshInstalled(); }}>全局</button>
       <button class:active={scope === "project"} type="button" disabled={!canUseProjectScope || busyPackage !== null} onclick={() => { scope = "project"; void refreshInstalled(); }}>项目</button>
@@ -240,20 +233,16 @@
                   <span class="package-types">{pkg.types.join(" · ") || "Pi Package"}</span>
                 </div>
                 {#if installedPackage}
-                  <span class="installed-badge">已安装 · {environmentLabel(installedPackage.environment)}</span>
+                  <span class="installed-badge">已安装 · DeepPi 托管</span>
                 {/if}
               </div>
               <p>{pkg.description}</p>
               <footer>
                 <span>{formatDownloads(pkg.downloads)} / 月 · {formatDate(pkg.publishedAt)}</span>
                 {#if installedPackage}
-                  {#if installedPackage.environment === "managed"}
-                    <button class="danger-button" type="button" disabled={busyPackage !== null} onclick={() => void remove(installedPackage)}>
-                      <Trash2 size={13} />卸载
-                    </button>
-                  {:else}
-                    <span class="native-note">本机 Pi（仅查看）</span>
-                  {/if}
+                  <button class="danger-button" type="button" disabled={busyPackage !== null} onclick={() => void remove(installedPackage)}>
+                    <Trash2 size={13} />卸载
+                  </button>
                 {:else}
                   <button class="primary-button" type="button" disabled={busyPackage !== null} onclick={() => void install(pkg)}>
                     {#if busyPackage === pkg.name}<span class="spin"><RefreshCw size={13} /></span>{:else}<PackageOpen size={13} />{/if}
@@ -269,22 +258,22 @@
 
     <aside class="installed-panel">
       <header class="section-heading">
-        <span>已安装 <small class="environment-note">{scope === "global" ? "全局：DeepPi + 本机 Pi" : "当前项目"}</small></span>
+        <span>已安装 <small class="environment-note">{scope === "global" ? "DeepPi 托管" : "当前项目"}</small></span>
         <span class="section-heading-actions">
-          <button type="button" aria-label="全部更新 Pi Package" title="更新 DeepPi 托管扩展" disabled={busyPackage !== null || managedInstalled.length === 0} onclick={() => void updateAll()}><ArrowUpCircle size={14} /></button>
+          <button type="button" aria-label="全部更新 Pi Package" title="更新 DeepPi 托管扩展" disabled={busyPackage !== null || installed.length === 0} onclick={() => void updateAll()}><ArrowUpCircle size={14} /></button>
           <button type="button" aria-label="刷新已安装 Package" title="刷新" onclick={() => void refreshInstalled()}><RefreshCw size={14} /></button>
         </span>
       </header>
       {#if installed.length === 0}
         <p class="market-empty">暂无已安装 Package</p>
       {:else}
-        {#each installed as pkg (`${pkg.environment}:${pkg.source}`)}
+        {#each installed as pkg (`${pkg.source}`)}
           <div class="installed-row">
             <span class="installed-copy">
               <strong>{pkg.source}</strong>
-              <small>{environmentLabel(pkg.environment)}</small>
+              <small>DeepPi 托管</small>
             </span>
-            <button type="button" aria-label={`更新 ${pkg.source}`} title={pkg.environment === "native" ? "本机 Pi 扩展仅支持查看" : "更新"} disabled={pkg.environment === "native" || busyPackage !== null} onclick={() => void update(pkg)}><RefreshCw size={13} /></button>
+            <button type="button" aria-label={`更新 ${pkg.source}`} title="更新" disabled={busyPackage !== null} onclick={() => void update(pkg)}><RefreshCw size={13} /></button>
           </div>
         {/each}
       {/if}
@@ -293,6 +282,10 @@
 </section>
 
 <style>
+  .market-page.embedded { padding: 0; display: flex; flex-direction: column; }
+  .embedded .market-header { justify-content: flex-end; }
+  .embedded .market-header, .embedded .market-search { flex-shrink: 0; }
+  .embedded .market-body { flex: 1; }
   .market-page {
     display: grid;
     grid-template-rows: 54px 42px auto minmax(0, 1fr);
@@ -533,12 +526,6 @@
     font-size: 10px;
   }
 
-  .native-note {
-    color: #778078;
-    font-size: 10px;
-    white-space: nowrap;
-  }
-
   .primary-button,
   .danger-button {
     display: inline-flex;
@@ -647,5 +634,12 @@
       border-top: 1px solid #303832;
       border-left: 0;
     }
+  }
+  @container (max-width: 680px) {
+    .market-page.embedded { height: auto; overflow: visible; }
+    .embedded .market-body { grid-template-columns: minmax(0, 1fr); overflow: visible; }
+    .embedded .package-list, .embedded .installed-panel { overflow: visible; }
+    .embedded .installed-panel { padding: 12px 0 0; border-top: 1px solid var(--border); border-left: 0; }
+    .embedded .package-grid { grid-template-columns: repeat(auto-fill, minmax(min(250px, 100%), 1fr)); }
   }
 </style>

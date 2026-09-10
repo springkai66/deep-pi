@@ -16,6 +16,8 @@ export interface Task {
   sessionId: string;
   sessionFile: string | null;
   executionTarget: "local";
+  interactionMode?: "tui" | "rpc";
+  piEnvironment?: "managed" | "native";
   createdAt: number;
   startedAt: number | null;
   completedAt: number | null;

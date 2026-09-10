@@ -1,0 +1,19 @@
+.settings-page .settings-group { margin: 0 0 24px; }
+.settings-page .settings-group h3 { margin: 0; padding: 12px 0; font-size: 13px; font-weight: 600; color: var(--text-muted); letter-spacing: 0; }
+.settings-page .settings-group-header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.settings-page .setting-control { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; min-height: 56px; padding: 12px 0; border-bottom: 1px solid var(--border); }
+.settings-page .setting-control strong { font-size: 13px; font-weight: 500; color: var(--text-strong); }
+.settings-page .setting-copy { display: grid; gap: 6px; min-width: 0; }
+.settings-page .setting-copy small, .settings-page .muted { color: var(--text-muted); font-size: 12px; overflow-wrap: anywhere; }
+.settings-page .setting-control > select, .settings-page .setting-control > input { width: 210px; max-width: 100%; min-width: 0; height: 32px; padding: 4px 8px; border: 1px solid var(--border-strong); border-radius: 4px; color: var(--text); background: var(--surface); font: inherit; }
+.settings-page .setting-control > input[type="number"] { width: 90px; }
+.settings-page .quiet-button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 30px; padding: 5px 8px; border: 1px solid var(--border-strong); border-radius: 4px; color: var(--text); background: var(--surface-raised); font: inherit; font-size: 12px; cursor: pointer; }
+.settings-page .quiet-button:hover:not(:disabled) { background: var(--surface-hover); }
+.settings-page .quiet-button:disabled { opacity: .5; cursor: default; }
+.settings-page .quiet-button.icon-button { width: 32px; height: 32px; padding: 0; }
+.settings-page .settings-group p { margin: 8px 0; overflow-wrap: anywhere; font-size: 12px; }
+.settings-page .settings-group [role="alert"] { border-left: 2px solid #bd5147; padding: 4px 8px; color: var(--text); }
+@media (max-width: 520px) {
+  .settings-page .setting-control { align-items: flex-start; }
+  .settings-page .setting-control > select { width: 100%; }
+}

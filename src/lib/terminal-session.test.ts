@@ -56,3 +56,30 @@ describe("terminal session", () => {
     expect(test.ports.output).not.toHaveBeenCalled();
   });
 });
+
+describe("terminal exit run identity", () => {
+  it("forwards the original run identity and rejects stale or disposed events", () => {
+    const listeners = new Map<string, (payload: unknown) => void>();
+    const exits: unknown[][] = [];
+    const session = createTerminalSession("task", {
+      listen: async <T,>(name: string, callback: (payload: T) => void) => {
+        listeners.set(name, (payload) => callback(payload as T));
+        return () => {};
+      },
+      acknowledge: async () => {},
+      output: () => {},
+      exit: (...values) => { exits.push(values); },
+      error: () => {},
+    });
+    session.setRun("first");
+    const event = { taskId: "task", runId: "first", exitCode: 0, error: null };
+    listeners.get("pty-exit")!(event);
+    expect(exits).toEqual([[0, null, "first"]]);
+    session.setRun("second");
+    listeners.get("pty-exit")!(event);
+    expect(exits).toHaveLength(1);
+    session.dispose();
+    listeners.get("pty-exit")!({ ...event, runId: "second" });
+    expect(exits).toHaveLength(1);
+  });
+});

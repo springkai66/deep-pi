@@ -10,7 +10,8 @@
 
   let { request, onResolve }: Props = $props();
   let inputValue = $state("");
-  let inputElement = $state<HTMLInputElement>();
+  let inputElement = $state<HTMLInputElement | HTMLTextAreaElement>();
+  let dialogElement = $state<HTMLDialogElement>();
   let choiceButton = $state<HTMLButtonElement>();
   let confirmButton = $state<HTMLButtonElement>();
   let initializedRequestId: number | null = null;
@@ -20,6 +21,7 @@
     initializedRequestId = request.id;
     inputValue = request.initialValue ?? "";
     void tick().then(() => {
+      if (dialogElement && !dialogElement.open) dialogElement.showModal();
       if (request?.kind === "input") inputElement?.focus();
       else if (request?.kind === "choice") choiceButton?.focus();
       else confirmButton?.focus();
@@ -35,6 +37,7 @@
   }
 
   function handleKeydown(event: KeyboardEvent) {
+    if (event.isComposing) return;
     if (event.key === "Escape") {
       event.preventDefault();
       cancel();
@@ -50,11 +53,12 @@
   >
     <dialog
       class="app-dialog"
-      open
+      bind:this={dialogElement}
       aria-modal="true"
       aria-labelledby={`dialog-title-${request.id}`}
       aria-describedby={`dialog-message-${request.id}`}
       onkeydown={handleKeydown}
+      oncancel={(event) => { event.preventDefault(); cancel(); }}
     >
       <header>
         <h2 id={`dialog-title-${request.id}`}>{request.title}</h2>
@@ -66,7 +70,7 @@
       <p id={`dialog-message-${request.id}`}>{request.message}</p>
 
       {#if request.kind === "choice"}
-        <div class="dialog-choices" role="group" aria-label="关闭行为">
+        <div class="dialog-choices" role="group" aria-label={request.title}>
           {#each request.choices ?? [] as choice}
             <button bind:this={choiceButton} class="choice-button" type="button" onclick={() => resolve(choice.value)}>
               {choice.label}
@@ -75,15 +79,21 @@
         </div>
       {:else}
         {#if request.kind === "input"}
+          {#if request.multiline}
+          <textarea bind:this={inputElement} class="dialog-input" value={inputValue}
+            rows="8" maxlength={request.maxLength ?? 131072} aria-label={request.title}
+            oninput={(event) => (inputValue = event.currentTarget.value)}></textarea>
+          {:else}
           <input
             bind:this={inputElement}
             class="dialog-input"
             value={inputValue}
             placeholder={request.placeholder ?? ""}
-            maxlength="200"
+            maxlength={request.maxLength ?? 200}
             aria-label={request.title}
             oninput={(event) => (inputValue = event.currentTarget.value)}
           />
+          {/if}
         {/if}
 
         <form
@@ -117,6 +127,9 @@
 
   .app-dialog {
     width: min(440px, 100%);
+    max-height: calc(100vh - 48px);
+    overflow: auto;
+    overflow-wrap: anywhere;
     padding: 18px;
     border: 1px solid #48534b;
     border-radius: 7px;

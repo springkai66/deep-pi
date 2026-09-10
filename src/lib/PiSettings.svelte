@@ -1,519 +1,161 @@
 <script lang="ts">
-  import { ChevronRight, Download, PackageOpen, RefreshCw, Server, Settings2, X } from "@lucide/svelte";
-  import {
-    CODE_FONT_OPTIONS,
-    UI_FONT_OPTIONS,
-    type AppSettings,
-  } from "$lib/settings";
+  import { ArrowLeft, Monitor, Palette, Server, Download, PackageOpen, Wrench } from "@lucide/svelte";
+  import type { Snippet } from "svelte";
+  import { CODE_FONT_OPTIONS, UI_FONT_OPTIONS, type AppSettings, type ExternalEditor } from "./settings";
+  import { SETTINGS_CATEGORIES, nextSettingsCategory, parseTaskLimit, type SettingsCategory } from "./settings-navigation";
+  import RuntimeSettings, { type RuntimeSettingsProps } from "./RuntimeSettings.svelte";
+  import ExternalEditorSettings from "./ExternalEditorSettings.svelte";
+  import DiagnosticsPanel from "./DiagnosticsPanel.svelte";
+  import "./settings-controls.css";
 
-  import type { AppUpdateState } from "$lib/app-update";
-  import type { RuntimeComponent, RuntimeUpdate } from "$lib/runtime";
-  import type { OperationState } from "$lib/operation";
-
-  interface Props {
-    settings: AppSettings;
-    runtimes: RuntimeComponent[];
-    updates: RuntimeUpdate[];
-    isCheckingUpdates: boolean;
-    busyRuntime: string | null;
-    runtimeOperation: OperationState | null;
-    onCancelRuntime: () => void;
-    appUpdate: AppUpdateState;
+  interface Props extends RuntimeSettingsProps {
+    category: SettingsCategory;
+    onCategoryChange: (category: SettingsCategory) => void;
     onChangeSettings: (settings: AppSettings) => void;
-    onCheckUpdates: () => void;
-    onCheckAppUpdate: () => void;
-    onInstallAppUpdate: () => void;
-    onUpdateRuntime: (update: RuntimeUpdate) => void;
-    onRollbackRuntime: (update: RuntimeUpdate) => void;
-    onSnoozeRuntime: (update: RuntimeUpdate) => void;
-    onSkipRuntime: (update: RuntimeUpdate) => void;
+    onEditorSaved: (editor: ExternalEditor | null) => void;
     onClose: () => void;
-    onOpenModels: () => void;
-    onOpenMarket: () => void;
+    models: Snippet;
+    extensions: Snippet;
+    closeBlocked?: boolean;
+    saving?: boolean;
+    onDiagnosticsBusy: (busy: boolean) => void;
+    confirmDiagnosticsClear: () => Promise<boolean>;
   }
+  let { category, onCategoryChange, onChangeSettings, onEditorSaved, onClose, models, extensions, closeBlocked = false, saving = false, onDiagnosticsBusy, confirmDiagnosticsClear, ...runtime }: Props = $props();
+  const icons = { general: Monitor, appearance: Palette, models: Server, runtime: Download, extensions: PackageOpen, advanced: Wrench };
+  let modelsVisited = $state(false);
+  let extensionsVisited = $state(false);
+  let advancedVisited = $state(false);
+  let taskLimitError = $state("");
+  $effect(() => {
+    if (category === "models") modelsVisited = true;
+    if (category === "extensions") extensionsVisited = true;
+    if (category === "advanced") advancedVisited = true;
+  });
+  const title = $derived(SETTINGS_CATEGORIES.find((item) => item.id === category)?.label ?? "设置");
 
-  let {
-    settings,
-    runtimes,
-    updates,
-    isCheckingUpdates,
-    busyRuntime,
-    runtimeOperation,
-    onCancelRuntime,
-    appUpdate,
-    onChangeSettings,
-    onCheckUpdates,
-    onCheckAppUpdate,
-    onInstallAppUpdate,
-    onUpdateRuntime,
-    onRollbackRuntime,
-    onSnoozeRuntime,
-    onSkipRuntime,
-    onClose,
-    onOpenModels,
-    onOpenMarket,
-  }: Props = $props();
-
-  function updateSettings(patch: Partial<AppSettings>) {
-    onChangeSettings({ ...settings, ...patch });
+  function updateSettings(patch: Partial<AppSettings>) { onChangeSettings({ ...runtime.settings, ...patch }); }
+  function changeLimit(input: HTMLInputElement) {
+    const value = parseTaskLimit(input.value);
+    taskLimitError = value === null ? "同时运行任务数必须为 1 到 16 的整数" : "";
+    if (value !== null) updateSettings({ maxConcurrentTasks: value });
   }
-
-  function sourceLabel(source: RuntimeComponent["source"]) {
-    if (source === "managed") return "托管";
-    if (source === "system") return "本机";
-    if (source === "development") return "开发目录";
-    return "配置文件";
+  function navigate(event: KeyboardEvent, current: SettingsCategory) {
+    if (event.isComposing || event.altKey || event.ctrlKey || event.metaKey) return;
+    const next = nextSettingsCategory(current, event.key);
+    if (!next) return;
+    event.preventDefault();
+    onCategoryChange(next);
+    document.getElementById(`settings-nav-${next}`)?.focus();
   }
 </script>
 
 <section class="settings-page" aria-label="设置">
   <header class="settings-header">
-    <div class="settings-title">
-      <button class="icon-button" type="button" aria-label="返回工作区" title="返回" onclick={onClose}>
-        <X size={17} />
-      </button>
-      <Settings2 size={18} />
-      <h1>设置</h1>
-    </div>
+    <button class="quiet-button icon-button" type="button" aria-label="返回工作区" title={closeBlocked ? "请先完成或取消当前操作" : "返回工作区"} disabled={closeBlocked} onclick={onClose}><ArrowLeft size={17} /></button>
+    <h1>设置</h1>
+    {#if saving}<span class="muted" role="status">正在保存…</span>{/if}
   </header>
-
-  <div class="settings-content">
-    <section class="settings-group" aria-labelledby="app-update-heading">
-      <div class="settings-group-header">
-        <h2 id="app-update-heading">DeepPi</h2>
-        <span class="app-update-status">
-          {#if appUpdate.status === "checking"}检查中{:else if appUpdate.status === "installing"}安装中{:else if appUpdate.status === "available"}可更新 · {appUpdate.version}{:else if appUpdate.status === "current"}已是最新{:else if appUpdate.status === "error"}不可用{:else}未检查{/if}
-        </span>
-      </div>
-      <div class="app-update-row">
-        <span class="setting-copy">
-          <strong>应用更新</strong>
-          <small>{appUpdate.notes ?? "使用签名的 Release 更新包"}</small>
-        </span>
-        <span class="runtime-actions">
-          {#if appUpdate.status === "available"}
-            <button type="button" class="quiet-button" onclick={onInstallAppUpdate}>
-              <Download size={13} />安装更新
-            </button>
-          {:else}
-            <button type="button" class="quiet-button" disabled={appUpdate.status === "checking" || appUpdate.status === "installing"} onclick={onCheckAppUpdate}>
-              <span class:spin={appUpdate.status === "checking"}><RefreshCw size={13} /></span>检查应用更新
-            </button>
-          {/if}
-        </span>
-      </div>
-      {#if appUpdate.error}
-        <p class="runtime-note runtime-status error">{appUpdate.error}</p>
-      {/if}
-    </section>
-
-    <section class="settings-group" aria-labelledby="pi-settings-heading">
-      <h2 id="pi-settings-heading">Pi</h2>
-      <button class="setting-row" type="button" onclick={onOpenModels}>
-        <span class="setting-icon"><Server size={17} /></span>
-        <span class="setting-copy">
-          <strong>Provider 与模型</strong>
-          <small>配置服务商、凭据和模型元数据</small>
-        </span>
-        <ChevronRight size={16} />
-      </button>
-      <button class="setting-row" type="button" onclick={onOpenMarket}>
-        <span class="setting-icon"><PackageOpen size={17} /></span>
-        <span class="setting-copy">
-          <strong>Pi 扩展安装</strong>
-          <small>搜索、安装、更新和卸载 Pi Package</small>
-        </span>
-        <ChevronRight size={16} />
-      </button>
-    </section>
-
-    <section class="settings-group" aria-labelledby="appearance-settings-heading">
-      <h2 id="appearance-settings-heading">外观与行为</h2>
-      <label class="setting-control">
-        <span class="setting-copy">
-          <strong>颜色模式</strong>
-          <small>跟随系统、白色或黑色</small>
-        </span>
-        <select
-          value={settings.colorMode}
-          aria-label="颜色模式"
-          onchange={(event) => updateSettings({ colorMode: event.currentTarget.value as AppSettings["colorMode"] })}
-        >
-          <option value="system">跟随系统</option>
-          <option value="light">白色</option>
-          <option value="dark">黑色</option>
-        </select>
-      </label>
-      <label class="setting-control">
-        <span class="setting-copy">
-          <strong>应用字体</strong>
-          <small>按钮、导航和控件使用的字体</small>
-        </span>
-        <select
-          value={settings.appFont}
-          aria-label="应用字体"
-          onchange={(event) => updateSettings({ appFont: event.currentTarget.value as AppSettings["appFont"] })}
-        >
-          {#each UI_FONT_OPTIONS as option (option.value)}
-            <option value={option.value}>{option.label}</option>
-          {/each}
-        </select>
-      </label>
-      <label class="setting-control">
-        <span class="setting-copy">
-          <strong>设置文本字体</strong>
-          <small>设置窗口内的普通文本字体</small>
-        </span>
-        <select
-          value={settings.textFont}
-          aria-label="设置文本字体"
-          onchange={(event) => updateSettings({ textFont: event.currentTarget.value as AppSettings["textFont"] })}
-        >
-          {#each UI_FONT_OPTIONS as option (option.value)}
-            <option value={option.value}>{option.label}</option>
-          {/each}
-        </select>
-      </label>
-      <label class="setting-control">
-        <span class="setting-copy">
-          <strong>代码字体</strong>
-          <small>Pi 终端和代码区域使用的字体</small>
-        </span>
-        <select
-          value={settings.codeFont}
-          aria-label="代码字体"
-          onchange={(event) => updateSettings({ codeFont: event.currentTarget.value as AppSettings["codeFont"] })}
-        >
-          {#each CODE_FONT_OPTIONS as option (option.value)}
-            <option value={option.value}>{option.label}</option>
-          {/each}
-        </select>
-      </label>
-      <label class="setting-control">
-        <span class="setting-copy">
-          <strong>关闭窗口</strong>
-          <small>首次关闭时选择后记住，也可以在这里修改</small>
-        </span>
-        <select
-          value={settings.closeBehavior}
-          aria-label="关闭窗口行为"
-          onchange={(event) => updateSettings({ closeBehavior: event.currentTarget.value as AppSettings["closeBehavior"] })}
-        >
-          <option value="ask">首次询问</option>
-          <option value="minimize">最小化</option>
-          <option value="exit">退出应用</option>
-        </select>
-      </label>
-    </section>
-
-    <section class="settings-group" aria-labelledby="runtime-settings-heading">
-      <div class="settings-group-header">
-        <h2 id="runtime-settings-heading">组件与更新</h2>
-        <button type="button" class="quiet-button" disabled={isCheckingUpdates} onclick={onCheckUpdates}>
-          <span class:spin={isCheckingUpdates}><RefreshCw size={13} /></span>检查更新
+  <div class="settings-layout">
+    <nav class="settings-navigation" aria-label="设置分类">
+      {#each SETTINGS_CATEGORIES as item}
+        {@const Icon = icons[item.id]}
+        <button id={`settings-nav-${item.id}`} type="button" aria-current={category === item.id ? "page" : undefined}
+          class:active={category === item.id} onclick={() => onCategoryChange(item.id)} onkeydown={(event) => navigate(event, item.id)}>
+          <Icon size={16} /><span>{item.label}</span>
         </button>
+      {/each}
+    </nav>
+    <div class="settings-body">
+      <h2>{title}</h2>
+      <div class="settings-panel" hidden={category !== "general"}>
+        <section class="settings-group" aria-labelledby="general-behavior-heading">
+          <h3 id="general-behavior-heading">应用行为</h3>
+          <label class="setting-control"><strong>关闭窗口</strong>
+            <select value={runtime.settings.closeBehavior} aria-label="关闭窗口行为"
+              onchange={(event) => updateSettings({ closeBehavior: event.currentTarget.value as AppSettings["closeBehavior"] })}>
+              <option value="ask">首次询问</option><option value="minimize">最小化</option><option value="exit">退出应用</option>
+            </select>
+          </label>
+          <label class="setting-control"><strong>同时运行任务数</strong>
+            <input type="number" min="1" max="16" step="1" aria-label="同时运行任务数" aria-invalid={!!taskLimitError}
+              aria-describedby={taskLimitError ? "task-limit-error" : undefined}
+              value={runtime.settings.maxConcurrentTasks} oninput={(event) => changeLimit(event.currentTarget)} />
+          </label>
+          {#if taskLimitError}<p id="task-limit-error" role="alert">{taskLimitError}</p>{/if}
+        </section>
       </div>
-      {#if runtimes.length === 0}
-        <p class="settings-empty">正在读取组件版本…</p>
-      {:else}
-        <div class="runtime-list">
-          {#each runtimes as runtime (runtime.id)}
-            {@const update = updates.find((candidate) => candidate.id === runtime.id)}
-            {@const skipped = Boolean(update?.latestVersion && settings.skippedUpdates[runtime.id] === update.latestVersion)}
-            {@const snoozed = Boolean(update && (settings.snoozedUpdates[runtime.id] ?? 0) > Date.now())}
-            <div class="runtime-row">
-              <span class="setting-copy">
-                <strong>{runtime.name}</strong>
-                <small>{sourceLabel(runtime.source)} · {runtime.currentVersion ?? "未安装"}</small>
-              </span>
-              <span class="runtime-actions">
-                <span class:error={update?.error} class:update={update?.updateAvailable} class:stale={update?.stale} class="runtime-status">
-                  {#if busyRuntime === runtime.id}{runtimeOperation?.cancelling ? "正在取消并恢复" : "处理中"}{:else if skipped}已跳过 {update?.latestVersion}{:else if snoozed}已稍后提醒{:else if update?.stale}离线缓存 · {update.latestVersion ?? "无版本"}{:else if update?.error}检查失败{:else if update?.updateAvailable}可更新 · {update.latestVersion}{:else if update?.latestVersion}最新{:else}未检查{/if}
-                </span>
-                {#if update?.latestVersion && update.installable && !skipped && !snoozed}
-                  {#if update.updateAvailable}
-                    <button type="button" class="runtime-action" disabled={busyRuntime !== null} onclick={() => onUpdateRuntime(update)}>更新</button>
-                    <button type="button" class="runtime-action" onclick={() => onSnoozeRuntime(update)}>稍后</button>
-                    <button type="button" class="runtime-action" onclick={() => onSkipRuntime(update)}>跳过</button>
-                  {:else if !update.stale && !update.error}
-                    <button type="button" class="runtime-action" disabled={busyRuntime !== null} onclick={() => onUpdateRuntime(update)}>修复</button>
-                  {/if}
-                {/if}
-                {#if update?.canRollback && !skipped}
-                  <button type="button" class="runtime-action" disabled={busyRuntime !== null} onclick={() => onRollbackRuntime(update)}>回滚</button>
-                {/if}
-                {#if busyRuntime === runtime.id && runtimeOperation}
-                  <button type="button" class="runtime-action" aria-label="取消组件操作" title="取消组件操作" disabled={runtimeOperation.cancelling} onclick={onCancelRuntime}><X size={14} /></button>
-                {/if}
-              </span>
-            </div>
+      <div class="settings-panel" hidden={category !== "appearance"}>
+        <section class="settings-group" aria-labelledby="appearance-heading">
+          <h3 id="appearance-heading">主题与字体</h3>
+          <label class="setting-control"><strong>颜色模式</strong>
+            <select value={runtime.settings.colorMode} aria-label="颜色模式" onchange={(event) => updateSettings({ colorMode: event.currentTarget.value as AppSettings["colorMode"] })}>
+              <option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option>
+            </select>
+          </label>
+          {#each [{ key: "appFont", label: "应用字体" }, { key: "textFont", label: "设置文本字体" }] as field}
+            <label class="setting-control"><strong>{field.label}</strong>
+              <select value={runtime.settings[field.key as "appFont" | "textFont"]} aria-label={field.label}
+                onchange={(event) => updateSettings({ [field.key]: event.currentTarget.value })}>
+                {#each UI_FONT_OPTIONS as option}<option value={option.value}>{option.label}</option>{/each}
+              </select>
+            </label>
           {/each}
-        </div>
-      {/if}
-      <p class="runtime-note">更新检查只读取官方 npm registry，不会覆盖正在运行的组件。</p>
-    </section>
+          <label class="setting-control"><strong>代码字体</strong>
+            <select value={runtime.settings.codeFont} aria-label="代码字体" onchange={(event) => updateSettings({ codeFont: event.currentTarget.value as AppSettings["codeFont"] })}>
+              {#each CODE_FONT_OPTIONS as option}<option value={option.value}>{option.label}</option>{/each}
+            </select>
+          </label>
+        </section>
+      </div>
+      <div class="settings-panel embedded-panel" hidden={category !== "models"}>{#if modelsVisited}{@render models()}{/if}</div>
+      <div class="settings-panel" hidden={category !== "runtime"}><RuntimeSettings {...runtime} /></div>
+      <div class="settings-panel embedded-panel" hidden={category !== "extensions"}>{#if extensionsVisited}{@render extensions()}{/if}</div>
+      <div class="settings-panel" hidden={category !== "advanced"}>
+        <ExternalEditorSettings editor={runtime.settings.externalEditor} onSaved={onEditorSaved} />
+        {#if advancedVisited}<DiagnosticsPanel onBusyChange={onDiagnosticsBusy} confirmClear={confirmDiagnosticsClear} />{/if}
+        <section class="settings-group" aria-labelledby="diagnostics-heading">
+          <h3 id="diagnostics-heading">运行环境</h3>
+          {#if runtime.runtimes.length === 0}<p class="muted" role="status">尚未读取运行环境</p>
+          {:else}
+            <dl class="environment">
+              {#each runtime.runtimes as component}
+                <div><dt>{component.name}</dt><dd>{component.currentVersion ?? "未安装"} · {component.available ? "可用" : "不可用"} · {component.source}</dd></div>
+              {/each}
+            </dl>
+          {/if}
+          {#if runtime.appUpdate.error}<p role="alert">{runtime.appUpdate.error}</p>{/if}
+          {#each runtime.updates.filter((update) => update.error) as update}<p role="alert">{update.name}: {update.error}</p>{/each}
+        </section>
+      </div>
+    </div>
   </div>
 </section>
 
 <style>
-  .settings-page {
-    height: 100%;
-    padding: 14px 18px 18px;
-    overflow: auto;
-    color: var(--text);
-    font-family: var(--text-font);
+  .settings-page { height: 100%; min-height: 0; display: flex; flex-direction: column; color: var(--text); font-family: var(--text-font); }
+  .settings-header { min-height: 52px; flex-shrink: 0; display: flex; align-items: center; gap: 12px; padding: 8px 16px; border-bottom: 1px solid var(--border); }
+  h1 { margin: 0; font-size: 16px; font-weight: 650; color: var(--text-strong); }
+  h2 { margin: 0; padding: 0 0 16px; font-size: 18px; font-weight: 600; color: var(--text-strong); }
+  .settings-layout { display: grid; grid-template-columns: 180px minmax(0, 1fr); flex: 1; min-height: 0; }
+  .settings-navigation { padding: 12px 8px; border-right: 1px solid var(--border); background: var(--surface-alt); overflow-y: auto; }
+  .settings-navigation button { display: flex; align-items: center; gap: 10px; min-height: 36px; width: 100%; padding: 8px 10px; border: 0; border-radius: 4px; background: transparent; color: var(--text-muted); text-align: left; cursor: pointer; }
+  .settings-navigation button span { min-width: 0; overflow-wrap: anywhere; }
+  .settings-navigation button:hover { background: var(--surface-hover); color: var(--text); }
+  .settings-navigation button.active { color: var(--text-strong); background: var(--surface-raised); box-shadow: inset 2px 0 var(--accent); }
+  .settings-body { min-width: 0; min-height: 0; overflow: auto; padding: 24px; container-type: inline-size; }
+  .settings-panel { max-width: 920px; }
+  .embedded-panel { max-width: none; min-height: 500px; height: calc(100% - 40px); }
+  .settings-panel[hidden] { display: none; }
+  .environment { margin: 0; }
+  .environment div { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; padding: 12px 0; border-bottom: 1px solid var(--border); }
+  dt { font-weight: 600; }
+  dd { margin: 0; color: var(--text-muted); overflow-wrap: anywhere; }
+  @media (max-width: 760px) {
+    .settings-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+    .settings-navigation { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; border-right: 0; border-bottom: 1px solid var(--border); }
+    .settings-navigation button { font-size: 12px; gap: 6px; padding: 8px; }
+    .settings-body { padding: 16px; }
   }
-
-  .settings-header,
-  .settings-title,
-  .setting-row {
-    display: flex;
-    align-items: center;
-  }
-
-  .settings-title {
-    gap: 8px;
-  }
-
-  h1,
-  h2,
-  small,
-  strong {
-    margin: 0;
-  }
-
-  h1 {
-    color: #f4f7f5;
-    font-size: 16px;
-    font-weight: 650;
-  }
-
-  .icon-button {
-    display: inline-grid;
-    place-items: center;
-    width: 30px;
-    height: 30px;
-    border: 1px solid transparent;
-    border-radius: 4px;
-    color: #aeb7b0;
-    background: transparent;
-    cursor: pointer;
-  }
-
-  .icon-button:hover {
-    border-color: #465048;
-    color: #f4f7f5;
-    background: #252b27;
-  }
-
-  .settings-content {
-    width: min(720px, 100%);
-    margin-top: 26px;
-  }
-
-  .settings-group-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-  }
-
-  .app-update-status {
-    color: #89928b;
-    font-size: 10px;
-  }
-
-  .app-update-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    min-height: 52px;
-    padding: 8px 4px;
-    border-bottom: 1px solid #303832;
-  }
-
-  .settings-group-header h2 {
-    flex: 1;
-  }
-
-  .quiet-button {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    min-height: 30px;
-    padding: 0 9px;
-    border: 1px solid #39433c;
-    border-radius: 4px;
-    color: #c5cec7;
-    background: #202721;
-    cursor: pointer;
-    font: inherit;
-    font-size: 11px;
-  }
-
-  .quiet-button:hover:not(:disabled) {
-    border-color: #607467;
-    color: #f4f7f5;
-  }
-
-  .runtime-list {
-    display: grid;
-  }
-
-  .runtime-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    min-height: 52px;
-    padding: 8px 4px;
-    border-bottom: 1px solid #303832;
-  }
-
-  .runtime-actions {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    flex: 0 0 auto;
-  }
-
-  .runtime-action {
-    min-height: 26px;
-    padding: 0 7px;
-    border: 1px solid #39433c;
-    border-radius: 4px;
-    color: #c5cec7;
-    background: #202721;
-    cursor: pointer;
-    font: inherit;
-    font-size: 10px;
-  }
-
-  .runtime-action:hover {
-    border-color: #8fd6ad;
-    color: #f4f7f5;
-  }
-
-
-  .runtime-status.stale {
-    color: #c9a954;
-  }
-
-  .runtime-status.error {
-    color: #d88989;
-  }
-
-  .runtime-note,
-  .settings-empty {
-    margin: 10px 4px 0;
-    color: #778078;
-    font-size: 10px;
-  }
-
-  .spin { animation: spin .8s linear infinite; }
-
-  @keyframes spin {
-    to { transform: rotate(360deg); }
-  }
-
-
-  .settings-group {
-    border-top: 1px solid #303832;
-  }
-
-  .settings-group + .settings-group {
-    margin-top: 24px;
-  }
-
-  .setting-control {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 18px;
-    min-height: 60px;
-    padding: 10px 4px;
-    border-bottom: 1px solid #303832;
-    color: #aeb7b0;
-  }
-
-  .setting-control select {
-    flex: 0 1 190px;
-    min-width: 140px;
-    height: 30px;
-    padding: 0 8px;
-    border: 1px solid #39433c;
-    border-radius: 4px;
-    outline: none;
-    color: #e7ece8;
-    background: #101411;
-    font: inherit;
-  }
-
-  .setting-control select:focus {
-    border-color: #78bd96;
-    box-shadow: 0 0 0 2px #78bd9622;
-  }
-
-  h2 {
-    padding: 10px 2px 6px;
-    color: #89928b;
-    font-size: 11px;
-    font-weight: 700;
-    letter-spacing: .04em;
-    text-transform: uppercase;
-  }
-
-  .setting-row {
-    width: 100%;
-    min-height: 66px;
-    gap: 12px;
-    padding: 10px 4px;
-    border: 0;
-    border-bottom: 1px solid #303832;
-    color: #aeb7b0;
-    background: transparent;
-    text-align: left;
-    cursor: pointer;
-  }
-
-  .setting-row:hover {
-    color: #f4f7f5;
-    background: #191f1b;
-  }
-
-  .setting-icon {
-    display: inline-grid;
-    place-items: center;
-    width: 32px;
-    height: 32px;
-    border: 1px solid #39433c;
-    border-radius: 4px;
-    color: #8fd6ad;
-    background: #202721;
-  }
-
-  .setting-copy {
-    display: grid;
-    flex: 1;
-    min-width: 0;
-    gap: 4px;
-  }
-
-  .setting-copy strong {
-    overflow: hidden;
-    color: #f4f7f5;
-    font-size: 12px;
-    font-weight: 650;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .setting-copy small {
-    overflow: hidden;
-    color: #778078;
-    font-size: 11px;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
+  @media (max-width: 400px) { .settings-navigation { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 </style>

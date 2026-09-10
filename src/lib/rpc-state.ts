@@ -1,0 +1,109 @@
+export interface RpcEvent {
+  sequence: number;
+  payload: Record<string, unknown>;
+}
+
+export interface RpcMessage {
+  role: string;
+  content: unknown;
+  timestamp?: number;
+  toolCallId?: string;
+  toolName?: string;
+  errorMessage?: string;
+}
+
+export interface RpcTool {
+  id: string;
+  name: string;
+  args: unknown;
+  result: unknown;
+  running: boolean;
+  isError: boolean;
+}
+
+export interface Conversation {
+  sequence: number;
+  messages: RpcMessage[];
+  tools: Record<string, RpcTool>;
+  busy: boolean;
+  closed: boolean;
+  error: string;
+  queue: string[];
+}
+
+export function record(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+export function asMessage(value: unknown): RpcMessage | null {
+  const candidate = record(value);
+  if (typeof candidate.role !== "string") return null;
+  return candidate as unknown as RpcMessage;
+}
+
+export function contentText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.map((part) => {
+    const node = record(part);
+    if (node.type === "text" && typeof node.text === "string") return node.text;
+    if (node.type === "thinking" && typeof node.thinking === "string") return node.thinking;
+    if (node.type === "image") return "[图片]";
+    if (node.type === "toolCall") return `${String(node.name ?? "工具")}\n${JSON.stringify(node.arguments ?? {}, null, 2)}`;
+    return "";
+  }).filter(Boolean).join("\n");
+}
+
+export function emptyConversation(): Conversation {
+  return { sequence: 0, messages: [], tools: {}, busy: false, closed: false, error: "", queue: [] };
+}
+
+export function loadHistory(state: Conversation, values: unknown[], sequence: number): Conversation {
+  return { ...state, messages: values.map(asMessage).filter((message): message is RpcMessage => message !== null), sequence };
+}
+
+export function applyRpcEvent(previous: Conversation, event: RpcEvent): Conversation {
+  if (event.sequence <= previous.sequence) return previous;
+  const state = { ...previous, sequence: event.sequence };
+  const payload = event.payload;
+  const type = payload.type;
+  if (type === "agent_start") state.busy = true;
+  else if (type === "agent_settled") state.busy = false;
+  else if (type === "rpc_exit") {
+    state.closed = true;
+    state.busy = false;
+    state.queue = [];
+    state.tools = Object.fromEntries(Object.entries(previous.tools).map(([id, tool]) =>
+      [id, { ...tool, running: false, isError: tool.isError || tool.running }]));
+  }
+  else if (type === "rpc_error" || type === "extension_error") {
+    state.error = typeof payload.error === "string" ? payload.error : "RPC 运行失败";
+  } else if (type === "queue_update") {
+    state.queue = [...(Array.isArray(payload.steering) ? payload.steering : []),
+      ...(Array.isArray(payload.followUp) ? payload.followUp : [])].filter((item): item is string => typeof item === "string");
+  } else if (type === "message_start" || type === "message_update" || type === "message_end") {
+    const message = asMessage(payload.message);
+    if (!message) return state;
+    const last = previous.messages.at(-1);
+    const same = last && last.role === message.role &&
+      (message.timestamp !== undefined && last.timestamp === message.timestamp ||
+        message.toolCallId !== undefined && last.toolCallId === message.toolCallId);
+    state.messages = same ? [...previous.messages.slice(0, -1), message] : [...previous.messages, message];
+    if (type === "message_end" && message.role === "toolResult" && message.toolCallId) {
+      state.tools = { ...previous.tools };
+      delete state.tools[message.toolCallId];
+    }
+    if (message.errorMessage) state.error = message.errorMessage;
+  } else if (type === "tool_execution_start" || type === "tool_execution_update" || type === "tool_execution_end") {
+    const id = typeof payload.toolCallId === "string" ? payload.toolCallId : "";
+    if (!id) return state;
+    const existing = previous.tools[id] ?? { id, name: String(payload.toolName ?? "工具"), args: payload.args, result: null, running: true, isError: false };
+    state.tools = { ...previous.tools, [id]: {
+      ...existing,
+      result: type === "tool_execution_update" ? payload.partialResult : type === "tool_execution_end" ? payload.result : existing.result,
+      running: type !== "tool_execution_end",
+      isError: payload.isError === true,
+    } };
+  }
+  return state;
+}

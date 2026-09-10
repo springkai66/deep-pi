@@ -1,10 +1,12 @@
 <script lang="ts">
+  import { createTerminalInput } from "./terminal-input";
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import { FitAddon } from "@xterm/addon-fit";
   import { Terminal, type ITerminalAddon } from "@xterm/xterm";
   import "@xterm/xterm/css/xterm.css";
   import { onMount } from "svelte";
+  import { Bot } from "@lucide/svelte";
   import {
     cssFontFamily,
     isLightColorMode,
@@ -21,12 +23,14 @@
     status: TaskStatus;
     visible: boolean;
     active: boolean;
+    transitioning: boolean;
     codeFont: CodeFont;
     colorMode: ColorMode;
-    onExit: (exitCode: number | null, error: string | null) => void;
+    onExit: (exitCode: number | null, error: string | null, runId: string) => void;
+    onUseConversation: () => void;
   }
 
-  let { taskId, runId = null, title, status, visible, active, codeFont, colorMode, onExit }: Props = $props();
+  let { taskId, runId = null, title, status, visible, active, transitioning, codeFont, colorMode, onExit, onUseConversation }: Props = $props();
   let container: HTMLDivElement;
   let terminal: Terminal | undefined;
   let session = $state<ReturnType<typeof createTerminalSession> | null>(null);
@@ -144,7 +148,7 @@
         listen<T>(name, ({ payload }) => handler(payload)),
       acknowledge: (taskId, runId) => invoke("acknowledge_pi_output", { taskId, runId }),
       output: (data) => terminalInstance.write(decodeBase64(data)),
-      exit: (exitCode, error) => {
+      exit: (exitCode, error, exitedRunId) => {
         terminalInstance.options.cursorBlink = false;
         terminalInstance.writeln("");
         terminalInstance.writeln(
@@ -152,7 +156,7 @@
             ? `\x1b[31m${error}\x1b[0m`
             : `\x1b[90mPi exited with code ${exitCode ?? "unknown"}.\x1b[0m`,
         );
-        onExit(exitCode, error);
+        onExit(exitCode, error, exitedRunId);
       },
       error: (error) => terminalInstance.writeln(`\r\nTerminal subscription failed: ${String(error)}`),
     });
@@ -179,11 +183,14 @@
     resizeObserver.observe(container);
     resize();
 
-    const dataDisposable = terminalInstance.onData((data) => {
-      void invoke("write_pi_task", { taskId, data }).catch((error) => {
+    const inputQueue = createTerminalInput({
+      currentRun: () => transitioning ? null : runId,
+      write: (runId, data) => invoke("write_pi_task", { taskId, runId, data }),
+      error: (error) => {
         terminalInstance.writeln(`\r\n\x1b[31mInput failed: ${String(error)}\x1b[0m`);
-      });
+      },
     });
+    const dataDisposable = terminalInstance.onData((data) => inputQueue.send(data));
     terminalInstance.attachCustomKeyEventHandler((event) => {
       if (event.type !== "keydown" || !event.ctrlKey || !event.shiftKey) return true;
       if (event.key.toLowerCase() === "c") {
@@ -207,6 +214,7 @@
 
     return () => {
       disposed = true;
+      inputQueue.dispose();
       connection.dispose();
       session = null;
       resizeObserver.disconnect();
@@ -220,7 +228,9 @@
 </script>
 
 <section class:hidden={!visible} class="terminal-pane" aria-label={`${title} terminal`}>
-  <header>{title}</header>
+  <header><span>{title}{#if transitioning} · 正在切换模式{/if}</span>
+    <button type="button" title="切换到对话模式" aria-label="切换到对话模式" disabled={transitioning} onclick={onUseConversation}><Bot size={15} /></button>
+  </header>
   <div class="terminal" bind:this={container}></div>
 </section>
 
@@ -244,6 +254,9 @@
   header {
     display: flex;
     align-items: center;
+    gap: 8px;
+    display: flex;
+    align-items: center;
     padding: 0 10px;
     overflow: hidden;
     border-bottom: 1px solid #303832;
@@ -254,6 +267,10 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  header span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  header button { display: grid; place-items: center; width: 26px; height: 26px; flex-shrink: 0; border: 0; border-radius: 4px; color: inherit; background: transparent; cursor: pointer; }
+  header button:hover:not(:disabled) { background: var(--surface-hover); }
+  header button:disabled { opacity: .4; cursor: default; }
 
   .terminal {
     min-width: 0;

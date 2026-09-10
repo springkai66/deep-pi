@@ -16,7 +16,7 @@ export interface TerminalPorts {
   listen<T>(name: string, handler: (payload: T) => void): Promise<() => void>;
   acknowledge(taskId: string, runId: string): Promise<unknown>;
   output(data: string): void;
-  exit(exitCode: number | null, error: string | null): void;
+  exit(exitCode: number | null, error: string | null, runId: string): void;
   error(error: unknown): void;
 }
 
@@ -31,7 +31,7 @@ export function createTerminalSession(taskId: string, ports: TerminalPorts) {
       if (accepts(event)) ports.output(event.data);
     }),
     ports.listen<ExitEvent>("pty-exit", (event) => {
-      if (accepts(event)) ports.exit(event.exitCode, event.error);
+      if (accepts(event)) ports.exit(event.exitCode, event.error, event.runId);
     }),
   ];
   const acknowledge = () => {

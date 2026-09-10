@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
+  import { invoke as nativeInvoke } from "@tauri-apps/api/core";
   import { Check, KeyRound, Plus, RefreshCw, Save, Search, Server, Trash2, X } from "@lucide/svelte";
   import { onMount } from "svelte";
   import type {
@@ -16,6 +16,8 @@
     confirm: (title: string, message: string, confirmLabel?: string) => Promise<boolean>;
     onClose: () => void;
     onError: (error: unknown) => void;
+    embedded?: boolean;
+    invokeCommand?: typeof nativeInvoke;
   }
 
   interface ProviderPreset {
@@ -107,7 +109,8 @@
     ["opencode", "OpenCode"],
   ];
 
-  let { confirm, onClose, onError }: Props = $props();
+  let { confirm, onClose, onError, embedded = false, invokeCommand = nativeInvoke }: Props = $props();
+  const invoke = <T,>(command: string, args?: Parameters<typeof nativeInvoke>[1]) => invokeCommand<T>(command, args);
   let providers = $state<ProviderRecord[]>([]);
   let draft = $state<ProviderRecord>({
     id: "",
@@ -508,22 +511,22 @@
   }
 </script>
 
-<section class="provider-page" aria-label="Pi Provider 和模型配置">
+<section class="provider-page" class:embedded aria-label="Pi Provider 和模型配置">
   <header class="provider-header">
-    <div class="provider-title">
+    {#if !embedded}<div class="provider-title">
       <button class="icon-button" type="button" aria-label="返回工作区" title="返回" onclick={onClose}><X size={17} /></button>
       <Server size={18} />
       <h1>Provider 与模型</h1>
-    </div>
+    </div>{/if}
     <div class="header-actions">
       <button type="button" class="quiet-button" onclick={newProvider}><Plus size={14} />新建 Provider</button>
-      <button type="button" class="primary-button" disabled={isLoading} onclick={() => void saveProvider}><Save size={14} />保存</button>
+      <button type="button" class="primary-button" disabled={isLoading} onclick={() => void saveProvider()}><Save size={14} />保存</button>
     </div>
   </header>
 
   <div class="provider-layout">
     <aside class="provider-list" aria-label="Provider 列表">
-      <div class="section-heading"><span>已配置 Provider</span><span>{providers.length}</span></div>
+      <div class="section-heading"><span>DeepPi 托管 Provider</span><span>{providers.length}</span></div>
       {#if providers.length === 0}
         <p class="empty">还没有 Provider</p>
       {:else}
@@ -687,6 +690,9 @@
 </section>
 
 <style>
+  .provider-page.embedded { padding: 0; }
+  .embedded .provider-header { justify-content: flex-end; }
+  .embedded .provider-editor, .embedded .catalog-panel { border: 0; border-radius: 0; background: transparent; }
   .provider-page { height: 100%; padding: 14px 18px 18px; display: grid; grid-template-rows: 42px minmax(0, 1fr) 24px; gap: 10px; color: #d8ded9; overflow: hidden; font-family: var(--text-font); }
   .provider-header, .provider-title, .header-actions, .section-heading, .provider-row, .credential-row, .configured-model, .provider-model, .catalog-model, .catalog-search { display: flex; align-items: center; }
   .provider-header, .section-heading, .configured-model, .provider-model, .catalog-model { justify-content: space-between; }
@@ -753,4 +759,20 @@
   @keyframes spin { to { transform: rotate(360deg); } }
   @media (max-width: 1000px) { .provider-layout { grid-template-columns: 160px minmax(280px, 1fr); } .catalog-panel { grid-column: 1 / -1; max-height: 260px; } }
   @media (max-width: 680px) { .provider-page { padding: 10px; } .provider-layout { display: flex; flex-direction: column; } .provider-list { max-height: 150px; border-right: 0; border-bottom: 1px solid #303832; padding: 0 0 8px; } .provider-editor, .catalog-panel { flex: 1; } .form-grid { grid-template-columns: 1fr; } .credential-row { flex-wrap: wrap; } .credential-row input { flex-basis: 100%; } .header-row { grid-template-columns: 1fr 1fr 30px; } }
+  @container (max-width: 860px) {
+    .embedded .provider-layout { grid-template-columns: 150px minmax(0, 1fr); }
+    .embedded .catalog-panel { grid-column: 1 / -1; max-height: 260px; }
+  }
+  @container (max-width: 580px) {
+    .provider-page.embedded { display: flex; flex-direction: column; height: auto; overflow: visible; }
+    .embedded .provider-layout { display: flex; flex-direction: column; overflow: visible; }
+    .embedded .provider-list { max-height: 150px; border-right: 0; border-bottom: 1px solid var(--border); padding: 0 0 8px; }
+    .embedded .provider-editor, .embedded .catalog-panel { flex: none; padding: 12px 0; overflow: visible; max-height: none; }
+    .embedded .form-grid { grid-template-columns: minmax(0, 1fr); }
+    .embedded .credential-row, .embedded .section-heading { flex-wrap: wrap; gap: 6px; }
+    .embedded .credential-row input { flex-basis: 100%; }
+    .embedded .header-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 30px; }
+    .embedded .catalog-search { flex-wrap: wrap; }
+    .embedded .catalog-search input { flex-basis: 100%; }
+  }
 </style>

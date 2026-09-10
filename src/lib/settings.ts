@@ -2,6 +2,10 @@ export type ColorMode = "system" | "light" | "dark";
 export type UiFont = "system" | "segoe" | "yahei" | "inter";
 export type CodeFont = "cascadia" | "consolas" | "jetbrains";
 export type CloseBehavior = "ask" | "minimize" | "exit";
+export interface ExternalEditor {
+  kind: "vscode" | "notepadPlusPlus";
+  executable: string;
+}
 
 export interface AppSettings {
   schemaVersion: 1;
@@ -14,6 +18,8 @@ export interface AppSettings {
   closeBehavior: CloseBehavior;
   skippedUpdates: Record<string, string>;
   snoozedUpdates: Record<string, number>;
+  externalEditor: ExternalEditor | null;
+  piEnvironment: "managed";
 }
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
@@ -27,6 +33,8 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   closeBehavior: "ask",
   skippedUpdates: {},
   snoozedUpdates: {},
+  externalEditor: null,
+  piEnvironment: "managed",
 };
 
 export const UI_FONT_OPTIONS: Array<{ value: UiFont; label: string }> = [

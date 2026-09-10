@@ -10,13 +10,16 @@
     Plus,
     RefreshCw,
     RotateCcw,
-    Settings2,
+    Search,
+    X,
     Square,
     Trash2,
   } from "@lucide/svelte";
   import type { Project } from "$lib/project";
   import { onMount } from "svelte";
   import { statusLabels, type Task } from "$lib/task";
+  import { matchesSearch } from "$lib/navigation";
+  import { shortcutAria } from "$lib/shortcuts";
 
   interface Props {
     projects: Project[];
@@ -33,8 +36,7 @@
     onDelete: (task: Task) => void;
     onAddSession: (project: Project) => void;
     onRemoveProject: (project: Project) => void;
-    onOpenSettings: () => void;
-    settingsActive: boolean;
+    searchFocusToken?: number;
   }
 
   let {
@@ -52,8 +54,7 @@
     onDelete,
     onAddSession,
     onRemoveProject,
-    onOpenSettings,
-    settingsActive,
+    searchFocusToken = 0,
   }: Props = $props();
 
   const activeStatuses = ["queued", "running", "waiting"];
@@ -64,6 +65,40 @@
   let sessionMenu = $state<{ task: Task; x: number; y: number } | null>(null);
   let projectMenuElement = $state<HTMLDivElement>();
   let sessionMenuElement = $state<HTMLDivElement>();
+  let searchInput = $state<HTMLInputElement>();
+  let searchResults = $state<HTMLDivElement>();
+  let searchText = $state("");
+  let query = $state("");
+  let composing = false;
+  const searchMatches = $derived(tasks.filter((task) => matchesSearch(task.title, query)));
+
+  $effect(() => {
+    if (searchFocusToken > 0) {
+      searchInput?.focus();
+      searchInput?.select();
+    }
+  });
+
+  function searchKeydown(event: KeyboardEvent) {
+    if (event.isComposing || composing) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      searchText = query = "";
+      searchInput?.focus();
+    } else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      const buttons = Array.from(searchResults?.querySelectorAll<HTMLButtonElement>("button") ?? []);
+      if (!buttons.length) return;
+      event.preventDefault();
+      const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+      const next = index < 0
+        ? (event.key === "ArrowDown" ? 0 : buttons.length - 1)
+        : (index + (event.key === "ArrowDown" ? 1 : buttons.length - 1)) % buttons.length;
+      buttons[next]?.focus();
+    } else if (event.key === "Enter" && event.target === searchInput && query.trim() && searchMatches[0]) {
+      event.preventDefault();
+      onOpen(searchMatches[0]);
+    }
+  }
 
   onMount(() => {
     const dismiss = () => {
@@ -170,6 +205,30 @@
 </script>
 
 <aside class="task-sidebar" aria-label="工作区">
+  <div class="task-search" role="search">
+    <Search size={14} aria-hidden="true" />
+    <input bind:this={searchInput} bind:value={searchText} type="search"
+      aria-label="搜索任务" aria-keyshortcuts={shortcutAria("tasks")} placeholder="搜索任务"
+      onkeydown={searchKeydown}
+      oncompositionstart={() => { composing = true; }}
+      oncompositionend={() => { composing = false; query = searchText; }}
+      oninput={(event) => { if (!composing) query = event.currentTarget.value; }} />
+    {#if searchText}
+      <button type="button" title="清空搜索" aria-label="清空搜索"
+        onclick={() => { searchText = query = ""; searchInput?.focus(); }}><X size={14} /></button>
+    {/if}
+  </div>
+  {#if query.trim()}
+    <div class="task-search-results" bind:this={searchResults} role="group" aria-label="任务搜索结果">
+      <p role="status">{searchMatches.length ? `${searchMatches.length} 个任务` : "没有匹配的任务"}</p>
+      {#each searchMatches as task (task.id)}
+        <button type="button" class="search-result" onclick={() => onOpen(task)} onkeydown={searchKeydown}>
+          <strong>{task.title}</strong>
+          <small>{projects.find((project) => project.id === task.projectId)?.name ?? task.projectPath} · {task.archivedAt !== null ? "归档" : statusLabels[task.status]}</small>
+        </button>
+      {/each}
+    </div>
+  {:else}
   <section class="projects-section">
     <header class="projects-header">
       <span>工作区</span>
@@ -271,17 +330,7 @@
     {/each}
   </section>
 
-  <footer class="sidebar-footer">
-    <button
-      class:active={settingsActive}
-      type="button"
-      aria-current={settingsActive ? "page" : undefined}
-      onclick={onOpenSettings}
-    >
-      <Settings2 size={15} />
-      <span>设置</span>
-    </button>
-  </footer>
+  {/if}
 
   {#if projectMenu}
     <div
@@ -339,3 +388,14 @@
   {/if}
 
 </aside>
+
+<style>
+  .task-search { display: flex; align-items: center; gap: 6px; margin: 12px 10px 4px; padding: 5px 8px; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--surface); color: var(--text-muted); flex-shrink: 0; }
+  .task-search input { min-width: 0; width: 100%; border: 0; background: transparent; color: var(--text); }
+  .task-search button { display: grid; place-items: center; border: 0; background: transparent; color: var(--text-muted); cursor: pointer; }
+  .task-search-results { padding: 8px; overflow: auto; }
+  .task-search-results p { color: var(--text-muted); margin: 4px 4px 12px; }
+  .search-result { display: flex; flex-direction: column; gap: 5px; width: 100%; padding: 10px 8px; border: 0; border-radius: 4px; text-align: left; background: transparent; color: var(--text); cursor: pointer; overflow-wrap: anywhere; }
+  .search-result:hover, .search-result:focus-visible { background: var(--surface-hover); }
+  .search-result small { color: var(--text-muted); }
+</style>
