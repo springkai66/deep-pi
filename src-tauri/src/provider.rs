@@ -3,13 +3,14 @@ use std::{
     fs,
     io::Write,
     path::Path,
+    sync::Mutex,
     time::Duration,
 };
 
 use atomic_write_file::AtomicWriteFile;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use tauri::{State, Url};
+use tauri::{AppHandle, Manager, State, Url};
 
 use crate::{app_paths::AppPaths, credentials::provider_api_key};
 
@@ -23,6 +24,9 @@ const PROVIDER_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_HEADERS: usize = 32;
 const MAX_HEADER_NAME_LENGTH: usize = 128;
 const MAX_HEADER_VALUE_LENGTH: usize = 4_096;
+
+#[derive(Default)]
+pub struct ProviderConfigGate(Mutex<()>);
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -724,24 +728,46 @@ fn list_provider_models_inner(
 }
 
 #[tauri::command]
-pub fn list_pi_providers(paths: State<'_, AppPaths>) -> Result<Vec<ProviderRecord>, String> {
-    list_provider_file(&paths.pi_models_file())
+pub async fn list_pi_providers(app: AppHandle) -> Result<Vec<ProviderRecord>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        list_provider_file(&app.state::<AppPaths>().pi_models_file())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-pub fn save_pi_provider(
-    paths: State<'_, AppPaths>,
+pub async fn save_pi_provider(
+    app: AppHandle,
     request: SaveProviderRequest,
 ) -> Result<ProviderRecord, String> {
-    save_provider_file(&paths.pi_models_file(), &request)
+    tauri::async_runtime::spawn_blocking(move || {
+        let gate = app.state::<ProviderConfigGate>();
+        let _permit = gate
+            .0
+            .lock()
+            .map_err(|_| "Provider configuration lock is poisoned")?;
+        save_provider_file(&app.state::<AppPaths>().pi_models_file(), &request)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-pub fn delete_pi_provider(
-    paths: State<'_, AppPaths>,
+pub async fn delete_pi_provider(
+    app: AppHandle,
     request: DeleteProviderRequest,
 ) -> Result<(), String> {
-    delete_provider_file(&paths.pi_models_file(), &request.id)
+    tauri::async_runtime::spawn_blocking(move || {
+        let gate = app.state::<ProviderConfigGate>();
+        let _permit = gate
+            .0
+            .lock()
+            .map_err(|_| "Provider configuration lock is poisoned")?;
+        delete_provider_file(&app.state::<AppPaths>().pi_models_file(), &request.id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[cfg(test)]

@@ -1,3 +1,5 @@
+#[cfg(test)]
+use std::collections::HashMap;
 use std::{
     collections::HashSet,
     fs,
@@ -9,7 +11,7 @@ use std::{
 
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{AppHandle, Manager};
 use uuid::Uuid;
 
 use crate::dsh_api::DshSessionSummary;
@@ -75,6 +77,9 @@ pub struct TaskRecord {
     pub session_id: String,
     pub session_file: Option<String>,
     pub execution_target: String,
+    pub interaction_mode: String,
+    pub pi_environment: String,
+    pub pi_agent_dir: Option<String>,
     pub created_at: i64,
     pub started_at: Option<i64>,
     pub completed_at: Option<i64>,
@@ -171,6 +176,53 @@ impl TaskStore {
                 .execute("ALTER TABLE tasks ADD COLUMN project_id TEXT", [])
                 .map_err(|error| format!("failed to add task project column: {error}"))?;
         }
+        let has_interaction_mode = connection
+            .prepare("PRAGMA table_info(tasks)")
+            .map_err(|error| error.to_string())?
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?
+            .iter()
+            .any(|name| name == "interaction_mode");
+        if !has_interaction_mode {
+            connection.execute(
+                "ALTER TABLE tasks ADD COLUMN interaction_mode TEXT NOT NULL DEFAULT 'tui' CHECK(interaction_mode IN ('tui', 'rpc'))",
+                [],
+            ).map_err(|error| error.to_string())?;
+        }
+        let has_pi_environment = connection
+            .prepare("PRAGMA table_info(tasks)")
+            .map_err(|error| error.to_string())?
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?
+            .iter()
+            .any(|name| name == "pi_environment");
+        if !has_pi_environment {
+            connection.execute(
+                "ALTER TABLE tasks ADD COLUMN pi_environment TEXT NOT NULL DEFAULT 'managed' CHECK(pi_environment IN ('managed', 'native'))", [],
+            ).map_err(|error| error.to_string())?;
+        }
+        let has_pi_agent_dir = connection
+            .prepare("PRAGMA table_info(tasks)")
+            .map_err(|error| error.to_string())?
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?
+            .iter()
+            .any(|name| name == "pi_agent_dir");
+        if !has_pi_agent_dir {
+            connection
+                .execute("ALTER TABLE tasks ADD COLUMN pi_agent_dir TEXT", [])
+                .map_err(|error| error.to_string())?;
+        }
+        connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS ignored_pi_sessions (session_id TEXT PRIMARY KEY NOT NULL);
+             CREATE INDEX IF NOT EXISTS idx_tasks_pi_session ON tasks(agent, pi_environment, session_id);",
+        ).map_err(|error| error.to_string())?;
         connection
             .execute_batch(
                 "CREATE TABLE IF NOT EXISTS projects (
@@ -202,7 +254,7 @@ impl TaskStore {
                 .map_err(|error| format!("failed to add project removal column: {error}"))?;
         }
         connection
-            .execute_batch("PRAGMA user_version = 4;")
+            .execute_batch("PRAGMA user_version = 6;")
             .map_err(|error| format!("failed to update task schema version: {error}"))?;
         Ok(())
     }
@@ -325,6 +377,20 @@ impl TaskStore {
             .map_err(|error| format!("failed to query projects: {error}"))?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|error| format!("failed to read projects: {error}"))
+    }
+
+    pub fn project_path(&self, id: &str) -> Result<String, String> {
+        self.connection
+            .lock()
+            .map_err(|_| "task database lock is poisoned".to_string())?
+            .query_row(
+                "SELECT path FROM projects WHERE id = ?1 AND removed_at IS NULL",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| format!("failed to read project: {error}"))?
+            .ok_or_else(|| "Project is not in the workspace".into())
     }
 
     pub fn touch_project(&self, id: &str) -> Result<(), String> {
@@ -508,7 +574,7 @@ impl TaskStore {
             .prepare(
                 "SELECT id, title, agent, status, project_id, project_path, session_id,
                         session_file, execution_target, created_at, started_at,
-                        completed_at, archived_at
+                        completed_at, archived_at, interaction_mode, pi_environment, pi_agent_dir
                  FROM tasks
                  ORDER BY archived_at IS NOT NULL, created_at DESC",
             )
@@ -533,6 +599,166 @@ impl TaskStore {
         ensure_updated(affected)
     }
 
+    pub fn set_interaction_mode(&self, id: &str, mode: &str) -> Result<(), String> {
+        if !matches!(mode, "rpc" | "tui") {
+            return Err("Unknown interaction mode".into());
+        }
+        let affected = self
+            .connection
+            .lock()
+            .map_err(|_| "task database lock is poisoned")?
+            .execute(
+                "UPDATE tasks SET interaction_mode = ?1 WHERE id = ?2 AND agent = 'pi'",
+                params![mode, id],
+            )
+            .map_err(|error| error.to_string())?;
+        ensure_updated(affected)
+    }
+
+    pub fn set_pi_environment(
+        &self,
+        id: &str,
+        environment: &str,
+        home: &Path,
+    ) -> Result<(), String> {
+        if !matches!(environment, "native" | "managed") {
+            return Err("Unknown Pi environment".into());
+        }
+        crate::snapshot::reject_link(home)?;
+        let home = fs::canonicalize(home).map_err(|_| "Pi configuration directory unavailable")?;
+        let affected = self.connection.lock().map_err(|_| "task database lock is poisoned")?
+            .execute("UPDATE tasks SET pi_environment = ?1, pi_agent_dir = ?3 WHERE id = ?2 AND agent = 'pi'", params![environment, id, home.to_string_lossy()])
+            .map_err(|error| error.to_string())?;
+        ensure_updated(affected)
+    }
+
+    #[cfg(test)]
+    pub fn import_native_sessions(
+        &self,
+        sessions: &[crate::native_pi::NativeSession],
+        home: &Path,
+    ) -> Result<(usize, usize), String> {
+        crate::snapshot::reject_link(home)?;
+        let home = fs::canonicalize(home).map_err(|_| "Native Pi directory unavailable")?;
+        let home = home.to_string_lossy().into_owned();
+        let (mut existing, mut projects) = {
+            let connection = self
+                .connection
+                .lock()
+                .map_err(|_| "task database lock is poisoned")?;
+            let mut statement = connection.prepare(
+                "SELECT session_id, session_file, pi_agent_dir FROM tasks WHERE agent = 'pi' AND pi_environment = 'native'",
+            ).map_err(|error| error.to_string())?;
+            let mut existing = statement
+                .query_map([], |row| {
+                    let id: String = row.get(0)?;
+                    let file: Option<String> = row.get(1)?;
+                    let directory: Option<String> = row.get(2)?;
+                    Ok(match (file, directory) {
+                        (Some(file), Some(directory)) => {
+                            crate::native_pi::session_key(&directory, &file)
+                        }
+                        _ => id,
+                    })
+                })
+                .map_err(|error| error.to_string())?
+                .collect::<Result<HashSet<_>, _>>()
+                .map_err(|error| error.to_string())?;
+            let mut ignored = connection
+                .prepare("SELECT session_id FROM ignored_pi_sessions")
+                .map_err(|error| error.to_string())?;
+            existing.extend(
+                ignored
+                    .query_map([], |row| row.get::<_, String>(0))
+                    .map_err(|error| error.to_string())?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| error.to_string())?,
+            );
+            let mut statement = connection
+                .prepare("SELECT canonical_path, id FROM projects")
+                .map_err(|error| error.to_string())?;
+            let projects = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|error| error.to_string())?
+                .collect::<Result<HashMap<_, _>, _>>()
+                .map_err(|error| error.to_string())?;
+            (existing, projects)
+        };
+        let mut prepared = Vec::new();
+        let mut resolved = HashMap::new();
+        let mut skipped = 0;
+        for session in sessions {
+            let key = crate::native_pi::session_key(&home, &session.file);
+            if existing.contains(&key) || existing.contains(&session.id) {
+                continue;
+            }
+            if !crate::native_pi::valid_session_id(&session.id) {
+                skipped += 1;
+                continue;
+            }
+            let project = if let Some(project) = resolved.get(&session.cwd) {
+                project
+            } else {
+                let canonical = match fs::canonicalize(&session.cwd) {
+                    Ok(path) if path.is_dir() => path,
+                    _ => {
+                        skipped += 1;
+                        continue;
+                    }
+                };
+                let path = clean_display_path(&canonical.to_string_lossy());
+                let key = path.replace('\\', "/").to_lowercase();
+                let project_id = if let Some(id) = projects.get(&key) {
+                    id.clone()
+                } else {
+                    let project = self.add_project(&path)?;
+                    projects.insert(key, project.id.clone());
+                    project.id
+                };
+                resolved
+                    .entry(session.cwd.clone())
+                    .or_insert((project_id, path))
+            };
+            prepared.push((session, project.clone(), key.clone()));
+            existing.insert(key);
+        }
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "task database lock is poisoned")?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+        let mut imported = 0;
+        for (session, (project_id, path), key) in prepared {
+            imported += transaction.execute(
+                "INSERT INTO tasks (id, title, agent, status, project_id, project_path, session_id,
+                  session_file, execution_target, interaction_mode, pi_environment, created_at, completed_at, pi_agent_dir)
+                 SELECT ?1, ?2, 'pi', 'completed', ?3, ?4, ?5, ?6, 'local', 'rpc', 'native', ?7, ?7, ?8
+                 WHERE NOT EXISTS (SELECT 1 FROM ignored_pi_sessions WHERE session_id IN (?5, ?9))
+                   AND NOT EXISTS (SELECT 1 FROM tasks WHERE id = ?1 OR (agent = 'pi' AND pi_agent_dir = ?8 AND session_id = ?5 AND (session_file IS NULL OR session_file = ?6)))",
+                params![format!("pi-native-{key}"), session.title, project_id, path, session.id, session.file, session.timestamp, home, key],
+            ).map_err(|error| format!("failed to index native Pi session: {error}"))?;
+        }
+        transaction.commit().map_err(|error| error.to_string())?;
+        Ok((imported, skipped))
+    }
+
+    pub fn set_session_file(&self, id: &str, session_id: &str, path: &str) -> Result<(), String> {
+        let affected = self
+            .connection
+            .lock()
+            .map_err(|_| "task database lock is poisoned")?
+            .execute(
+                "UPDATE tasks SET session_file = ?1 WHERE id = ?2 AND session_id = ?3",
+                params![path, id, session_id],
+            )
+            .map_err(|error| error.to_string())?;
+        ensure_updated(affected)
+    }
+
     pub fn restart(&self, id: &str) -> Result<TaskRecord, String> {
         let task = self
             .get(id)?
@@ -543,8 +769,9 @@ impl TaskStore {
         if task.archived_at.is_some() {
             return Err("archived tasks must be restored before restart".into());
         }
-        Uuid::parse_str(&task.session_id)
-            .map_err(|_| "task has an invalid Pi session id".to_string())?;
+        if !crate::native_pi::valid_session_id(&task.session_id) {
+            return Err("task has an invalid Pi session id".into());
+        }
         let affected = self
             .connection
             .lock()
@@ -663,6 +890,18 @@ impl TaskStore {
                 )
                 .map_err(|error| format!("failed to hide DSH session: {error}"))?;
         }
+        if task.agent == "pi" && task.pi_environment == "native" {
+            let key = match (&task.pi_agent_dir, &task.session_file) {
+                (Some(home), Some(file)) => crate::native_pi::session_key(home, file),
+                _ => task.session_id.clone(),
+            };
+            transaction
+                .execute(
+                    "INSERT OR IGNORE INTO ignored_pi_sessions (session_id) VALUES (?1)",
+                    [&key],
+                )
+                .map_err(|error| error.to_string())?;
+        }
         let affected = transaction
             .execute("DELETE FROM tasks WHERE id = ?1", [id])
             .map_err(|error| format!("failed to delete task: {error}"))?;
@@ -694,7 +933,7 @@ impl TaskStore {
             .query_row(
                 "SELECT id, title, agent, status, project_id, project_path, session_id,
                         session_file, execution_target, created_at, started_at,
-                        completed_at, archived_at
+                        completed_at, archived_at, interaction_mode, pi_environment, pi_agent_dir
                  FROM tasks WHERE id = ?1",
                 [id],
                 task_from_row,
@@ -763,6 +1002,9 @@ fn task_from_row(row: &Row<'_>) -> rusqlite::Result<TaskRecord> {
         session_id: row.get(6)?,
         session_file: row.get(7)?,
         execution_target: row.get(8)?,
+        interaction_mode: row.get(13)?,
+        pi_environment: row.get(14)?,
+        pi_agent_dir: row.get(15)?,
         created_at: row.get(9)?,
         started_at: row.get(10)?,
         completed_at: row.get(11)?,
@@ -786,57 +1028,77 @@ fn ensure_updated(affected: usize) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn list_projects(store: State<'_, TaskStore>) -> Result<Vec<ProjectRecord>, String> {
-    store.list_projects()
+pub async fn list_projects(app: AppHandle) -> Result<Vec<ProjectRecord>, String> {
+    tauri::async_runtime::spawn_blocking(move || app.state::<TaskStore>().list_projects())
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-pub fn add_project(store: State<'_, TaskStore>, path: String) -> Result<ProjectRecord, String> {
-    store.add_project(&path)
+pub async fn add_project(app: AppHandle, path: String) -> Result<ProjectRecord, String> {
+    tauri::async_runtime::spawn_blocking(move || app.state::<TaskStore>().add_project(&path))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-pub fn remove_project(store: State<'_, TaskStore>, project_id: String) -> Result<(), String> {
-    store.remove_project(&project_id)
+pub async fn remove_project(app: AppHandle, project_id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<TaskStore>().remove_project(&project_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-pub fn touch_project(store: State<'_, TaskStore>, project_id: String) -> Result<(), String> {
-    store.touch_project(&project_id)
+pub async fn touch_project(app: AppHandle, project_id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<TaskStore>().touch_project(&project_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-pub fn list_tasks(
-    store: State<'_, TaskStore>,
-    manager: State<'_, crate::pty::PtyManager>,
-) -> Result<Vec<TaskRecord>, String> {
-    let mut records = store.list()?;
-    manager.attach_run_ids(&mut records)?;
-    Ok(records)
+pub async fn list_tasks(app: AppHandle) -> Result<Vec<TaskRecord>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut records = app.state::<TaskStore>().list()?;
+        app.state::<crate::pty::PtyManager>()
+            .attach_run_ids(&mut records)?;
+        app.state::<crate::rpc::RpcManager>()
+            .attach_run_ids(&mut records)?;
+        Ok(records)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-pub fn archive_task(store: State<'_, TaskStore>, task_id: String) -> Result<(), String> {
-    store.archive(&task_id)
+pub async fn archive_task(app: AppHandle, task_id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || app.state::<TaskStore>().archive(&task_id))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-pub fn rename_task(
-    store: State<'_, TaskStore>,
-    task_id: String,
-    title: String,
-) -> Result<(), String> {
-    store.rename(&task_id, &title)
+pub async fn rename_task(app: AppHandle, task_id: String, title: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || app.state::<TaskStore>().rename(&task_id, &title))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-pub fn restore_task(store: State<'_, TaskStore>, task_id: String) -> Result<(), String> {
-    store.unarchive(&task_id)
+pub async fn restore_task(app: AppHandle, task_id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || app.state::<TaskStore>().unarchive(&task_id))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-pub fn delete_task(store: State<'_, TaskStore>, task_id: String) -> Result<(), String> {
-    store.delete(&task_id)
+pub async fn delete_task(app: AppHandle, task_id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || app.state::<TaskStore>().delete(&task_id))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[cfg(test)]
@@ -887,6 +1149,9 @@ mod tests {
         store
             .remove_project(&project.id)
             .expect("project should be removed from navigation");
+
+        assert!(store.project_path(&project.id).is_err());
+        assert!(store.project_path("unknown-project").is_err());
 
         assert!(store
             .list_projects()

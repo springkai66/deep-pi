@@ -120,13 +120,56 @@ impl AppPaths {
         self.pi_home.join("auth.json")
     }
 
-    pub fn native_pi_home(&self) -> Option<PathBuf> {
-        if let Some(path) = std::env::var_os("PI_CODING_AGENT_DIR") {
-            return Some(path.into());
+    pub fn pi_environment_home(&self, environment: &str) -> Result<PathBuf, String> {
+        match environment {
+            "managed" => Ok(self.pi_home.clone()),
+            _ => Err("Unknown Pi environment".into()),
         }
-        std::env::var_os("USERPROFILE")
-            .or_else(|| std::env::var_os("HOME"))
-            .map(|home| PathBuf::from(home).join(".pi").join("agent"))
+    }
+
+    pub fn new_pi_environment(&self, preference: &str) -> Result<&'static str, String> {
+        match preference {
+            "managed" | "auto" | "native" => Ok("managed"),
+            _ => Err("Unknown Pi environment".into()),
+        }
+    }
+
+    pub fn task_pi_home(&self, record: &crate::task::TaskRecord) -> Result<PathBuf, String> {
+        // v1 只支持托管环境。旧的 native 任务记录保留在数据库中，但不能启动或恢复。
+        if record.pi_environment != "managed" {
+            return Err("当前稳定版仅支持 DeepPi 托管任务，本机会话记录已保留".into());
+        }
+        let home = record
+            .pi_agent_dir
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| self.pi_home.clone());
+        crate::snapshot::reject_link(&home)?;
+        if !home.is_absolute() || !home.is_dir() {
+            return Err("任务绑定的 Pi 配置目录不可用".into());
+        }
+        Ok(home)
+    }
+
+    pub fn system_pi_cli(&self) -> Option<PathBuf> {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let mut directories: Vec<_> = std::env::split_paths(&path)
+            .filter(|path| path.is_absolute())
+            .collect();
+        if let Some(roaming) = std::env::var_os("APPDATA") {
+            directories.push(PathBuf::from(roaming).join("npm"));
+        }
+        directories
+            .into_iter()
+            .filter(|directory| directory != &self.project_root)
+            .map(|directory| {
+                directory.join("node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js")
+            })
+            .find(|entry| entry.is_file())
+    }
+
+    pub fn available_pi_cli(&self) -> Result<Option<PathBuf>, String> {
+        Ok(self.pi_cli()?.or_else(|| self.system_pi_cli()))
     }
 
     pub fn dshmarket_manifest(&self) -> PathBuf {

@@ -114,9 +114,55 @@ impl OutputGate {
 #[derive(Default)]
 pub struct PtyManager {
     tasks: Mutex<HashMap<String, PtyTask>>,
+    changed: Condvar,
 }
 
 impl PtyManager {
+    pub(crate) fn contains(&self, task_id: &str) -> Result<bool, String> {
+        Ok(self
+            .tasks
+            .lock()
+            .map_err(|_| lock_error())?
+            .contains_key(task_id))
+    }
+
+    fn stop_run_and_wait(
+        &self,
+        store: &TaskStore,
+        task_id: &str,
+        run_id: &str,
+        timeout: Duration,
+    ) -> Result<(), String> {
+        let mut tasks = self.tasks.lock().map_err(|_| lock_error())?;
+        let Some(task) = tasks.get_mut(task_id) else {
+            return Ok(());
+        };
+        if task.gate.run_id != run_id {
+            return Err("Pi run is no longer current".into());
+        }
+        task.kill()?;
+        task.gate.acknowledge(run_id);
+        store.set_status(task_id, TaskStatus::Cancelled)?;
+        let (tasks, _) = self
+            .changed
+            .wait_timeout_while(tasks, timeout, |tasks| {
+                tasks
+                    .get(task_id)
+                    .is_some_and(|task| task.gate.run_id == run_id)
+            })
+            .map_err(|_| lock_error())?;
+        if tasks
+            .get(task_id)
+            .is_some_and(|task| task.gate.run_id == run_id)
+        {
+            Err("终端仍在结束输出，请稍后重试切换".into())
+        } else {
+            Ok(())
+        }
+    }
+    pub(crate) fn count(&self) -> Result<usize, String> {
+        Ok(self.tasks.lock().map_err(|_| lock_error())?.len())
+    }
     pub(crate) fn is_running(&self) -> Result<bool, String> {
         Ok(!self.tasks.lock().map_err(|_| lock_error())?.is_empty())
     }
@@ -145,6 +191,7 @@ impl PtyManager {
         }
         store.finish_if_active(task_id, status)?;
         tasks.remove(task_id);
+        self.changed.notify_all();
         Ok(true)
     }
 }
@@ -236,7 +283,26 @@ pub fn default_working_directory(paths: State<'_, AppPaths>) -> String {
 }
 
 #[tauri::command]
-pub fn start_pi_task(
+pub async fn start_pi_task(
+    app: AppHandle,
+    request: StartPiTaskRequest,
+) -> Result<TaskRecord, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        start_pi_task_inner(
+            app.clone(),
+            app.state(),
+            app.state(),
+            app.state(),
+            app.state(),
+            app.state(),
+            request,
+        )
+    })
+    .await
+    .map_err(|error| format!("Pi startup worker failed: {error}"))?
+}
+
+fn start_pi_task_inner(
     app: AppHandle,
     manager: State<'_, PtyManager>,
     store: State<'_, TaskStore>,
@@ -247,8 +313,13 @@ pub fn start_pi_task(
 ) -> Result<TaskRecord, String> {
     let _lifecycle = lifecycle.acquire()?;
     crate::snapshot::Snapshot::ensure_ready(&paths.backups)?;
-    ensure_capacity(&manager, &settings)?;
+    ensure_capacity(&manager, &app.state::<crate::rpc::RpcManager>(), &settings)?;
+    let environment = paths.new_pi_environment(&settings.get()?.pi_environment)?;
+    let home = paths.pi_environment_home(environment)?;
     let mut record = store.create_pi_task_for_project(&request.project_id, &request.title)?;
+    store.set_pi_environment(&record.id, environment, &home)?;
+    record.pi_environment = environment.into();
+    record.pi_agent_dir = Some(home.to_string_lossy().into_owned());
     record.run_id = Some(Uuid::new_v4().to_string());
     if let Err(error) = launch_pi(app, &manager, &paths, &record, request.rows, request.cols) {
         let _ = store.finish_if_active(&record.id, TaskStatus::Failed);
@@ -258,7 +329,26 @@ pub fn start_pi_task(
 }
 
 #[tauri::command]
-pub fn restart_pi_task(
+pub async fn restart_pi_task(
+    app: AppHandle,
+    request: RestartPiTaskRequest,
+) -> Result<TaskRecord, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        restart_pi_task_inner(
+            app.clone(),
+            app.state(),
+            app.state(),
+            app.state(),
+            app.state(),
+            app.state(),
+            request,
+        )
+    })
+    .await
+    .map_err(|error| format!("Pi restart worker failed: {error}"))?
+}
+
+fn restart_pi_task_inner(
     app: AppHandle,
     manager: State<'_, PtyManager>,
     store: State<'_, TaskStore>,
@@ -269,7 +359,7 @@ pub fn restart_pi_task(
 ) -> Result<TaskRecord, String> {
     let _lifecycle = lifecycle.acquire()?;
     crate::snapshot::Snapshot::ensure_ready(&paths.backups)?;
-    ensure_capacity(&manager, &settings)?;
+    ensure_capacity(&manager, &app.state::<crate::rpc::RpcManager>(), &settings)?;
     if manager
         .tasks
         .lock()
@@ -278,7 +368,15 @@ pub fn restart_pi_task(
     {
         return Err("Pi task is already running".into());
     }
+    if app
+        .state::<crate::rpc::RpcManager>()
+        .contains(&request.task_id)?
+    {
+        return Err("RPC task is still running or stopping".into());
+    }
     let mut record = store.restart(&request.task_id)?;
+    store.set_interaction_mode(&record.id, "tui")?;
+    record.interaction_mode = "tui".into();
     record.run_id = Some(Uuid::new_v4().to_string());
     if let Err(error) = launch_pi(app, &manager, &paths, &record, request.rows, request.cols) {
         let _ = store.finish_if_active(&record.id, TaskStatus::Failed);
@@ -287,9 +385,12 @@ pub fn restart_pi_task(
     Ok(record)
 }
 
-fn ensure_capacity(manager: &PtyManager, settings: &SettingsStore) -> Result<(), String> {
-    if manager.tasks.lock().map_err(|_| lock_error())?.len()
-        >= usize::from(settings.get()?.max_concurrent_tasks)
+fn ensure_capacity(
+    manager: &PtyManager,
+    rpc_manager: &crate::rpc::RpcManager,
+    settings: &SettingsStore,
+) -> Result<(), String> {
+    if manager.count()? + rpc_manager.count()? >= usize::from(settings.get()?.max_concurrent_tasks)
     {
         return Err("maximum concurrent Pi tasks reached".into());
     }
@@ -297,7 +398,19 @@ fn ensure_capacity(manager: &PtyManager, settings: &SettingsStore) -> Result<(),
 }
 
 #[tauri::command]
-pub fn acknowledge_pi_output(
+pub async fn acknowledge_pi_output(
+    app: AppHandle,
+    task_id: String,
+    run_id: String,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        acknowledge_pi_output_inner(app.state(), task_id, run_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn acknowledge_pi_output_inner(
     manager: State<'_, PtyManager>,
     task_id: String,
     run_id: String,
@@ -327,7 +440,7 @@ fn launch_pi(
         .openpty(normalize_size(rows, cols)?)
         .map_err(|error| format!("failed to create PTY: {error}"))?;
 
-    let mut command = if let Some(pi_cli) = paths.pi_cli()? {
+    let mut command = if let Some(pi_cli) = paths.available_pi_cli()? {
         let mut command = CommandBuilder::new(paths.node_executable());
         command.arg(pi_cli);
         command
@@ -336,8 +449,11 @@ fn launch_pi(
         command.args(["-NoLogo", "-NoProfile", "-Command", "pi"]);
         command
     };
-    command.args(["--session-id", &record.session_id, "--name", &record.title]);
-    command.env("PI_CODING_AGENT_DIR", &paths.pi_home);
+    command.args(crate::native_pi::session_arguments(record)?);
+    // 托管任务的 bridge 扩展位于绑定的 pi_home/extensions 下，由 Pi 自动发现；
+    // 旧 native 任务已在 task_pi_home 中明确拒绝。
+    command.env("PI_CODING_AGENT_DIR", paths.task_pi_home(record)?);
+    command.env_remove("PI_CODING_AGENT_SESSION_DIR");
     command.env("DEEPPI_TASK_ID", &record.id);
     let state_file = bridge::state_file(paths, &run_id)?;
     let pipe_name = bridge::pipe_name(paths, &run_id)?;
@@ -659,15 +775,35 @@ fn terminal_input_bytes(data: &str) -> &[u8] {
 }
 
 #[tauri::command]
-pub fn write_pi_task(
+pub async fn write_pi_task(
+    app: AppHandle,
+    task_id: String,
+    run_id: String,
+    data: String,
+) -> Result<(), String> {
+    if data.len() > 1024 * 1024 {
+        return Err("Terminal input exceeds 1 MiB".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        write_pi_task_inner(app.state(), task_id, run_id, data)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn write_pi_task_inner(
     manager: State<'_, PtyManager>,
     task_id: String,
+    run_id: String,
     data: String,
 ) -> Result<(), String> {
     let mut tasks = manager.tasks.lock().map_err(|_| lock_error())?;
     let task = tasks
         .get_mut(&task_id)
         .ok_or_else(|| "Pi task was not found".to_string())?;
+    if task.gate.run_id != run_id {
+        return Err("Pi run is no longer current".into());
+    }
     task.writer
         .write_all(terminal_input_bytes(&data))
         .and_then(|_| task.writer.flush())
@@ -675,7 +811,20 @@ pub fn write_pi_task(
 }
 
 #[tauri::command]
-pub fn resize_pi_task(
+pub async fn resize_pi_task(
+    app: AppHandle,
+    task_id: String,
+    rows: u16,
+    cols: u16,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        resize_pi_task_inner(app.state(), task_id, rows, cols)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn resize_pi_task_inner(
     manager: State<'_, PtyManager>,
     task_id: String,
     rows: u16,
@@ -694,7 +843,15 @@ pub fn resize_pi_task(
 }
 
 #[tauri::command]
-pub fn stop_pi_task(
+pub async fn stop_pi_task(app: AppHandle, task_id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        stop_pi_task_inner(app.state(), app.state(), task_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn stop_pi_task_inner(
     manager: State<'_, PtyManager>,
     store: State<'_, TaskStore>,
     task_id: String,
@@ -709,10 +866,42 @@ pub fn stop_pi_task(
 }
 
 #[tauri::command]
-pub fn stop_all_pi_tasks(
+pub async fn stop_pi_run(
+    webview: tauri::Webview,
+    app: AppHandle,
+    task_id: String,
+    run_id: String,
+) -> Result<(), String> {
+    if webview.label() != "main" {
+        return Err("Stopping a run requires the main Webview".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<PtyManager>().stop_run_and_wait(
+            &app.state::<TaskStore>(),
+            &task_id,
+            &run_id,
+            Duration::from_secs(5),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn stop_all_pi_tasks(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        stop_all_pi_tasks_inner(app.state(), app.state(), app.state())
+    })
+    .await
+    .map_err(|error| format!("Pi shutdown worker failed: {error}"))?
+}
+
+fn stop_all_pi_tasks_inner(
     manager: State<'_, PtyManager>,
     store: State<'_, TaskStore>,
+    rpc_manager: State<'_, crate::rpc::RpcManager>,
 ) -> Result<(), String> {
+    rpc_manager.stop_all()?;
     let mut tasks = manager.tasks.lock().map_err(|_| lock_error())?;
     let mut errors = Vec::new();
     for (task_id, task) in tasks.iter_mut() {
@@ -794,6 +983,7 @@ mod tests {
                     gate: std::sync::Arc::new(super::OutputGate::new("new-run".into())),
                 },
             )])),
+            changed: Default::default(),
         };
         assert!(!manager
             .finish_run(&store, &record.id, "old-run", TaskStatus::Completed)
@@ -808,6 +998,78 @@ mod tests {
         assert_eq!(records[0].run_id.as_deref(), Some("new-run"));
         drop(manager);
         child.wait().unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn scoped_stop_rejects_old_run_and_waits_for_cleanup() {
+        use std::sync::Arc;
+        let store = Arc::new(crate::task::TaskStore::in_memory().unwrap());
+        let record = store.create_pi_task("switch", ".").unwrap();
+        let pair = native_pty_system()
+            .openpty(normalize_size(24, 80).unwrap())
+            .unwrap();
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let mut command = CommandBuilder::new("powershell.exe");
+        command.args(["-NoProfile", "-Command", "Start-Sleep -Seconds 30"]);
+        let mut child = pair.slave.spawn_command(command).unwrap();
+        drop(pair.slave);
+        let process = super::owned_process(child.as_ref()).unwrap();
+        let manager = Arc::new(PtyManager::default());
+        manager.tasks.lock().unwrap().insert(
+            record.id.clone(),
+            PtyTask {
+                writer: pair.master.take_writer().unwrap(),
+                master: Some(pair.master),
+                process,
+                gate: Arc::new(super::OutputGate::new("current".into())),
+            },
+        );
+        assert!(manager
+            .stop_run_and_wait(&store, &record.id, "old", Duration::from_secs(1))
+            .is_err());
+        assert_eq!(
+            store.get(&record.id).unwrap().unwrap().status,
+            TaskStatus::Running
+        );
+        assert!(manager
+            .stop_run_and_wait(&store, &record.id, "current", Duration::ZERO)
+            .is_err());
+        assert!(manager.contains(&record.id).unwrap());
+        let output = thread::spawn(move || {
+            let _ = std::io::copy(&mut reader, &mut std::io::sink());
+        });
+        let cleanup_manager = manager.clone();
+        let cleanup_store = store.clone();
+        let id = record.id.clone();
+        let cleanup = thread::spawn(move || {
+            child.wait().unwrap();
+            let console = cleanup_manager
+                .tasks
+                .lock()
+                .unwrap()
+                .get_mut(&id)
+                .unwrap()
+                .master
+                .take();
+            drop(console);
+            output.join().unwrap();
+            cleanup_manager
+                .finish_run(&cleanup_store, &id, "current", TaskStatus::Failed)
+                .unwrap();
+        });
+        manager
+            .stop_run_and_wait(&store, &record.id, "current", Duration::from_secs(5))
+            .unwrap();
+        assert!(!manager.contains(&record.id).unwrap());
+        assert_eq!(
+            store.get(&record.id).unwrap().unwrap().status,
+            TaskStatus::Cancelled
+        );
+        cleanup.join().unwrap();
+        manager
+            .stop_run_and_wait(&store, &record.id, "current", Duration::from_millis(1))
+            .unwrap();
     }
 
     #[cfg(windows)]
@@ -916,6 +1178,7 @@ mod tests {
                     gate: std::sync::Arc::new(super::OutputGate::new("test-run".into())),
                 },
             )])),
+            changed: Default::default(),
         };
 
         drop(manager);

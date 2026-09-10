@@ -15,8 +15,6 @@ use crate::{
 };
 
 const MANAGED_ENVIRONMENT: &str = "managed";
-const NATIVE_ENVIRONMENT: &str = "native";
-const ALL_ENVIRONMENTS: &str = "all";
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -84,10 +82,7 @@ fn package_settings_path(
         "global" => {
             let home = match environment {
                 MANAGED_ENVIRONMENT => paths.pi_home.clone(),
-                NATIVE_ENVIRONMENT => paths
-                    .native_pi_home()
-                    .ok_or_else(|| "本机 Pi agent 目录未找到".to_string())?,
-                _ => return Err("package environment must be managed or native".into()),
+                _ => return Err("package environment must be managed".into()),
             };
             Ok(home.join("settings.json"))
         }
@@ -149,23 +144,9 @@ pub fn list_packages(
     project_path: Option<&str>,
     environment: Option<&str>,
 ) -> Result<Vec<InstalledPackage>, String> {
-    let environment = if scope == "global" {
-        environment.unwrap_or(ALL_ENVIRONMENTS)
-    } else {
-        MANAGED_ENVIRONMENT
-    };
-    if scope == "global" && environment == ALL_ENVIRONMENTS {
-        let mut packages =
-            read_packages_file(&paths.pi_home.join("settings.json"), MANAGED_ENVIRONMENT)?;
-        if let Some(native_home) = paths.native_pi_home() {
-            if native_home != paths.pi_home {
-                packages.extend(read_packages_file(
-                    &native_home.join("settings.json"),
-                    NATIVE_ENVIRONMENT,
-                )?);
-            }
-        }
-        return Ok(packages);
+    let environment = environment.unwrap_or(MANAGED_ENVIRONMENT);
+    if environment != MANAGED_ENVIRONMENT {
+        return Err("package environment must be managed".into());
     }
     let path = package_settings_path(paths, scope, project_path, environment)?;
     read_packages_file(&path, environment)
@@ -179,11 +160,8 @@ fn package_command(
         .environment
         .as_deref()
         .unwrap_or(MANAGED_ENVIRONMENT);
-    if environment == NATIVE_ENVIRONMENT {
-        return Err("本机 Pi 全局扩展目前仅支持查看，请在本机 Pi 中管理".into());
-    }
     if environment != MANAGED_ENVIRONMENT {
-        return Err("package environment must be managed or native".into());
+        return Err("package environment must be managed".into());
     }
     let spec = if request.operation == "updateAll" {
         None
@@ -275,6 +253,7 @@ pub async fn package_operation(
             app.state(),
             app.state(),
             app.state(),
+            app.state(),
             request,
             &operation.token,
         )
@@ -288,6 +267,7 @@ fn package_operation_inner(
     operation_lock: State<'_, PackageOperationLock>,
     lifecycle: State<'_, RuntimeOperationLock>,
     pty_manager: State<'_, crate::pty::PtyManager>,
+    rpc_manager: State<'_, crate::rpc::RpcManager>,
     request: PackageRequest,
     cancellation: &crate::operation::Cancellation,
 ) -> Result<PackageOperationResult, String> {
@@ -298,7 +278,7 @@ fn package_operation_inner(
         .0
         .try_lock()
         .map_err(|_| "Pi package operation is already unavailable".to_string())?;
-    if pty_manager.is_running()? {
+    if pty_manager.is_running()? || rpc_manager.count()? > 0 {
         return Err("请先停止所有 Pi 任务，再修改扩展，以确保可以安全恢复".into());
     }
     let (mut command, cwd) = package_command(&paths, &request)?;

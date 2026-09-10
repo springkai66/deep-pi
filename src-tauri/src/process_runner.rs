@@ -80,29 +80,7 @@ pub fn run_cancellable(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x0800_0004);
-    }
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("failed to start command: {error}"))?;
-    let tree = match ProcessTree::attach(&child) {
-        Ok(tree) => tree,
-        Err(error) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(error);
-        }
-    };
-    #[cfg(windows)]
-    if let Err(error) = resume_child(&child) {
-        drop(tree);
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(error);
-    }
+    let (mut child, tree) = spawn_owned(command)?;
     let stdout = capture(child.stdout.take().ok_or("command stdout is unavailable")?);
     let stderr = capture(child.stderr.take().ok_or("command stderr is unavailable")?);
     let started = Instant::now();
@@ -138,6 +116,70 @@ pub fn run_cancellable(
         stderr,
         truncated: out_truncated || err_truncated,
     })
+}
+
+pub(crate) fn spawn_owned(command: &mut Command) -> Result<(Child, ProcessTree), String> {
+    spawn_owned_detailed(command).map_err(|failure| failure.message)
+}
+
+pub(crate) enum SpawnFailureKind {
+    NotFound,
+    PermissionDenied,
+    Spawn,
+    Ownership,
+    Resume,
+    Unsupported,
+}
+
+pub(crate) struct SpawnFailure {
+    pub kind: SpawnFailureKind,
+    pub message: String,
+}
+
+pub(crate) fn spawn_owned_detailed(
+    command: &mut Command,
+) -> Result<(Child, ProcessTree), SpawnFailure> {
+    if !cfg!(windows) {
+        return Err(SpawnFailure {
+            kind: SpawnFailureKind::Unsupported,
+            message: "owned command execution currently requires Windows".into(),
+        });
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0004);
+    }
+    let mut child = command.spawn().map_err(|error| SpawnFailure {
+        kind: match error.kind() {
+            std::io::ErrorKind::NotFound => SpawnFailureKind::NotFound,
+            std::io::ErrorKind::PermissionDenied => SpawnFailureKind::PermissionDenied,
+            _ => SpawnFailureKind::Spawn,
+        },
+        message: format!("failed to start command: {error}"),
+    })?;
+    let tree = match ProcessTree::attach(&child) {
+        Ok(tree) => tree,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(SpawnFailure {
+                kind: SpawnFailureKind::Ownership,
+                message: error,
+            });
+        }
+    };
+    #[cfg(windows)]
+    if let Err(error) = resume_child(&child) {
+        drop(tree);
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(SpawnFailure {
+            kind: SpawnFailureKind::Resume,
+            message: error,
+        });
+    }
+    Ok((child, tree))
 }
 
 #[cfg(windows)]
@@ -180,12 +222,12 @@ fn resume_child(child: &Child) -> Result<(), String> {
 }
 
 #[cfg(windows)]
-struct ProcessTree(windows_sys::Win32::Foundation::HANDLE);
+pub(crate) struct ProcessTree(std::os::windows::io::OwnedHandle);
 
 #[cfg(windows)]
 impl ProcessTree {
     fn attach(child: &Child) -> Result<Self, String> {
-        use std::os::windows::io::AsRawHandle;
+        use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
         use windows_sys::Win32::System::JobObjects::{
             AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
             SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
@@ -196,18 +238,19 @@ impl ProcessTree {
         if job.is_null() {
             return Err(std::io::Error::last_os_error().to_string());
         }
-        let tree = Self(job);
+        let tree = Self(unsafe { OwnedHandle::from_raw_handle(job) });
         let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
         limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
         if unsafe {
             SetInformationJobObject(
-                job,
+                tree.0.as_raw_handle(),
                 JobObjectExtendedLimitInformation,
                 &limits as *const _ as *const _,
                 std::mem::size_of_val(&limits) as u32,
             )
         } == 0
-            || unsafe { AssignProcessToJobObject(job, child.as_raw_handle()) } == 0
+            || unsafe { AssignProcessToJobObject(tree.0.as_raw_handle(), child.as_raw_handle()) }
+                == 0
         {
             return Err(format!(
                 "failed to own command process tree: {}",
@@ -218,17 +261,8 @@ impl ProcessTree {
     }
 }
 
-#[cfg(windows)]
-impl Drop for ProcessTree {
-    fn drop(&mut self) {
-        unsafe {
-            windows_sys::Win32::Foundation::CloseHandle(self.0);
-        }
-    }
-}
-
 #[cfg(not(windows))]
-struct ProcessTree;
+pub(crate) struct ProcessTree;
 
 #[cfg(not(windows))]
 impl ProcessTree {

@@ -88,7 +88,7 @@ mod tests {
             || Err::<(), _>("verification failed".into()),
         )
         .unwrap_err();
-        assert!(error.contains("verification failed"));
+        assert!(error.contains("verification failed"), "{error}");
         assert_eq!(
             fs::read_to_string(root.join("current/version")).unwrap(),
             "old"

@@ -3,7 +3,7 @@ use std::{
     process::{Child, Command, Stdio},
     sync::{mpsc, Mutex},
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use serde::Serialize;
@@ -239,27 +239,6 @@ pub async fn start_dsh(app: AppHandle) -> Result<String, String> {
     })
     .await
     .map_err(|error| format!("DSH start worker failed: {error}"))?
-}
-
-pub fn prewarm_dsh(app: AppHandle) {
-    let started = Instant::now();
-    let Some(manager) = app.try_state::<DshManager>() else {
-        return;
-    };
-    let Some(paths) = app.try_state::<AppPaths>() else {
-        return;
-    };
-    match start_dsh_inner(app.clone(), &manager, &paths) {
-        Ok(_) => log::info!(
-            "event=dsh_prewarm status=ready duration_ms={}",
-            started.elapsed().as_millis()
-        ),
-        Err(error) => log::debug!(
-            "event=dsh_prewarm status=skipped reason={} duration_ms={}",
-            error,
-            started.elapsed().as_millis()
-        ),
-    }
 }
 
 fn monitor_dsh(app: AppHandle, generation: u64, url: String) {

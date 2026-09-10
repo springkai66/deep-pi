@@ -80,24 +80,35 @@ fn command_version_cancellable(
 }
 
 pub(crate) fn runtime_status_for_paths(paths: &AppPaths) -> Result<Vec<RuntimeComponent>, String> {
-    let (mut pi_command, pi_source) = if let Some(pi_cli) = paths.pi_cli()? {
-        let mut command = Command::new(paths.node_executable());
-        command.arg(pi_cli).arg("--version");
-        (command, "managed")
-    } else {
-        let mut command = Command::new("powershell.exe");
-        command.args(["-NoLogo", "-NoProfile", "-Command", "pi --version"]);
-        (command, "system")
-    };
+    let managed_pi = paths.pi_cli()?;
+    let (mut pi_command, pi_source) =
+        if let Some(pi_cli) = managed_pi.clone().or_else(|| paths.system_pi_cli()) {
+            let mut command = Command::new(paths.node_executable());
+            command.arg(pi_cli).arg("--version");
+            (
+                command,
+                if managed_pi.is_some() {
+                    "managed"
+                } else {
+                    "system"
+                },
+            )
+        } else {
+            let mut command = Command::new("powershell.exe");
+            command.args(["-NoLogo", "-NoProfile", "-Command", "pi --version"]);
+            (command, "system")
+        };
     pi_command.env("PI_CODING_AGENT_DIR", &paths.pi_home);
-    let pi_version = command_version(&mut pi_command);
-
     let dsh_runtime = paths.dsh_runtime()?;
     let mut dsh_command = Command::new(paths.node_executable());
     dsh_command
         .arg(AppPaths::dsh_cli_path(&dsh_runtime))
         .arg("--version");
-    let dsh_version = command_version(&mut dsh_command);
+    let (pi_version, dsh_version) = std::thread::scope(|scope| {
+        let pi = scope.spawn(|| command_version(&mut pi_command));
+        let dsh = command_version(&mut dsh_command);
+        (pi.join().unwrap_or(None), dsh)
+    });
     let dsh_source = if dsh_runtime == paths.managed_dsh_runtime()? {
         "managed"
     } else {
