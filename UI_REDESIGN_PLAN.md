@@ -593,3 +593,11 @@ U1a -> U1b；随后 U2 和 U3 可独立推进；U4 依赖文件与进程安全�
 - U3：全文搜索为文件侧栏内的独立“内容”模式，与文件名过滤分开；结果按文件分组并标注行列，支持取消、截断提示与不可读文件计数。ripgrep 先探测后使用，缺失时返回明确错误且不自动安装；测试在缺少 rg 的环境验证该降级路径，CI 安装 ripgrep 继续覆盖真实搜索。新增 400 文件/20 目录的规模回归（40 命中、15 秒预算内）。外部编辑器仅接受 Code.exe / Code - Insiders.exe / notepad++.exe 的绝对路径，参数数组启动、不经 shell，传递文件与行列；空格/中文/shell 字符路径、错误编辑器类型、未配置时引导设置均有测试覆盖。文件变更刷新沿用例 27 的合并与补读逻辑。
 - U4：状态、分支、远程与未跟踪/已暂存/未暂存分类由 `git_status` 测试覆盖；差异覆盖文本、二进制、重命名、删除、冲突与无 HEAD；显式暂存/取消暂存由索引事务测试覆盖，提交与推送分离，准备提交显示选中范围，推送显示目标分支且拒绝非快进；参数数组、有界输出、超时/取消、系统凭据复用与“不回显凭据”均有测试；并发索引变更与锁冲突由 `existing_lock_is_never_removed_or_overwritten`、`blocks_other_git_writers_while_transaction_is_active`、`publishes_only_on_commit_and_preserves_unrelated_staging` 覆盖；界面不提供“Agent 修改”归属，不会把用户改动标为 Agent 产物。
 - 两项待人工验收：获准的真实远程提交/推送（不以本地 bare remote 冒充）、外部编辑器与本机原生交互；已纳入待编写的 `NATIVE_ACCEPTANCE.md`。
+
+## 33. U5/U6 自动化审计与原生验收清单
+
+2026-09-10（本地时间）：
+
+- U5：`project_edit` 11 项测试覆盖版本冲突、并发替换、create-only 另存、只读文件、junction 父目录、二进制/超限与删除后不重建；`file-workspace` 25 项覆盖草稿与撤销隔离、退出锁、BOM 与混合换行保留、关闭确认、保存期间继续输入、刷新不覆盖草稿与未知结果保留。编辑器比较与消息渲染按需加载（`FileComparison`、`ChatMessage`、`message-markdown` 动态 import），未进入首屏包。中文输入法、真实文件往返与屏幕阅读器仍待原生验收。
+- U6：六类设置分类与键盘导航有实现与测试；快捷键展示与实现共享定义并有文档同步测试；DSH 菜单遮挡切换已实现（原生覆盖关系待验收）。DSH 子 Webview 内宿主快捷键转发仍未实现，`KEYBOARD_SHORTCUTS.md` 已如实标注；实现需受限原生路由（不向子 Webview 开放 IPC），成本与风险较高，列为待用户决定项。
+- 新增 [NATIVE_ACCEPTANCE.md](./NATIVE_ACCEPTANCE.md)：按 U1b–U6、运行时升级与 DSH 分组给出逐项操作与预期，并明确回报方式；完成原生验收前不将 U1b–U6 视为最终验收完成。
