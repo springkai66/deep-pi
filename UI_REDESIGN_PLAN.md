@@ -1073,3 +1073,14 @@ if ($LASTEXITCODE -ne 0) {
 ### 顺带加固：updater 配置模板的占位符守卫
 
 `prepare-updater-config.mjs` 原本只校验「输入是否存在」，然后做 `replaceAll`。若将来有人往 `tauri.release.conf.json` 里加了新占位符而忘了在脚本里替换，生成的配置会带着 `__...__` 字样被打进安装包，updater 会静默失效（构建与校验都不会报错）。已补一道守卫：渲染后若仍匹配 `__[A-Z0-9_]+__` 就直接失败并列出残留占位符。实测两条路径——正常渲染成功；人为注入 `__FUTURE_FLAG__` 后脚本以「still contains unresolved placeholders: __FUTURE_FLAG__」失败。
+
+### 加固验证：updater 签名链已做密码学验证
+
+上一节只证明了「文件都生成」，这一节证明**内容正确**——用一次性密钥重新走了一遍签名构建，然后离线验证签名：
+
+- 签名体是 minisign 格式：`untrusted comment` + base64(算法标识 `ED` + key id + Ed25519 签名) + `trusted comment: timestamp:…	file:DeepPi_1.0.0_x64-setup.exe`。
+- 签名里的 key id（`a99e9174b58eedd1`）与公钥一致。
+- 实测两种验签：直接用 Ed25519 验**文件原始字节** → `false`；验 **BLAKE2b-512(文件)** 的摘要 → **`true`**。即 tauri 走的是 minisign 的 prehash 模式，签名对象是文件摘要——与 `tauri-plugin-updater` 的校验方式一致，说明清单里那条 signature 确实能通过 updater 校验。
+- 同时确认 `--bundles nsis,msi` 会为**两个**安装包都产出 `.sig`（NSIS 与 MSI），与发布步骤的 glob 完全对应；`latest.json` 的 `signature` 字段与 `.sig` 文件内容逐字节一致、`url` 为 `https://github.com/springkai66/deep-pi/releases/download/stable/DeepPi_1.0.0_x64-setup.exe`、`version` 为 `1.0.0`、`notes` 取自 `DEEPPI_RELEASE_NOTES`。
+
+验证后已删除测试密钥、`.sig` 与 `latest.json`，并**重新构建未签名正式 bundle**（`release-check --require-installer` 与 `installer:smoke` 再次 PASS），工作区干净。
