@@ -298,7 +298,7 @@ impl TaskStore {
     pub fn add_project(&self, path: &str) -> Result<ProjectRecord, String> {
         let input = Path::new(path);
         if !input.is_dir() {
-            return Err("project directory does not exist".into());
+            return Err("项目目录不存在".into());
         }
         let canonical = fs::canonicalize(input)
             .map_err(|error| format!("failed to resolve project directory: {error}"))?;
@@ -760,17 +760,15 @@ impl TaskStore {
     }
 
     pub fn restart(&self, id: &str) -> Result<TaskRecord, String> {
-        let task = self
-            .get(id)?
-            .ok_or_else(|| "task was not found".to_string())?;
+        let task = self.get(id)?.ok_or_else(|| "未找到该任务".to_string())?;
         if task.status.is_active() {
-            return Err("task is already active".into());
+            return Err("任务已在运行".into());
         }
         if task.archived_at.is_some() {
-            return Err("archived tasks must be restored before restart".into());
+            return Err("归档的任务需要先恢复才能重启".into());
         }
         if !crate::native_pi::valid_session_id(&task.session_id) {
-            return Err("task has an invalid Pi session id".into());
+            return Err("任务的 Pi 会话 ID 无效".into());
         }
         let affected = self
             .connection
@@ -804,7 +802,7 @@ impl TaskStore {
 
     pub fn set_active_status(&self, id: &str, status: TaskStatus) -> Result<bool, String> {
         if !matches!(status, TaskStatus::Running | TaskStatus::Waiting) {
-            return Err("bridge status must be running or waiting".into());
+            return Err("桥接状态必须是运行中或等待输入".into());
         }
         self.connection
             .lock()
@@ -820,7 +818,7 @@ impl TaskStore {
 
     pub fn finish_if_active(&self, id: &str, status: TaskStatus) -> Result<(), String> {
         if !status.is_terminal() {
-            return Err("finished task status must be terminal".into());
+            return Err("结束的任务状态必须是终态".into());
         }
         self.connection
             .lock()
@@ -836,11 +834,9 @@ impl TaskStore {
     }
 
     pub fn archive(&self, id: &str) -> Result<(), String> {
-        let task = self
-            .get(id)?
-            .ok_or_else(|| "task was not found".to_string())?;
+        let task = self.get(id)?.ok_or_else(|| "未找到该任务".to_string())?;
         if task.status.is_active() {
-            return Err("active tasks must be stopped before archiving".into());
+            return Err("请先停止正在运行的任务，再归档".into());
         }
         let affected = self
             .connection
@@ -868,11 +864,9 @@ impl TaskStore {
     }
 
     pub fn delete(&self, id: &str) -> Result<(), String> {
-        let task = self
-            .get(id)?
-            .ok_or_else(|| "task was not found".to_string())?;
+        let task = self.get(id)?.ok_or_else(|| "未找到该任务".to_string())?;
         if task.agent == "pi" && task.status.is_active() {
-            return Err("active Pi tasks must be stopped before deletion".into());
+            return Err("请先停止正在运行的 Pi 任务，再删除".into());
         }
         let mut connection = self
             .connection
@@ -970,7 +964,7 @@ fn clean_display_path(raw: &str) -> String {
 fn validate_title(title: &str) -> Result<&str, String> {
     let title = title.trim();
     if title.is_empty() || title.chars().count() > 200 {
-        Err("task title must contain 1 to 200 characters".into())
+        Err("任务标题长度必须在 1 到 200 个字符之间".into())
     } else {
         Ok(title)
     }
@@ -1021,7 +1015,7 @@ fn now_millis() -> Result<i64, String> {
 
 fn ensure_updated(affected: usize) -> Result<(), String> {
     if affected == 0 {
-        Err("task was not found".into())
+        Err("未找到该任务".into())
     } else {
         Ok(())
     }
