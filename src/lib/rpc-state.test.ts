@@ -53,3 +53,61 @@ describe("RPC conversation reducer", () => {
     expect(state.tools.tool.running).toBe(false);
   });
 });
+
+describe("assistant message deltas (Pi 0.85+)", () => {
+  it("accumulates text deltas into the streaming assistant message", () => {
+    let state = emptyConversation();
+    state = applyRpcEvent(state, { sequence: 1, payload: { type: "message_start", message: { role: "assistant", timestamp: 7, content: [{ type: "text", text: "你" }] } } });
+    state = applyRpcEvent(state, { sequence: 2, payload: { type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "好" } } });
+    state = applyRpcEvent(state, { sequence: 3, payload: { type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "世界" } } });
+    expect(state.messages).toHaveLength(1);
+    expect(state.messages[0].content).toEqual([{ type: "text", text: "你好世界" }]);
+  });
+
+  it("keeps the timestamp so message_end still replaces instead of duplicating", () => {
+    let state = emptyConversation();
+    state = applyRpcEvent(state, { sequence: 1, payload: { type: "message_start", message: { role: "assistant", timestamp: 7, content: [{ type: "text", text: "a" }] } } });
+    state = applyRpcEvent(state, { sequence: 2, payload: { type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "b" } } });
+    state = applyRpcEvent(state, { sequence: 3, payload: { type: "message_end", message: { role: "assistant", timestamp: 7, content: [{ type: "text", text: "ab" }] } } });
+    expect(state.messages).toHaveLength(1);
+    expect(state.messages[0].content).toEqual([{ type: "text", text: "ab" }]);
+  });
+
+  it("does not duplicate the first chunk when message_start pre-seeds it", () => {
+    // Pi 会把首个分片先放进 message_start，随后 text_start + text_delta 再发一次，
+    // 因此 text_start 必须重置该片段，否则首字会重复（实测出现 \"这这\"）。
+    let state = emptyConversation();
+    state = applyRpcEvent(state, { sequence: 1, payload: { type: "message_start", message: { role: "assistant", timestamp: 5, content: [{ type: "text", text: "这" }] } } });
+    state = applyRpcEvent(state, { sequence: 2, payload: { type: "message_update", assistantMessageEvent: { type: "text_start", contentIndex: 0 } } });
+    state = applyRpcEvent(state, { sequence: 3, payload: { type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "这" } } });
+    state = applyRpcEvent(state, { sequence: 4, payload: { type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "是" } } });
+    expect(state.messages[0].content).toEqual([{ type: "text", text: "这是" }]);
+  });
+
+  it("routes thinking deltas to a thinking part and ignores start/end markers", () => {
+    let state = emptyConversation();
+    state = applyRpcEvent(state, { sequence: 1, payload: { type: "message_start", message: { role: "assistant", timestamp: 9, content: [] } } });
+    state = applyRpcEvent(state, { sequence: 2, payload: { type: "message_update", assistantMessageEvent: { type: "thinking_start", contentIndex: 0 } } });
+    state = applyRpcEvent(state, { sequence: 3, payload: { type: "message_update", assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "推理" } } });
+    state = applyRpcEvent(state, { sequence: 4, payload: { type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 1, delta: "答案" } } });
+    state = applyRpcEvent(state, { sequence: 5, payload: { type: "message_update", assistantMessageEvent: { type: "text_end", contentIndex: 1 } } });
+    expect(state.messages[0].content).toEqual([
+      { type: "thinking", thinking: "推理" },
+      { type: "text", text: "答案" },
+    ]);
+  });
+
+  it("does not mutate the previous conversation when applying deltas", () => {
+    const started = applyRpcEvent(emptyConversation(), { sequence: 1, payload: { type: "message_start", message: { role: "assistant", timestamp: 3, content: [{ type: "text", text: "a" }] } } });
+    const snapshot = JSON.stringify(started.messages);
+    applyRpcEvent(started, { sequence: 2, payload: { type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "b" } } });
+    expect(JSON.stringify(started.messages)).toBe(snapshot);
+  });
+
+  it("still accepts full messages from older Pi versions", () => {
+    let state = emptyConversation();
+    state = applyRpcEvent(state, { sequence: 1, payload: { type: "message_start", message: { role: "assistant", timestamp: 1, content: [] } } });
+    state = applyRpcEvent(state, { sequence: 2, payload: { type: "message_update", message: { role: "assistant", timestamp: 1, content: [{ type: "text", text: "legacy" }] } } });
+    expect(state.messages[0].content).toEqual([{ type: "text", text: "legacy" }]);
+  });
+});

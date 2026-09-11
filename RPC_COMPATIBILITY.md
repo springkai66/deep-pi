@@ -2,7 +2,7 @@
 
 本文件锁定 DeepPi「Pi RPC 工作区」已验证的 Pi 版本、协议子集与宿主行为。终端兼容模式（TUI）不受本表限制。
 
-- 基线版本：Pi 0.84.4（DeepPi 托管运行时，`@earendil-works/pi-coding-agent`）
+- 基线版本：Pi 0.84.4（DeepPi 托管运行时，`@earendil-works/pi-coding-agent`）；已验证向上兼容 **Pi 0.85.1**（见“流式增量”一节）
 - 官方文档：随包分发 `docs/rpc.md`（Pi 0.84.4），本文只声明该版本上验证过的子集
 - DSH 基线：0.1.1-rc.2（dshmarket 最低要求），DSH 使用原生 Web UI，不经过本协议
 
@@ -37,13 +37,25 @@
 | --- | --- |
 | `agent_start` | 标记忙碌 |
 | `agent_settled` | 标记空闲并重新读取 `get_state` |
-| `message_start` / `message_update` / `message_end` | 结构化消息；流式更新按角色与时间戳合并 |
+| `message_start` / `message_update` / `message_end` | 结构化消息；0.84 的整条消息按角色与时间戳合并，0.85 的增量见下 |
 | `tool_execution_start` / `tool_execution_update` / `tool_execution_end` | 工具条目；更新使用 `partialResult` |
 | `queue_update` | 显示 steering / followUp 队列 |
 | `extension_error` | 显示错误 |
 | `rpc_exit` / `rpc_error`（宿主合成） | 断开连接、结束运行中的工具条目 |
 
 接收但不映射到界面状态：`agent_end`、`turn_start` / `turn_end`、`bash_execution_update`、`compaction_start` / `compaction_end`、`auto_retry_start` / `auto_retry_end`、`summarization_retry_*`。这些事件要么由消息事件覆盖，要么属于原生 TUI 能力，不作为 RPC 工作区承诺。
+
+## 流式增量（Pi 0.85 起）
+
+Pi 0.85 起，助手文本不再每次重发整条消息，而是发 `message_update` + `assistantMessageEvent`：
+
+| 事件 | 宿主行为 |
+| --- | --- |
+| `text_start` / `thinking_start` | **重置**该 `contentIndex` 片段（`message_start` 会先把首个分片写进 content，随后 `text_start` 会重发这一分片） |
+| `text_delta` / `thinking_delta` | 追加到该 `contentIndex` 片段（文本 / 推理分别对应） |
+| `text_end` / `thinking_end` / `toolcall_*` | 不改变文本状态；工具条目由 `tool_execution_*` 驱动 |
+
+两条协议同时支持：`message_update` 带 `message` 时仍按整条替换（0.84 与部分第三方实现），带 `assistantMessageEvent` 时按增量拼接；`message_end` 始终是权威内容，会覆盖拼接结果。
 
 ## 扩展 UI 协议
 
@@ -61,5 +73,6 @@
 
 - `rpc_transport`：分帧、中文、大消息、非法 JSON、迟到响应、超时、退出与订阅释放。
 - `rpc_state` / `rpc_history`：事件合并、分页游标、过期事件与快照身份拒绝。
+- `rpc_state` 增量用例：文本/推理增量拼接、`*_start` 重置（首字不重复）、`message_end` 覆盖不重复、旧版整条消息兼容、不可变性。
 - `dialog` / `ChatPane`：扩展 UI 确认、选择、输入与取消生命周期。
 - 真实 Pi 集成（`cargo test -- --include-ignored`）：发送、工具调用、停止、恢复与历史分页。

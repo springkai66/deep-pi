@@ -139,6 +139,13 @@ pnpm perf:smoke
 pnpm perf:soak
 ```
 
+## 本地跑 Rust 全量测试偶发 Git 用例失败
+
+在装有安全软件钩子（例如注入 `git.exe` 的 SkyGuard / `sgephook_git.dll`）的机器上，`cargo test` 默认按 CPU 核数并发跑数百个用例时会大量并发启动 `git.exe`，偶发被注入层打断（`git` 以异常码退出、stderr 为空），表现为某个 `git_*` 用例报「无法解析当前提交」或夹具 `git add` 失败。这是环境问题，不是产品缺陷：
+
+- 单独重跑该用例即可通过；CI（无该注入）持续全绿。
+- 本地建议用有界并发跑全量：`cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=6`；需要跑联网/长用例时再加 `--include-ignored`。
+
 ## 目标设备验收清单
 
 以下项目必须在真实 Windows + Pi + WebView2 环境执行，并把截图、版本号和日志路径留在发布记录中：

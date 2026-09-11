@@ -38,6 +38,9 @@ export function record(value: unknown): Record<string, unknown> {
 export function asMessage(value: unknown): RpcMessage | null {
   const candidate = record(value);
   if (typeof candidate.role !== "string") return null;
+  // SAFETY: 这里只校验 role，其余字段由 Pi 的 RPC 协议约定；消费端（contentText、
+  // 渲染与 toolCallId/timestamp 比对）在读取每个字段前都会再做运行时收窄，
+  // 因此保留原始对象而不重建，避免丢掉 api/provider/model 等后续可能用到的字段。
   return candidate as unknown as RpcMessage;
 }
 
@@ -52,6 +55,44 @@ export function contentText(content: unknown): string {
     if (node.type === "toolCall") return `${String(node.name ?? "工具")}\n${JSON.stringify(node.arguments ?? {}, null, 2)}`;
     return "";
   }).filter(Boolean).join("\n");
+}
+
+interface AssistantUpdate {
+  kind: "text" | "thinking";
+  index: number;
+  text: string;
+  reset: boolean;
+}
+
+/**
+ * Pi 0.85 起，流式增量在 `assistantMessageEvent` 里（`text_delta` / `thinking_delta`），
+ * 而不是完整的 `message`；旧版本仍在 `message` 里给全量内容，两条路径都要兼容。
+ *
+ * 注意：`message_start` 会先把首个分片写进 content，随后 `text_start` 会从同一个
+ * contentIndex 重新发送这一分片，所以 `*_start` 必须重置该片段，否则首字会重复。
+ */
+function asAssistantUpdate(value: unknown): AssistantUpdate | null {
+  const event = record(value);
+  const type = typeof event.type === "string" ? event.type : "";
+  const rawIndex = event.contentIndex;
+  const index = typeof rawIndex === "number" && Number.isInteger(rawIndex) && rawIndex >= 0 ? rawIndex : 0;
+  const delta = typeof event.delta === "string" ? event.delta : "";
+  if (type === "text_start") return { kind: "text", index, text: "", reset: true };
+  if (type === "thinking_start") return { kind: "thinking", index, text: "", reset: true };
+  if (type === "text_delta" && delta) return { kind: "text", index, text: delta, reset: false };
+  if (type === "thinking_delta" && delta) return { kind: "thinking", index, text: delta, reset: false };
+  return null;
+}
+
+/** 把增量拼到最后一条 assistant 消息的对应片段上；没有占位消息时等 `message_end` 补全。 */
+function applyAssistantUpdate(messages: RpcMessage[], update: AssistantUpdate): RpcMessage[] {
+  const last = messages.at(-1);
+  if (!last || last.role !== "assistant") return messages;
+  const content: unknown[] = Array.isArray(last.content) ? [...last.content] : [];
+  const node = record(content[update.index]);
+  const current = update.reset || typeof node[update.kind] !== "string" ? "" : node[update.kind] as string;
+  content[update.index] = { ...node, type: update.kind, [update.kind]: current + update.text };
+  return [...messages.slice(0, -1), { ...last, content }];
 }
 
 export function emptyConversation(): Conversation {
@@ -81,6 +122,9 @@ export function applyRpcEvent(previous: Conversation, event: RpcEvent): Conversa
   } else if (type === "queue_update") {
     state.queue = [...(Array.isArray(payload.steering) ? payload.steering : []),
       ...(Array.isArray(payload.followUp) ? payload.followUp : [])].filter((item): item is string => typeof item === "string");
+  } else if (type === "message_update" && payload.assistantMessageEvent) {
+    const update = asAssistantUpdate(payload.assistantMessageEvent);
+    if (update) state.messages = applyAssistantUpdate(previous.messages, update);
   } else if (type === "message_start" || type === "message_update" || type === "message_end") {
     const message = asMessage(payload.message);
     if (!message) return state;

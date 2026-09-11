@@ -865,3 +865,30 @@ U1a -> U1b；随后 U2 和 U3 可独立推进；U4 依赖文件与进程安全�
 - 卸载：对同一卡片点「卸载」→ 应用内确认框「卸载 Pi Package：卸载 npm:pi-mcp-adapter@2.33.0 吗？」→ 确认后 8 秒完成：
   - 市场回到「暂无已安装 Package」，`settings.json` 的 `packages` 恢复为空数组，`agents\pi\npm\node_modules\pi-mcp-adapter` 已删除（`package.json` 不再声明该依赖）。
 - 结论：安装/卸载全程走 DeepPi 托管 Pi CLI + 托管 Node/npm，未触碰本机全局 Pi 安装与配置；「更新 / 全部更新」仍待人工。
+
+## 54. 自动化原生验收：RPC 流式增量（含一个真实缺陷的修复）与长会话
+
+2026-09-11（本地时间，debug 构建，CDP 驱动；**本地 OpenAI 兼容桩服务**，见文末说明）：
+
+- 目的：在不使用用户真实 provider/凭据的前提下，验证 DeepPi 自身的流式渲染、工具调用状态与队列行为。
+- 环境：托管 Pi 0.85.1 + 托管 Node；`agents\pi\models.json` 临时注册一个指向 `http://127.0.0.1:8787/v1` 的 `deeppi-stub` provider，`settings.json` 的 `defaultProvider/defaultModel` 指向它（验收后已删除并还原）。
+
+### 发现并修复的缺陷：流式文本不递增（Pi 0.85 起）
+
+- 现象：慢速模型下，助手气泡在整个生成期间保持空白，直到生成结束才一次性出现全文；状态栏只有「运行中」。
+- 根因：Pi 0.85 起 `message_update` 不再重发整条消息，而是携带 `assistantMessageEvent`（`text_start` / `text_delta` / `thinking_delta` …）。前端 `rpc-state.ts` 只读 `payload.message`，取不到就整帧丢弃，因此增量全部被忽略，只有 `message_end` 的整条消息才更新界面。用 RPC 直连探针（`pi --mode rpc`）确认：一次 62 字回复会产生 62 个 `text_delta` 事件，而界面在 13.6 秒里只有 3 次长度变化。
+- 修复（`src/lib/rpc-state.ts`）：新增 `assistantMessageEvent` 处理——`text_delta`/`thinking_delta` 追加到对应 `contentIndex` 片段，`*_start` **重置**该片段。重置是必需的：`message_start` 会先把首个分片写进 content，随后 `text_start` + `text_delta` 会重发同一分片，否则首字重复（实测出现「这这」）。旧版整条消息路径保留，`message_end` 仍是权威内容。
+- 回归测试：`rpc-state.test.ts` 新增 6 条（增量拼接、`*_start` 重置防重复、`message_end` 覆盖不重复、推理/文本分片、旧版兼容、不可变性）。
+- 修复后实测：同一条慢速回复在 13.6 秒内产生 **59 次**长度递增（5→6→7→…→64），期间无回退；首字序列为「这 / 这是 / 这是本 / 这是本地 …」，无重复、无闪烁。
+
+### 其余 RPC 原生验收（同一会话）
+
+- 流式与工具调用：发送含触发词的提示后，界面依次出现「bash · 工具参数」→ 工具条目 → 展开 `details` 可见真实 stdout（`deeppi-tool-ok`）→ 后续结论文本；状态回到「等待输入」。
+- 排队：运行中再发一条 → 显示「1 条消息排队中」，前一回合结束后按先后顺序执行，队列清空。
+- 停止：运行中点「停止当前响应并清空队列」→ 队列被清空（被排队的那条**没有**发出）、状态回到「等待输入」，随后仍可继续对话并正常收到回复。
+- `Ctrl+L`：焦点从 `BODY` 移到输入框，事件被 `preventDefault`。
+- 长会话（140 条消息）：消息窗口按 100 条封顶并出现「显示更早的消息」；点击后加载更早 40 条，**锚点消息像素位置不变**（`getBoundingClientRect().top` 变化 0px）；「回到最新消息」按钮在向上滚动时出现、点击后回到底部并自动隐藏。
+
+### 说明：桩服务的边界
+
+桩服务只验证 DeepPi 自身的渲染与状态机（SSE 分帧、增量合并、工具条目、队列与停止），**不验证任何真实模型的输出质量**；「真实模型对话」仍按 `NATIVE_ACCEPTANCE.md` 由用户在「设置 → 模型与凭据」配置 provider 后执行。
