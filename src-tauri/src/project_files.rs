@@ -187,7 +187,7 @@ impl GuardedPath {
         } == 0
         {
             return Err(format!(
-                "Cannot identify pinned path: {}",
+                "无法识别固定路径：{}",
                 std::io::Error::last_os_error()
             ));
         }
@@ -312,17 +312,17 @@ impl GuardedPath {
             }
             let file = options
                 .open(parent)
-                .map_err(|error| format!("Cannot access project path: {error}"))?;
+                .map_err(|error| format!("无法访问项目路径：{error}"))?;
             let metadata = file.metadata().map_err(|error| error.to_string())?;
             if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-                return Err("Symbolic links and reparse points are not supported".into());
+                return Err("不支持符号链接与重解析点".into());
             }
             if final_file && !metadata.is_file() || !final_file && !metadata.is_dir() {
-                return Err("Unexpected project entry type".into());
+                return Err("项目条目类型不符合预期".into());
             }
             held.push(file);
         }
-        let file = held.pop().ok_or("Project path has no handle")?;
+        let file = held.pop().ok_or("项目路径没有可用的文件句柄")?;
         Ok(Self {
             path,
             _ancestors: held,
@@ -376,9 +376,7 @@ fn scan(root: &Path, relative: &str, recursive: bool, limit: usize) -> Result<Fi
         };
         let children = match fs::read_dir(&guard.path) {
             Ok(children) => children,
-            Err(error) if directory == relative => {
-                return Err(format!("Cannot list directory: {error}"))
-            }
+            Err(error) if directory == relative => return Err(format!("无法列出目录：{error}")),
             Err(_) => {
                 if result.unreadable_directories.len() < 100 {
                     result.unreadable_directories.push(directory);

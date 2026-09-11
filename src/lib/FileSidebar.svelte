@@ -21,6 +21,10 @@
   let entries = $state<FileEntry[]>([]);
   let expanded = $state<Set<string>>(new Set());
   let loaded = new Set<string>();
+  // 已确认没有任何子项的目录：用于在树里提示「空目录」，否则展开空目录与
+  // 「展开失败」在视觉上无法区分。用数组而非 Set——Svelte 5 会代理数组，
+  // 但不会代理 Set，`Set.has` 在模板里不会建立依赖。
+  let emptyDirectories = $state<string[]>([]);
   let pending = $state<Set<string>>(new Set());
   let loading = $state(false);
   let error = $state("");
@@ -141,6 +145,7 @@
     const current = ++generation;
     pending = new Set();
     loaded = new Set();
+    emptyDirectories = [];
     error = "";
     if (reset) {
       refreshAgain = false;
@@ -205,6 +210,11 @@
       for (const child of result.entries) merged.set(child.path, child);
       entries = [...merged.values()];
       loaded.add(entry.path);
+      // 仅当目录内确实没有任何条目时标记为空；被忽略规则排除的内容也会留 unreadable 提示，
+      // 不会因此误报为空目录。
+      emptyDirectories = result.entries.length === 0
+        ? [...new Set([...emptyDirectories, entry.path])]
+        : emptyDirectories.filter((path) => path !== entry.path);
       incomplete ||= result.truncated;
       error = "";
     } catch (cause) {
@@ -330,6 +340,9 @@
         <span class="filename">{entry.name}</span>
         {#if pending.has(entry.path)}<span aria-label="正在加载">…</span>{/if}
       </button>
+      {#if entry.isDirectory && !query.trim() && expanded.has(entry.path) && emptyDirectories.includes(entry.path)}
+        <p class="empty-directory" role="status" style:padding-left={`${8 + (entry.path.split("/").length - 1) * 12 + 12}px`}>空目录</p>
+      {/if}
     {/each}
     <div role="none" style:height={`${Math.max(0, rows.length - end) * rowHeight}px`}></div>
   </div>
@@ -351,6 +364,8 @@
   .search-progress { display: flex; align-items: center; justify-content: space-between; padding-right: 10px; }
   .search-progress button { width: 26px; height: 26px; display: grid; place-items: center; border: 0; color: var(--text); background: var(--surface); cursor: pointer; }
   p { margin: 6px 10px; color: var(--text-muted); font-size: 12px; overflow-wrap: anywhere; }
+  /* 空目录占位行：与文件行同高，不参与文件计数。 */
+  .file-tree p.empty-directory { margin: 0; height: 28px; display: flex; align-items: center; color: var(--text-muted); font-size: 11px; font-style: italic; }
   .error { color: #ce5147; }
   .file-tree { flex: 1; min-height: 0; overflow: auto; }
   .file-tree button { display: flex; align-items: center; gap: 5px; width: 100%; height: 28px; padding-right: 8px; border: 0; color: var(--text); background: transparent; text-align: left; cursor: pointer; }
