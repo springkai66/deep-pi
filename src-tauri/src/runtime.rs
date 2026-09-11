@@ -1,7 +1,7 @@
 use std::{
     cmp::Ordering,
     fs,
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::Mutex,
@@ -10,6 +10,7 @@ use std::{
 
 use atomic_write_file::AtomicWriteFile;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager, State};
 use uuid::Uuid;
 
@@ -23,6 +24,11 @@ use crate::{
 };
 
 const MIN_DSHMARKET_DSH_VERSION: &str = "0.1.1-rc.2";
+
+/// DeepPi 托管的 Node 版本。Pi、DSH、dshmarket 均由它执行；
+/// 不使用电脑上安装的 Node/npm。版本变更需与兼容矩阵一起验证。
+const MANAGED_NODE_VERSION: &str = "24.13.0";
+const NODE_DIST_BASE: &str = "https://nodejs.org/dist";
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -80,39 +86,47 @@ fn command_version_cancellable(
 }
 
 pub(crate) fn runtime_status_for_paths(paths: &AppPaths) -> Result<Vec<RuntimeComponent>, String> {
-    let managed_pi = paths.pi_cli()?;
-    let (mut pi_command, pi_source) =
-        if let Some(pi_cli) = managed_pi.clone().or_else(|| paths.system_pi_cli()) {
-            let mut command = Command::new(paths.node_executable());
-            command.arg(pi_cli).arg("--version");
-            (
-                command,
-                if managed_pi.is_some() {
-                    "managed"
-                } else {
-                    "system"
-                },
-            )
-        } else {
-            let mut command = Command::new("powershell.exe");
-            command.args(["-NoLogo", "-NoProfile", "-Command", "pi --version"]);
-            (command, "system")
-        };
-    pi_command.env("PI_CODING_AGENT_DIR", &paths.pi_home);
-    let dsh_runtime = paths.dsh_runtime()?;
-    let mut dsh_command = Command::new(paths.node_executable());
-    dsh_command
-        .arg(AppPaths::dsh_cli_path(&dsh_runtime))
-        .arg("--version");
-    let (pi_version, dsh_version) = std::thread::scope(|scope| {
-        let pi = scope.spawn(|| command_version(&mut pi_command));
-        let dsh = command_version(&mut dsh_command);
-        (pi.join().unwrap_or(None), dsh)
-    });
-    let dsh_source = if dsh_runtime == paths.managed_dsh_runtime()? {
-        "managed"
-    } else {
-        "development"
+    let node = paths.node_runtime().ok();
+    let node_version = node
+        .as_ref()
+        .and_then(|node| command_version(Command::new(node).arg("--version")));
+
+    // 只读托管运行时：托管 Node 缺失时 Pi/DSH 一律显示不可用，
+    // 不回落 PATH、全局 npm 或电脑上安装的 pi。
+    let pi_cli = paths.pi_cli().ok().flatten();
+    let pi_version = match (&node, &pi_cli) {
+        (Some(node), Some(cli)) => {
+            let mut command = Command::new(node);
+            command
+                .arg(cli)
+                .arg("--version")
+                .env("PI_CODING_AGENT_DIR", &paths.pi_home);
+            command_version(&mut command)
+        }
+        _ => None,
+    };
+
+    let dsh_runtime = paths.dsh_runtime().ok();
+    let dsh_version = match (&node, &dsh_runtime) {
+        (Some(node), Some(runtime)) => {
+            let mut command = Command::new(node);
+            command
+                .arg(AppPaths::dsh_cli_path(runtime))
+                .arg("--version");
+            command_version(&mut command)
+        }
+        _ => None,
+    };
+    let dsh_source = match &dsh_runtime {
+        Some(runtime)
+            if paths
+                .managed_dsh_runtime()
+                .is_ok_and(|managed| managed == *runtime) =>
+        {
+            "managed"
+        }
+        Some(_) => "development",
+        None => "managed",
     };
 
     let market_version = fs::read_to_string(paths.dshmarket_manifest())
@@ -128,11 +142,18 @@ pub(crate) fn runtime_status_for_paths(paths: &AppPaths) -> Result<Vec<RuntimeCo
             source: "managed",
         },
         RuntimeComponent {
+            id: "node",
+            name: "Node.js",
+            available: node_version.is_some(),
+            current_version: node_version,
+            source: "managed",
+        },
+        RuntimeComponent {
             id: "pi",
             name: "Pi Coding Agent",
             available: pi_version.is_some(),
             current_version: pi_version,
-            source: pi_source,
+            source: "managed",
         },
         RuntimeComponent {
             id: "dsh",
@@ -396,8 +417,8 @@ fn component_installable(paths: &AppPaths, component: &str) -> bool {
 
 fn runtime_root(paths: &AppPaths, component: &str) -> Result<PathBuf, String> {
     match component {
-        "pi" | "dsh" => Ok(paths.runtimes.join(component)),
-        _ => Err("only Pi and DSH runtimes can be replaced".into()),
+        "node" | "pi" | "dsh" => Ok(paths.runtimes.join(component)),
+        _ => Err("only Node, Pi and DSH runtimes can be replaced".into()),
     }
 }
 
@@ -423,7 +444,7 @@ fn runtime_cli_path(root: &Path, component: &str) -> Option<PathBuf> {
 }
 
 fn runtime_installable(component: &str) -> bool {
-    matches!(component, "pi" | "dsh" | "dshmarket")
+    matches!(component, "node" | "pi" | "dsh" | "dshmarket")
 }
 
 fn runtime_backup_exists(paths: &AppPaths, component: &str) -> bool {
@@ -457,8 +478,8 @@ fn ensure_runtime_idle(
     dsh_manager: &DshManager,
     pty_manager: &crate::pty::PtyManager,
 ) -> Result<(), String> {
-    if component == "pi"
-        && (pty_manager.is_running()?
+    let pi_busy = || -> Result<bool, String> {
+        Ok(pty_manager.is_running()?
             || store.list()?.iter().any(|task| {
                 task.agent == "pi"
                     && matches!(
@@ -466,8 +487,12 @@ fn ensure_runtime_idle(
                         TaskStatus::Queued | TaskStatus::Running | TaskStatus::Waiting
                     )
             }))
-    {
+    };
+    if component == "pi" && pi_busy()? {
         return Err("请先停止所有 Pi Session，再切换 Pi runtime".into());
+    }
+    if component == "node" && (pi_busy()? || dsh_manager.is_running()?) {
+        return Err("请先停止所有 Pi 任务并关闭 DSH，再修复 Node 运行时".into());
     }
     if matches!(component, "dsh" | "dshmarket") && dsh_manager.is_running()? {
         return Err("请先关闭 DSH，再切换 DSH runtime".into());
@@ -475,21 +500,17 @@ fn ensure_runtime_idle(
     Ok(())
 }
 
-fn npm_executable() -> &'static str {
-    #[cfg(windows)]
-    {
-        "npm.cmd"
-    }
-    #[cfg(not(windows))]
-    {
-        "npm"
-    }
-}
-
-fn npm_install(prefix: &Path, spec: &str, cancellation: &Cancellation) -> Result<(), String> {
+/// 只用托管 Node 自带的 npm；不回落到电脑上全局安装的 npm。
+fn npm_install(
+    paths: &AppPaths,
+    prefix: &Path,
+    spec: &str,
+    cancellation: &Cancellation,
+) -> Result<(), String> {
     let prefix = prefix.to_string_lossy().into_owned();
     let proxy = configured_update_proxy()?;
-    let mut command = Command::new(npm_executable());
+    let npm = paths.npm_runtime()?;
+    let mut command = Command::new(npm);
     command
         .args([
             "install",
@@ -570,7 +591,7 @@ fn install_dshmarket(
         .join(format!("staging-{}", Uuid::new_v4()));
     fs::create_dir_all(&staging).map_err(|error| error.to_string())?;
     let spec = format!("dshmarket@{version}");
-    if let Err(error) = npm_install(&staging, &spec, cancellation) {
+    if let Err(error) = npm_install(paths, &staging, &spec, cancellation) {
         let _ = fs::remove_dir_all(&staging);
         return Err(error);
     }
@@ -595,7 +616,7 @@ fn install_dshmarket(
         &package,
         &backups.join(format!("dshmarket-previous-{}", Uuid::new_v4())),
     )?;
-    let installed = npm_install(&profile, &spec, cancellation).and_then(|()| {
+    let installed = npm_install(paths, &profile, &spec, cancellation).and_then(|()| {
         let installed = fs::read_to_string(paths.dshmarket_manifest())
             .ok()
             .and_then(|content| package_version_from_json(&content));
@@ -612,6 +633,190 @@ fn install_dshmarket(
     snapshot.commit()?;
     Ok(RuntimeOperationResult {
         component_id: "dshmarket".into(),
+        version: version.into(),
+    })
+}
+
+/// 下载 Node 用于校验的 SHA-256 清单/小文件。
+fn download_node_text(agent: &ureq::Agent, url: &str) -> Result<String, String> {
+    let mut response = agent
+        .get(url)
+        .call()
+        .map_err(|error| format!("下载失败：{error}"))?;
+    let status = response.status().as_u16();
+    let body = response
+        .body_mut()
+        .with_config()
+        .limit(1024 * 1024)
+        .lossy_utf8(true)
+        .read_to_string()
+        .map_err(|error| format!("下载响应读取失败：{error}"))?;
+    if !(200..300).contains(&status) {
+        return Err(format!("下载返回 HTTP {status}"));
+    }
+    Ok(body)
+}
+
+/// 流式下载到文件，同时计算 SHA-256（不把整个归档读进内存）。
+fn download_node_archive(
+    agent: &ureq::Agent,
+    url: &str,
+    destination: &Path,
+    cancellation: &Cancellation,
+) -> Result<String, String> {
+    cancellation.check()?;
+    let response = agent
+        .get(url)
+        .call()
+        .map_err(|error| format!("下载失败：{error}"))?;
+    let status = response.status().as_u16();
+    if !(200..300).contains(&status) {
+        return Err(format!("下载返回 HTTP {status}"));
+    }
+    let mut reader = response.into_body().into_reader();
+    let mut file =
+        fs::File::create(destination).map_err(|error| format!("无法创建下载文件：{error}"))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 128 * 1024];
+    loop {
+        cancellation.check()?;
+        let read = reader
+            .read(&mut buffer)
+            .map_err(|error| format!("下载读取失败：{error}"))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        file.write_all(&buffer[..read])
+            .map_err(|error| format!("下载写入失败：{error}"))?;
+    }
+    file.sync_all()
+        .map_err(|error| format!("下载落盘失败：{error}"))?;
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn parse_sha256(contents: &str, file_name: &str) -> Option<String> {
+    contents.lines().find_map(|line| {
+        let mut parts = line.split_whitespace();
+        let hash = parts.next()?;
+        let name = parts.next()?.trim_start_matches('*');
+        (name == file_name && hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit()))
+            .then(|| hash.to_ascii_lowercase())
+    })
+}
+
+/// 解压官方 Node 归档，去掉顶层 `node-vX-win-x64/` 目录，并拒绝越界条目。
+fn extract_node_archive(
+    archive: &Path,
+    destination: &Path,
+    cancellation: &Cancellation,
+) -> Result<(), String> {
+    let file = fs::File::open(archive).map_err(|error| format!("无法打开 Node 归档：{error}"))?;
+    let mut zip = zip::ZipArchive::new(file).map_err(|error| format!("Node 归档无效：{error}"))?;
+    for index in 0..zip.len() {
+        cancellation.check()?;
+        let mut entry = zip
+            .by_index(index)
+            .map_err(|error| format!("Node 归档读取失败：{error}"))?;
+        let Some(path) = entry.enclosed_name() else {
+            return Err("Node 归档包含非法路径".into());
+        };
+        let relative: PathBuf = path.components().skip(1).collect();
+        if relative.as_os_str().is_empty() {
+            continue;
+        }
+        let target = destination.join(&relative);
+        if entry.is_dir() {
+            fs::create_dir_all(&target).map_err(|error| error.to_string())?;
+        } else {
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+            }
+            let mut output = fs::File::create(&target).map_err(|error| error.to_string())?;
+            std::io::copy(&mut entry, &mut output).map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+fn verify_node(root: &Path, expected: &str) -> Result<String, String> {
+    let node = root.join("node.exe");
+    if !node.is_file() {
+        return Err("Node 运行时缺少 node.exe".into());
+    }
+    if !root.join("npm.cmd").is_file() {
+        return Err("Node 运行时缺少 npm.cmd（安装 Pi/DSH 需要托管 npm）".into());
+    }
+    let version = command_version(Command::new(&node).arg("--version"))
+        .ok_or_else(|| "Node 运行时启动验证失败".to_string())?;
+    if version != expected {
+        return Err(format!("Node 版本不符：期望 {expected}，实际 {version}"));
+    }
+    Ok(version)
+}
+
+/// 安装内置的托管 Node。下载官方发行包、校对 SHA-256、解压、验证后原子切换；
+/// 不使用电脑上已安装的 Node/npm。
+fn install_node(
+    paths: &AppPaths,
+    version: &str,
+    cancellation: &Cancellation,
+) -> Result<RuntimeOperationResult, String> {
+    if version != MANAGED_NODE_VERSION {
+        return Err(format!(
+            "Node 运行时只能安装内置固定版本 {MANAGED_NODE_VERSION}"
+        ));
+    }
+    let root = paths.runtimes.join("node");
+    let versions = root.join("versions");
+    fs::create_dir_all(&versions)
+        .map_err(|error| format!("failed to create Node runtime directory: {error}"))?;
+    let staging = versions.join(format!("{version}-{}", Uuid::new_v4()));
+    fs::create_dir_all(&staging).map_err(|error| error.to_string())?;
+    let archive_name = format!("node-v{version}-win-x64.zip");
+    let archive_path = versions.join(format!("node-download-{}.zip", Uuid::new_v4()));
+    let install = (|| -> Result<(), String> {
+        let proxy = configured_update_proxy()?;
+        let mut config = ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(900)))
+            .http_status_as_error(false);
+        if let Some(proxy) = proxy {
+            let proxy =
+                ureq::Proxy::new(&proxy).map_err(|error| format!("proxy is invalid: {error}"))?;
+            config = config.proxy(Some(proxy));
+        }
+        let agent = config.build().new_agent();
+        let shasums = download_node_text(
+            &agent,
+            &format!("{NODE_DIST_BASE}/v{version}/SHASUMS256.txt"),
+        )?;
+        let expected = parse_sha256(&shasums, &archive_name)
+            .ok_or_else(|| format!("官方校验文件缺少 {archive_name}"))?;
+        let digest = download_node_archive(
+            &agent,
+            &format!("{NODE_DIST_BASE}/v{version}/{archive_name}"),
+            &archive_path,
+            cancellation,
+        )?;
+        if digest != expected {
+            return Err("Node 归档的 SHA-256 校验失败".into());
+        }
+        extract_node_archive(&archive_path, &staging, cancellation)?;
+        verify_node(&staging, version)?;
+        Ok(())
+    })();
+    let _ = fs::remove_file(&archive_path);
+    if let Err(error) = install {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+    crate::runtime_pointer::activate(&root, &staging, |candidate| {
+        let version = verify_node(candidate, MANAGED_NODE_VERSION)?;
+        cancellation.commit()?;
+        Ok(version)
+    })?;
+    Ok(RuntimeOperationResult {
+        component_id: "node".into(),
         version: version.into(),
     })
 }
@@ -635,7 +840,7 @@ fn verify_runtime(
             .and_then(|content| package_version_from_json(&content))
             .filter(|version| valid_package_version(version))
             .ok_or("runtime package manifest has no valid version")?;
-    let mut command = Command::new(paths.node_executable());
+    let mut command = Command::new(paths.node_runtime()?);
     command.arg(cli).arg("--version");
     if component == "pi" {
         command.env("PI_CODING_AGENT_DIR", &paths.pi_home);
@@ -750,6 +955,16 @@ fn install_runtime_inner(
         return Err("runtime version is invalid".into());
     }
     ensure_runtime_idle(&request.component_id, &store, &dsh_manager, &pty_manager)?;
+    // Node 是自包含的基础运行时：从官方发行包下载，不从 npm 安装。
+    if request.component_id == "node" {
+        let result = install_node(&paths, &request.version, cancellation)?;
+        log::info!(
+            "event=runtime_install component={} version={} status=active",
+            request.component_id,
+            request.version
+        );
+        return Ok(result);
+    }
     let package = runtime_package(&request.component_id)
         .ok_or_else(|| "runtime component is not supported".to_string())?;
     let proxy = configured_update_proxy()?;
@@ -776,7 +991,7 @@ fn install_runtime_inner(
     fs::create_dir_all(&staging)
         .map_err(|error| format!("failed to create runtime staging directory: {error}"))?;
     let spec = format!("{package}@{}", request.version);
-    if let Err(error) = npm_install(&staging, &spec, cancellation) {
+    if let Err(error) = npm_install(&paths, &staging, &spec, cancellation) {
         let _ = fs::remove_dir_all(&staging);
         return Err(error);
     }
@@ -885,7 +1100,11 @@ fn rollback_runtime_inner(
     let root = runtime_root(&paths, &request.component_id)?;
     let version =
         crate::runtime_pointer::rollback(&root, latest_runtime_backup(&root), |target| {
-            let version = verify_runtime(&paths, &request.component_id, target, cancellation)?;
+            let version = if request.component_id == "node" {
+                verify_node(target, MANAGED_NODE_VERSION)?
+            } else {
+                verify_runtime(&paths, &request.component_id, target, cancellation)?
+            };
             cancellation.commit()?;
             Ok(version)
         })?;
@@ -922,12 +1141,15 @@ fn check_runtime_updates_inner(
         .into_iter()
         .map(|component| {
             let Some(package) = runtime_package(component.id) else {
+                // Node 是内置固定版本：缺失或版本不符时提供“安装/修复”入口。
+                let is_node = component.id == "node";
                 return RuntimeUpdate {
                     id: component.id.to_owned(),
                     name: component.name.to_owned(),
+                    update_available: is_node
+                        && component.current_version.as_deref() != Some(MANAGED_NODE_VERSION),
                     current_version: component.current_version,
-                    latest_version: None,
-                    update_available: false,
+                    latest_version: is_node.then(|| MANAGED_NODE_VERSION.to_owned()),
                     installable: component_installable(&paths, component.id),
                     can_rollback: runtime_backup_exists(&paths, component.id),
                     stale: false,
@@ -993,12 +1215,35 @@ fn check_runtime_updates_inner(
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_version, package_version_from_json, runtime_cli_path, runtime_installable,
-        valid_package_version, version_is_newer,
+        extract_version, package_version_from_json, parse_sha256, runtime_cli_path,
+        runtime_installable, valid_package_version, version_is_newer,
     };
 
     #[test]
-    #[ignore = "downloads the official Pi runtime into an isolated temporary profile"]
+    fn node_is_installable_and_sha256_lines_are_parsed() {
+        assert!(runtime_installable("node"));
+        assert!(runtime_installable("pi"));
+        assert!(!runtime_installable("deeppi"));
+
+        let contents = "\
+            0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  node-v24.13.0-win-x64.zip\n\
+            abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd *other.zip\n";
+        assert_eq!(
+            parse_sha256(contents, "node-v24.13.0-win-x64.zip"),
+            Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned())
+        );
+        // 去掉 BSD 风格的 `*` 前缀，以及拒绝非法行。
+        assert_eq!(
+            parse_sha256(contents, "other.zip"),
+            Some("abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd".to_owned())
+        );
+        assert_eq!(parse_sha256(contents, "missing.zip"), None);
+        assert_eq!(parse_sha256("not-a-hash  file.zip\n", "file.zip"), None);
+        assert_eq!(parse_sha256("short  file.zip\n", "file.zip"), None);
+    }
+
+    #[test]
+    #[ignore = "downloads the official Node and Pi runtimes into an isolated temporary profile"]
     fn installs_verifies_and_rolls_back_live_pi_in_isolation() {
         let root =
             std::env::temp_dir().join(format!("deeppi-live-runtime-{}", uuid::Uuid::new_v4()));
@@ -1008,6 +1253,12 @@ mod tests {
             root.join("project"),
         )
         .unwrap();
+        let cancellation = crate::operation::Cancellation::default();
+        // 自包含流程：先装内置 Node（官方发行包），再用托管 npm 装 Pi。
+        super::install_node(&paths, super::MANAGED_NODE_VERSION, &cancellation).unwrap();
+        assert!(paths.node_runtime().unwrap().is_file());
+        assert!(paths.npm_runtime().unwrap().is_file());
+
         let runtime = paths.runtimes.join("pi");
         let staging = runtime.join("versions/first");
         std::fs::create_dir_all(&staging).unwrap();
@@ -1015,8 +1266,8 @@ mod tests {
         let version =
             super::latest_package_version("@earendil-works/pi-coding-agent", proxy.as_deref())
                 .unwrap();
-        let cancellation = crate::operation::Cancellation::default();
         super::npm_install(
+            &paths,
             &staging,
             &format!("@earendil-works/pi-coding-agent@{version}"),
             &cancellation,
@@ -1031,6 +1282,7 @@ mod tests {
         let first = paths.managed_pi_runtime().unwrap();
         let second = runtime.join("versions/second");
         super::npm_install(
+            &paths,
             &second,
             &format!("@earendil-works/pi-coding-agent@{version}"),
             &cancellation,

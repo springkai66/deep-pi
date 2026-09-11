@@ -165,7 +165,7 @@ fn start_dsh_inner(
         return Err("managed DSH runtime is not installed".into());
     }
 
-    let mut command = Command::new(paths.node_executable());
+    let mut command = Command::new(paths.node_runtime()?);
     command
         .arg(cli)
         .args(["web", "--host", "127.0.0.1", "--port", "0", "--no-open"])

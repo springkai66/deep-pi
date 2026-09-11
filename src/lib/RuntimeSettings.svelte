@@ -76,7 +76,7 @@
           </span>
           {#if update?.latestVersion && update.installable && !skipped && !snoozed}
             {#if update.updateAvailable}
-              <button type="button" class="quiet-button" disabled={busyRuntime !== null} onclick={() => onUpdateRuntime(update)}>更新</button>
+              <button type="button" class="quiet-button" disabled={busyRuntime !== null} onclick={() => onUpdateRuntime(update)}>{runtime.currentVersion ? "更新" : "安装"}</button>
               <button type="button" class="quiet-button" onclick={() => onSnoozeRuntime(update)}>稍后</button>
               <button type="button" class="quiet-button" onclick={() => onSkipRuntime(update)}>跳过</button>
             {:else if !update.stale && !update.error}

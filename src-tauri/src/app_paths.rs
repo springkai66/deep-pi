@@ -49,16 +49,30 @@ impl AppPaths {
         Ok(paths)
     }
 
-    pub fn managed_node_executable(&self) -> PathBuf {
-        self.runtimes.join("node").join("current").join("node.exe")
+    /// 当前激活的托管 Node 目录（可能是 `current` 或 pointer 指向的 `versions/<id>`）。
+    pub fn managed_node_runtime(&self) -> Result<PathBuf, String> {
+        crate::runtime_pointer::current(&self.runtimes.join("node"))
     }
 
-    pub fn node_executable(&self) -> PathBuf {
-        let managed = self.managed_node_executable();
-        if managed.is_file() {
-            managed
+    /// 托管 Node 可执行文件。DeepPi 的所有运行时（Pi、DSH、dshmarket）只允许由它执行，
+    /// 不回落系统 PATH 上的 node。
+    pub fn node_runtime(&self) -> Result<PathBuf, String> {
+        let node = self.managed_node_runtime()?.join("node.exe");
+        if node.is_file() {
+            Ok(node)
         } else {
-            PathBuf::from("node.exe")
+            Err("托管 Node 运行时未安装，请在“设置 → 运行时与更新”安装 Node".into())
+        }
+    }
+
+    /// 托管 Node 自带的 npm。安装/升级 Pi、DSH、dshmarket 只用它，
+    /// 不调用电脑上全局安装的 npm。
+    pub fn npm_runtime(&self) -> Result<PathBuf, String> {
+        let npm = self.managed_node_runtime()?.join("npm.cmd");
+        if npm.is_file() {
+            Ok(npm)
+        } else {
+            Err("托管 npm 不可用，请在“设置 → 运行时与更新”修复 Node 运行时".into())
         }
     }
 
@@ -66,6 +80,7 @@ impl AppPaths {
         crate::runtime_pointer::current(&self.runtimes.join("pi"))
     }
 
+    /// 托管 Pi CLI。不存在时返回 `None`，从不回落到电脑上安装的 Pi。
     pub fn pi_cli(&self) -> Result<Option<PathBuf>, String> {
         let cli = self
             .managed_pi_runtime()?
@@ -84,23 +99,38 @@ impl AppPaths {
         }
     }
 
+    pub fn required_pi_cli(&self) -> Result<PathBuf, String> {
+        self.pi_cli()?
+            .ok_or_else(|| "托管 Pi 运行时未安装，请在“设置 → 运行时与更新”安装 Pi".to_string())
+    }
+
     pub fn managed_dsh_runtime(&self) -> Result<PathBuf, String> {
         crate::runtime_pointer::current(&self.runtimes.join("dsh"))
     }
 
+    #[cfg(debug_assertions)]
     pub fn development_dsh_runtime(&self) -> PathBuf {
         self.project_root.join(".deeppi-runtime").join("dsh")
     }
 
+    /// 托管 DSH 运行时路径。仅开发构建允许回落到仓库内的 `.deeppi-runtime/dsh`，
+    /// 发布构建必须使用托管目录，不借用电脑上安装的 DSH。
     pub fn dsh_runtime(&self) -> Result<PathBuf, String> {
         let managed = self.managed_dsh_runtime()?;
         if Self::dsh_cli_path(&managed).is_file() {
-            Ok(managed)
-        } else if self.runtimes.join("dsh/active.json").exists() {
-            Err("active DSH runtime has no executable entry".into())
-        } else {
-            Ok(self.development_dsh_runtime())
+            return Ok(managed);
         }
+        if self.runtimes.join("dsh/active.json").exists() {
+            return Err("active DSH runtime has no executable entry".into());
+        }
+        #[cfg(debug_assertions)]
+        {
+            let development = self.development_dsh_runtime();
+            if Self::dsh_cli_path(&development).is_file() {
+                return Ok(development);
+            }
+        }
+        Err("托管 DSH 运行时未安装，请在“设置 → 运行时与更新”安装 DSH".into())
     }
 
     pub fn dsh_cli_path(runtime: &std::path::Path) -> PathBuf {
@@ -149,27 +179,6 @@ impl AppPaths {
             return Err("任务绑定的 Pi 配置目录不可用".into());
         }
         Ok(home)
-    }
-
-    pub fn system_pi_cli(&self) -> Option<PathBuf> {
-        let path = std::env::var_os("PATH").unwrap_or_default();
-        let mut directories: Vec<_> = std::env::split_paths(&path)
-            .filter(|path| path.is_absolute())
-            .collect();
-        if let Some(roaming) = std::env::var_os("APPDATA") {
-            directories.push(PathBuf::from(roaming).join("npm"));
-        }
-        directories
-            .into_iter()
-            .filter(|directory| directory != &self.project_root)
-            .map(|directory| {
-                directory.join("node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js")
-            })
-            .find(|entry| entry.is_file())
-    }
-
-    pub fn available_pi_cli(&self) -> Result<Option<PathBuf>, String> {
-        Ok(self.pi_cli()?.or_else(|| self.system_pi_cli()))
     }
 
     pub fn dshmarket_manifest(&self) -> PathBuf {
@@ -230,8 +239,11 @@ mod tests {
         std::fs::write(&node, "").expect("node marker should be written");
         std::fs::write(&pi, "").expect("Pi marker should be written");
 
-        assert_eq!(paths.node_executable(), node);
+        assert_eq!(paths.node_runtime().unwrap(), node);
         assert_eq!(paths.pi_cli().unwrap(), Some(pi));
+        // 托管缺失时必须报错，而不是回落到本机环境。
+        std::fs::remove_file(&node).unwrap();
+        assert!(paths.node_runtime().is_err());
 
         std::fs::remove_dir_all(root).expect("test paths should be removed");
     }

@@ -186,7 +186,7 @@ fn package_command(
     let pi_cli = paths
         .pi_cli()?
         .ok_or_else(|| "managed Pi runtime is not installed".to_string())?;
-    let mut command = Command::new(paths.node_executable());
+    let mut command = Command::new(paths.node_runtime()?);
     command
         .arg(pi_cli)
         .env("PI_CODING_AGENT_DIR", &paths.pi_home)

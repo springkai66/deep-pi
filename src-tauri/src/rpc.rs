@@ -141,9 +141,7 @@ fn start(app: &AppHandle, request: StartRpcRequest) -> Result<TaskRecord, String
     if manager.count()? + pty.count()? >= usize::from(maximum) {
         return Err("maximum concurrent Pi tasks reached".into());
     }
-    let cli = paths
-        .available_pi_cli()?
-        .ok_or("未找到本机或托管 Pi，请先在运行时设置中安装 Pi")?;
+    let cli = paths.required_pi_cli()?;
     let store = app.state::<TaskStore>();
     store.project_path(&request.project_id)?;
     let mut record = if let Some(task_id) = request.task_id {
@@ -182,7 +180,7 @@ fn start(app: &AppHandle, request: StartRpcRequest) -> Result<TaskRecord, String
             return Err(error);
         }
     };
-    let mut command = Command::new(paths.node_executable());
+    let mut command = Command::new(paths.node_runtime()?);
     command
         .arg(cli)
         .args(["--mode", "rpc"])

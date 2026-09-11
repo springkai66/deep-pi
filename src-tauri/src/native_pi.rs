@@ -372,15 +372,11 @@ fn session_roots(
 ) -> Result<Vec<PathBuf>, String> {
     let mut roots = vec![home.join("sessions")];
     let settings = bounded_json(&home.join("settings.json"))?;
-    let custom = std::env::var("PI_CODING_AGENT_SESSION_DIR")
-        .ok()
+    // 只读托管 home 的配置；不读宿主环境变量，避免受本机安装的 Pi 影响。
+    let custom = settings["sessionDir"]
+        .as_str()
         .filter(|path| !path.is_empty())
-        .or_else(|| {
-            settings["sessionDir"]
-                .as_str()
-                .filter(|path| !path.is_empty())
-                .map(str::to_owned)
-        });
+        .map(str::to_owned);
     if let Some(custom) = custom {
         let path = if let Some(suffix) = custom
             .strip_prefix("~/")
@@ -417,9 +413,16 @@ pub fn validate_resume(file: &str, id: &str, cwd: &str) -> Result<(), String> {
 }
 
 pub fn session_arguments(record: &crate::task::TaskRecord) -> Result<Vec<String>, String> {
-    let mut arguments = if let Some(file) = &record.session_file {
+    // Pi 可能在首次写入前就上报会话文件路径，用户也可能删除会话文件；
+    // 记录的路径不存在时回退到 `--session-id`（Pi 会按 id 恢复已有会话或新建文件），
+    // 避免任务因为一个尚不存在的路径而永远无法重启。
+    let resume = record
+        .session_file
+        .as_deref()
+        .filter(|file| Path::new(file).is_file());
+    let mut arguments = if let Some(file) = resume {
         validate_resume(file, &record.session_id, &record.project_path)?;
-        vec!["--session".into(), file.clone()]
+        vec!["--session".into(), file.to_owned()]
     } else {
         if !valid_session_id(&record.session_id) {
             return Err("Invalid Pi session ID".into());
@@ -632,6 +635,25 @@ mod tests {
         assert_eq!(arguments[0], "--session");
         assert_eq!(arguments[1], file.to_str().unwrap());
         assert!(!arguments.iter().any(|arg| arg == "--session-id"));
+    }
+
+    #[test]
+    fn missing_session_file_falls_back_to_session_id() {
+        let root = tempfile::tempdir().unwrap();
+        let store = TaskStore::in_memory().unwrap();
+        let file = session(root.path(), "gone-session");
+        store
+            .import_native_sessions(&[parse_session(&file).unwrap()], root.path())
+            .unwrap();
+        let task = store.list().unwrap().remove(0);
+        assert!(task.session_file.is_some());
+        // Pi 可能在首次写入前上报路径，用户也可能删除会话文件；两者都不应让重启永久失败。
+        fs::remove_file(&file).unwrap();
+        let restarted = store.restart(&task.id).unwrap();
+        let arguments = session_arguments(&restarted).unwrap();
+        assert_eq!(arguments[0], "--session-id");
+        assert_eq!(arguments[1], restarted.session_id);
+        assert!(!arguments.iter().any(|arg| arg == "--session"));
     }
 
     #[test]

@@ -755,3 +755,27 @@ U1a -> U1b；随后 U2 和 U3 可独立推进；U4 依赖文件与进程安全�
   - 差异视图：已暂存、未暂存、未跟踪新文件三种均正确渲染 unified diff（带行号与增删标记），内容与夹具一致。
 - 清理：临时项目已从应用数据库删除、临时仓库目录已删除、验收进程已结束；Git 授权为进程级，随应用退出失效。未执行暂存/提交/推送写操作。
 - 仍未验证：上游领先/落后与冲突分类、二进制/重命名/删除差异、显式暂存与提交推送的真实远程闭环、取消信任后的行为；以及真实安装/卸载 Pi Package、DSH 页内具体交互、真实模型回复、应用内升级 UI、高 DPI/多显示器、IME、DSH 聚焦快捷键。
+
+## 47. 运行时完全自包含：禁止依赖本机安装的 Pi/DSH/Node
+
+2026-09-11（本地时间），按用户要求「内置的 Pi 与 DSH 不依赖电脑上安装的环境」收口：
+
+- 移除的本机环境回落：
+  - `AppPaths::node_executable()`（托管 Node 缺失时回落到 PATH 上的 `node.exe`）→ 改为 `node_runtime()`，只认托管目录，缺失时明确报错。
+  - `AppPaths::system_pi_cli()` / `available_pi_cli()`（扫描 PATH 与 `%APPDATA%\npm` 找系统 Pi）→ 删除；新增 `required_pi_cli()`，缺失时提示到运行时设置安装。
+  - `pty.rs` TUI 启动回落到 `powershell -c pi`、`rpc.rs` 的“本机或托管 Pi”分支 → 全部改为托管 Node + 托管 Pi CLI。
+  - `runtime_status_for_paths` 回落到系统 Pi 的版本探测 → 改为只读托管运行时；托管 Node 缺失时 Pi/DSH 一律显示不可用，不再借用系统版本。
+  - `native_pi::session_roots` 读取宿主环境变量 `PI_CODING_AGENT_SESSION_DIR` → 删除，只读托管 home 与项目内 `.pi/settings.json`。
+  - `dsh_runtime()` 的 `.deeppi-runtime/dsh` 回落 → 用 `#[cfg(debug_assertions)]` 限定为开发构建；发布构建缺失即报错。
+- 新增托管 Node 运行时（自包含的关键缺失环节）：
+  - 从 `nodejs.org/dist` 下载固定版本（当前 24.13.0）的官方 `node-v…-win-x64.zip`，用同一目录的 `SHASUMS256.txt` 校验 SHA-256（流式计算，不整包入内存），用 `zip` crate 解压（去除顶层目录、拒绝越界条目），验证 `node.exe --version` 与 `npm.cmd` 存在后经 `runtime_pointer::activate` 原子切换，支持回滚。
+  - `npm_install`（安装/升级 Pi、DSH、dshmarket）改用**托管 Node 自带的 npm**，不再调用系统 `npm.cmd`。
+  - 运行时列表新增 `node` 组件；检查更新时 Node 显示内置版本，缺失/损坏时提供“安装/修复”，进行中显示“处理中”，可回滚。
+  - 顺序修正：托管 Node 目录此前是硬编码 `current/node.exe`，与 pointer 激活的 `versions/<id>` 不一致；`managed_node_runtime()` 改为经 `runtime_pointer::current()` 解析（与 Pi/DSH 一致）。
+- 前端：`RuntimeSettings.svelte` 的按钮按状态显示“安装 / 更新 / 修复”。
+- 验证：
+  - Rust：`cargo test --lib` 232 通过 / 0 失败。
+  - 端到端（`--include-ignored`）：`installs_verifies_and_rolls_back_live_pi_in_isolation` 通过（约 500 秒）——在隔离 profile 中从官方包安装 Node、用托管 npm 安装 Pi 0.85.1、激活并回滚。
+  - 真实应用：`runtime_status` 返回 5 项（DeepPi / Node 24.13.0 / Pi 0.84.4 / DSH 0.1.1-rc.2 / dshmarket 1.40.0，全部 `managed`）；点击 Node“修复”后应用下载官方包、校验、解压并激活到 `versions/…`，`npm.cmd` 就位；新建 Pi RPC 任务确认由 `runtimes/node/versions/24.13.0-…/node.exe` 启动，不再使用电脑上的 Node。
+  - 清理：验收产生的临时项目、任务与临时目录已删除，未改动用户真实项目。
+- 仍未验证：真实模型回复（托管 Pi 未配置 provider）、应用内升级 Pi/DSH 的完整 UI 往返（安装机制已由上述测试覆盖）。

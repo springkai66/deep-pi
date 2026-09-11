@@ -440,15 +440,11 @@ fn launch_pi(
         .openpty(normalize_size(rows, cols)?)
         .map_err(|error| format!("failed to create PTY: {error}"))?;
 
-    let mut command = if let Some(pi_cli) = paths.available_pi_cli()? {
-        let mut command = CommandBuilder::new(paths.node_executable());
-        command.arg(pi_cli);
-        command
-    } else {
-        let mut command = CommandBuilder::new("powershell.exe");
-        command.args(["-NoLogo", "-NoProfile", "-Command", "pi"]);
-        command
-    };
+    // 只用托管运行时：node 与 Pi CLI 都必须在托管目录里，否则明确报错，
+    // 不回落系统 PATH 上的 node，也不执行电脑上安装的 pi。
+    let pi_cli = paths.required_pi_cli()?;
+    let mut command = CommandBuilder::new(paths.node_runtime()?);
+    command.arg(pi_cli);
     command.args(crate::native_pi::session_arguments(record)?);
     // 托管任务的 bridge 扩展位于绑定的 pi_home/extensions 下，由 Pi 自动发现；
     // 旧 native 任务已在 task_pi_home 中明确拒绝。
