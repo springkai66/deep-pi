@@ -1,8 +1,16 @@
 # DeepPi
 
-Windows 桌面宿主，将 Pi Coding Agent 和 DeepSeek Harness 集成到同一应用中。
+Windows 桌面宿主，将 Pi Coding Agent 和 DeepSeek Harness (DSH) 集成到同一应用中：多任务 Pi 终端与 RPC 对话、DSH 原生 Web UI、扩展市场、Provider 与凭据管理、项目文件与 Git 审阅，以及 Pi/DSH 运行时的应用内升级。
 
-## 环境
+## 下载安装
+
+从 [GitHub Releases](https://github.com/springkai66/deep-pi/releases) 下载最新的 `DeepPi_<版本>_x64-setup.exe`（NSIS 安装包）。
+
+- 系统要求：Windows 10/11 x64；WebView2 由安装包自动下载安装。
+- v1.0.0 安装包尚未做 Authenticode 代码签名，首次运行可能出现 SmartScreen 提示：选择「更多信息」→「仍要运行」。请先核对下载来源。
+- 卸载通过「设置 → 应用」或在安装目录运行卸载程序完成。
+
+## 环境（开发）
 
 - Windows 10/11
 - Node.js 22+
@@ -54,13 +62,25 @@ pnpm tauri build --no-bundle
 
 ## 发布
 
-推送 `v*` tag 后，`.github/workflows/release.yml` 会构建并发布 Windows 产物。正式发布需要配置 Tauri updater signing secrets 和 Authenticode 证书 secrets。
+推送 `v*` tag 后，`.github/workflows/release.yml` 会构建、签名（可选）并发布 Windows 产物，同时同步 `stable` 更新通道。tagged 发布必须配置 Tauri updater signing secrets；Authenticode 证书 secrets 可选，配置后自动启用签名。步骤与密钥生成方式见 [RELEASING.md](./RELEASING.md)。
+
+## 已知限制（v1.0）
+
+- 安装包未做 Authenticode 代码签名；开源签名通道申请中。
+- 不读取本机已安装 Pi/DSH 的配置与任务列表，只使用 DeepPi 托管运行时与配置目录。
+- DSH 子 Webview 获得焦点时宿主快捷键不生效（见 [KEYBOARD_SHORTCUTS.md](./KEYBOARD_SHORTCUTS.md)）。
+- 8 小时长稳、超大规模仓库与部分原生交互验收尚未完成（见 [NATIVE_ACCEPTANCE.md](./NATIVE_ACCEPTANCE.md)）。
 
 ## 文档
 
+- [键盘快捷键](./KEYBOARD_SHORTCUTS.md)
+- [Pi RPC 兼容基线](./RPC_COMPATIBILITY.md)
+- [原生验收清单](./NATIVE_ACCEPTANCE.md)
+- [发布流程](./RELEASING.md)
 - [English README](./README.en.md)
 - [Security](./SECURITY.md)
 - [Troubleshooting](./TROUBLESHOOTING.md)
+- [UI 重设计计划与实施记录](./UI_REDESIGN_PLAN.md)
 
 ## 许可证
 

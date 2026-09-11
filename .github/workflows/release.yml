@@ -125,8 +125,27 @@ jobs:
             -InstallerPath $current.FullName `
             -PreviousInstallerPath $previous.FullName
 
-      - name: Require signing secrets for tagged releases
+      # v1 先发未签名安装包；拿到 Authenticode 证书后把
+      # DEEPPI_WINDOWS_CERTIFICATE_BASE64 / _PASSWORD 写入仓库 Secrets 即自动启用签名。
+      - name: Detect Authenticode certificate
         if: startsWith(github.ref, 'refs/tags/')
+        id: certificate
+        shell: pwsh
+        env:
+          DEEPPI_WINDOWS_CERTIFICATE_BASE64: >-
+            ${{ secrets.DEEPPI_WINDOWS_CERTIFICATE_BASE64 }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:DEEPPI_WINDOWS_CERTIFICATE_BASE64)) {
+            Write-Host 'No Authenticode certificate configured; publishing an unsigned build.'
+            "available=false" >> $env:GITHUB_OUTPUT
+          } else {
+            "available=true" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Sign tagged release files
+        if: >-
+          startsWith(github.ref, 'refs/tags/') &&
+          steps.certificate.outputs.available == 'true'
         shell: pwsh
         env:
           DEEPPI_WINDOWS_CERTIFICATE_BASE64: >-
@@ -135,14 +154,9 @@ jobs:
             ${{ secrets.DEEPPI_WINDOWS_CERTIFICATE_PASSWORD }}
         run: |
           if ([string]::IsNullOrWhiteSpace(
-            $env:DEEPPI_WINDOWS_CERTIFICATE_BASE64
-          )) {
-            throw 'Tagged releases require DEEPPI_WINDOWS_CERTIFICATE_BASE64.'
-          }
-          if ([string]::IsNullOrWhiteSpace(
             $env:DEEPPI_WINDOWS_CERTIFICATE_PASSWORD
           )) {
-            throw 'Tagged releases require DEEPPI_WINDOWS_CERTIFICATE_PASSWORD.'
+            throw 'Authenticode certificate is configured without a password secret.'
           }
           $certificate = Join-Path $env:RUNNER_TEMP 'deeppi-signing.pfx'
           [IO.File]::WriteAllBytes(
@@ -151,15 +165,6 @@ jobs:
               $env:DEEPPI_WINDOWS_CERTIFICATE_BASE64
             )
           )
-
-      - name: Sign tagged release files
-        if: startsWith(github.ref, 'refs/tags/')
-        shell: pwsh
-        env:
-          DEEPPI_WINDOWS_CERTIFICATE_PASSWORD: >-
-            ${{ secrets.DEEPPI_WINDOWS_CERTIFICATE_PASSWORD }}
-        run: |
-          $certificate = Join-Path $env:RUNNER_TEMP 'deeppi-signing.pfx'
           $files = Get-ChildItem 'src-tauri/target/release' -Recurse -File |
             Where-Object { $_.Extension -in '.exe', '.msi' }
           if ($files.Count -eq 0) { throw 'No Windows binaries were produced.' }
@@ -175,7 +180,7 @@ jobs:
             }
           }
 
-      - name: Re-sign updater payloads after Authenticode
+      - name: Sign updater payloads
         if: startsWith(github.ref, 'refs/tags/')
         shell: pwsh
         env:
@@ -207,7 +212,9 @@ jobs:
           --require-updater
 
       - name: Verify Authenticode signatures
-        if: startsWith(github.ref, 'refs/tags/')
+        if: >-
+          startsWith(github.ref, 'refs/tags/') &&
+          steps.certificate.outputs.available == 'true'
         shell: pwsh
         run: |
           $files = Get-ChildItem 'src-tauri/target/release' -Recurse -File |
