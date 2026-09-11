@@ -1014,3 +1014,20 @@ U1a -> U1b；随后 U2 和 U3 可独立推进；U4 依赖文件与进程安全�
   - 新建 Pi RPC 任务 → 「等待输入」；用本地桩服务验证这一版**流式修复已生效**（慢速回复 59 次增量、终态 64 字符）。
   - `Stop-Process -Force` 强杀后 7 秒复查：`pi-coding-agent`、`dsh` 及任何指向 `com.deeppi.desktop` 的 node 进程数均为 **0**——无孤儿。
 - 清理：夹具项目/会话、桩服务与托管 Pi profile 配置（`models.json`、`defaultProvider/Model`）均已还原，不留验收痕迹。
+
+## 65. 发布流水线（tagged release）本地 dry-run：现在可确信 tag 会成功
+
+2026-09-12（本地时间，一次性测试密钥；**密钥与产物已全部删除，不进入仓库**）：
+
+用户配置 Secrets 后我会打 `v1.0.0` tag，而 tagged 路径与普通构建不同（需要签名、生成 updater 清单）。为避免「打 tag 后 CI 才失败」，本轮用一次性密钥把 tagged 路径整条跑通：
+
+1. `pnpm tauri signer generate -w <tmp> -p <pwd> --ci` → 生成 minisign 密钥对（`.key` / `.key.pub`）。
+2. `GITHUB_REPOSITORY=springkai66/deep-pi DEEPPI_UPDATER_PUBLIC_KEY=<pub> pnpm updater:prepare` → 生成 `src-tauri/tauri.release.generated.conf.json`，内容为 `createUpdaterArtifacts: true`、注入公钥、endpoint 自动推导为
+   `https://github.com/springkai66/deep-pi/releases/download/stable/latest.json`、`windows.installMode: passive`。
+3. `TAURI_SIGNING_PRIVATE_KEY=<key> TAURI_SIGNING_PRIVATE_KEY_PASSWORD=<pwd> pnpm tauri build --bundles nsis --config src-tauri/tauri.release.generated.conf.json` → 成功产出安装包**与** `DeepPi_1.0.0_x64-setup.exe.sig`（Tauri 自己完成 updater 签名）。
+4. `GITHUB_REPOSITORY=... DEEPPI_RELEASE_NOTES=v1.0.0 pnpm updater:manifest` → 生成 `latest.json`：`version 1.0.0`、`windows-x86_64.signature` 为签名串、`url` 正确指向 `releases/download/stable/DeepPi_1.0.0_x64-setup.exe`。
+5. `node scripts/release-check.mjs --require-installer --require-updater` → **PASS**（与 CI 的 tagged 校验命令一致）。
+
+- 结论：tagged 路径上「生成配置 → 签名构建 → 签名校验 → 生成清单 → 清单校验」全部可跑通，`release.yml` 里除 Secrets 之外没有阻塞点。
+- 注意点（已在 RELEASING.md 记录）：`updater:manifest` 与 `updater:prepare` 都依赖 CI 自动提供的 `GITHUB_REPOSITORY`；本地复现需显式设置，否则报文会以「DEEPPI_UPDATER_ENDPOINT is required」失败——这是脚本的有意校验，不是缺陷。
+- 清理：dry-run 的私钥/公钥文件、`.sig`、`latest.json` 与生成的配置文件全部删除；随后**重新构建了未签名的正式 bundle**，`release-check --require-installer` 与 `installer:smoke` 均 PASS，仓库工作区干净。
