@@ -853,3 +853,15 @@ U1a -> U1b；随后 U2 和 U3 可独立推进；U4 依赖文件与进程安全�
   - `git-commit.ts` 的 `prepare()` 增加一次有界重试：若在途结果仍被刷新失效，重试一次对齐最新状态；连续失效则明确提示「暂存内容在审阅期间发生变化，请重新审阅暂存」，不再静默无反馈。
   - 回归测试：`project_watch` 新增 `ignores_own_transaction_files_and_git_locks`；前端新增两条 prepare 重试/提示用例（`git-commit.test.ts`）。
 - 验证：修复后预览稳定出现、提交与推送全链路通过；`cargo test` 234 通过、`--include-ignored` 239 通过；前端 212 通过；clippy/fmt 干净。
+
+## 53. 自动化原生验收：Pi 扩展市场安装与卸载（托管运行时）
+
+2026-09-11（本地时间，debug 构建，CDP 驱动 + 磁盘/配置核对）：
+
+- 入口：菜单「设置 → Pi 扩展」进入内嵌市场，官方目录返回 50 个包，已安装面板初始为「暂无已安装 Package」。
+- 安装：对 `pi-mcp-adapter` 点「安装」→ 应用内确认框「安装 Pi Package：安装 pi-mcp-adapter@2.33.0 并自动启用吗？」→ 确认后 12 秒完成：
+  - 市场提示「已安装并启用」，已安装面板显示 `npm:pi-mcp-adapter@2.33.0`（DeepPi 托管）；
+  - 托管 profile `%APPDATA%\com.deeppi.desktop\agents\pi\settings.json` 的 `packages` 写入 `"npm:pi-mcp-adapter@2.33.0"`。
+- 卸载：对同一卡片点「卸载」→ 应用内确认框「卸载 Pi Package：卸载 npm:pi-mcp-adapter@2.33.0 吗？」→ 确认后 8 秒完成：
+  - 市场回到「暂无已安装 Package」，`settings.json` 的 `packages` 恢复为空数组，`agents\pi\npm\node_modules\pi-mcp-adapter` 已删除（`package.json` 不再声明该依赖）。
+- 结论：安装/卸载全程走 DeepPi 托管 Pi CLI + 托管 Node/npm，未触碰本机全局 Pi 安装与配置；「更新 / 全部更新」仍待人工。
