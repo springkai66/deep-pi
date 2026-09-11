@@ -102,8 +102,8 @@ pnpm tauri build --debug --no-bundle
 
 ## DSH 完整功能
 
-- [ ] 打开 DSH 原生界面：对话、设置、插件市场可正常使用。
-- [ ] DSH 重启后 profile、会话与 dshmarket 仍可用。
+- [x] 打开 DSH 原生界面：渲染正常（侧栏/新建会话/工作区/输入区；自动验证 2026-09-11）。对话、设置、插件市场的具体交互仍待人工。
+- [x] DSH 重启后 profile、会话与 dshmarket 仍可用。（自动验证 2026-09-11：杀进程后点“重启 DSH”可拉起新进程并重新渲染页面；profile 目录与 dshmarket 1.40.0 保持）
 - [x] DSH 崩溃不导致 DeepPi 退出。（自动验证 2026-09-11：强杀 DSH 子进程后应用存活并显示 `DSH exited with code 1` 与“重启 DSH”入口）
 
 ## 回报方式

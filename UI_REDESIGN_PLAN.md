@@ -721,3 +721,13 @@ U1a -> U1b；随后 U2 和 U3 可独立推进；U4 依赖文件与进程安全�
 - DSH 崩溃隔离：打开 DSH 页面确认渲染正常，找到应用的直接子进程（`...\com.deeppi.desktop\runtimes\node\current\node.exe ...@deepseek-ai\dsh\lib\bin.js web --host 127.0.0.1 --port 0 --no-open`）并 `taskkill /F` 杀掉。应用**不退出**，界面切到错误态：`DSH exited with code 1` + “重启 DSH”按钮，符合“DSH 崩溃不导致 DeepPi 退出”的验收标准，并附带验证了重启入口可见。
 - 证据：`artifacts/accept-m/`（关闭弹窗）、`artifacts/accept-n/`（DSH 页面）、`artifacts/accept-p/`（崩溃后界面）。
 - 仍未验证：真实模型回复、应用内运行时升级 UI、高 DPI/多显示器、IME、DSH 聚焦快捷键。
+
+## 44. 自动化原生验收：DSH 崩溃后重启恢复
+
+2026-09-11（本地时间，debug 构建）：
+
+- 流程：打开 DSH → 确认渲染正常 → `taskkill /F` 杀掉应用的直接子进程（托管 `node.exe` 跑 `@deepseek-ai/dsh/lib/bin.js web`）→ 界面显示 `DSH exited with code 1` + “重启 DSH” → 点击该按钮 → 应用重新拉起 DSH 子进程。
+- 结果：点击后重新出现子进程（children_after=1），DSH 页面重新渲染（侧栏/新会话/工作区/输入区均正常），应用未退出。第一次尝试的点击坐标略偏未命中按钮，修正坐标后确认重启链路正常。
+- 持久化核对：DSH profile 目录（`%APPDATA%\com.deeppi.desktop\agents\dsh`）含 `profiles/`、`storages/`、`settings.yaml`，且 `profiles/web/node_modules/dshmarket` 版本为 **1.40.0**（应用自动启用固定版本 dshmarket）；重启后目录不变。
+- 证据：`artifacts/accept-q/`（崩溃页）、`artifacts/accept-r/`（重启后恢复）。
+- 仍未验证：DSH 页内“设置/插件市场”具体交互、真实模型回复、应用内运行时升级 UI、高 DPI/多显示器、IME、DSH 聚焦快捷键。
