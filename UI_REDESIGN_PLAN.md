@@ -731,3 +731,13 @@ U1a -> U1b；随后 U2 和 U3 可独立推进；U4 依赖文件与进程安全�
 - 持久化核对：DSH profile 目录（`%APPDATA%\com.deeppi.desktop\agents\dsh`）含 `profiles/`、`storages/`、`settings.yaml`，且 `profiles/web/node_modules/dshmarket` 版本为 **1.40.0**（应用自动启用固定版本 dshmarket）；重启后目录不变。
 - 证据：`artifacts/accept-q/`（崩溃页）、`artifacts/accept-r/`（重启后恢复）。
 - 仍未验证：DSH 页内“设置/插件市场”具体交互、真实模型回复、应用内运行时升级 UI、高 DPI/多显示器、IME、DSH 聚焦快捷键。
+
+## 45. 自动化原生验收：Pi 扩展市场（真实目录搜索与范围切换）
+
+2026-09-11（本地时间，debug 构建）：
+
+- 设置 → Pi 扩展页正常渲染：搜索框、官方目录计数、已安装面板、全局/项目范围切换。
+- 真实目录搜索：输入 `todo` 后从 `pi.dev` 返回 50 条结果，卡片包含包名、类型（extension / Pi Package）、描述、月下载量（如 `866.3K/月`、`400.5K/月`）与发布日期，并带“安装”按钮；结果包含 `pi-mcp-adapter`、`pi-web-access`、`pi-subagents`、`@companion-ai/feynman`、`@juicesharp/rpiv-ask-user-question`、`@juicesharp/rpiv-todo` 等真实 Pi 包。
+- 范围切换：点“项目”后按钮高亮切换，右侧面板标题由“已安装 · DeepPi 托管”变为“已安装 · 当前项目”（本次项目无项目级包，显示“暂无已安装 Package”符合预期）；切回“全局”正常。
+- 证据：`artifacts/accept-s/`（市场搜索）、`artifacts/accept-t/`（项目范围）。未执行安装/卸载写入操作，以免改变真实扩展配置；安装/更新/卸载仍待人工或后续授权验证。
+- 仍未验证：真实安装/卸载 Pi Package、DSH 页内“设置/插件市场”具体交互、真实模型回复、应用内运行时升级 UI、高 DPI/多显示器、IME、DSH 聚焦快捷键。
