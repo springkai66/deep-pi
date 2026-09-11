@@ -156,6 +156,7 @@ impl Drop for MockModel {
 }
 
 #[test]
+#[ignore = "requires the Pi SDK; exercised with --include-ignored"]
 fn real_pi_pages_a_large_native_session_without_replaying_prompts() {
     let cli = std::env::var_os("PI_RPC_TEST_CLI")
         .map(PathBuf::from)

@@ -576,3 +576,11 @@ U1a -> U1b；随后 U2 和 U3 可独立推进；U4 依赖文件与进程安全�
 - U2 自动化审计：命令白名单、事件映射、扩展 UI 交互、停止（`clear_queue` + `abort`）、Ctrl+L 聚焦对话输入、taskId+runId 订阅与过期过滤均有实现与测试；新增 [RPC_COMPATIBILITY.md](./RPC_COMPATIBILITY.md)，按托管 Pi 0.84.4 的官方 `docs/rpc.md` 锁定已验证的命令、事件、扩展 UI 方法与原生会话恢复方式，并列出接收但不映射的事件与未知扩展交互的兼容模式行为。
 - 原生交互验收（U1b–U6 共 6 个任务）仍待执行：当前环境没有可用的桌面自动化工具，浏览器访问仍被拒绝。计划在可自动化审计全部完成后产出一份 `NATIVE_ACCEPTANCE.md` 清单，由用户在本机逐项操作并回报结果。
 - 未修改业务代码，未新增依赖；`cargo fmt`/`clippy` 状态与第 29 节相同。
+
+## 31. CI 首次运行失败修复
+
+2026-09-10（本地时间）：
+
+- 推送 `567eaf8` 后 CI run `34498817897` 在 “Run Rust tests” 失败：3 项 content search 测试在 GitHub runner 上因没有 `rg.exe` 直接 unwrap 失败；`real_pi_pages_a_large_native_session_without_replaying_prompts` 因 runner 没有 Pi SDK 断言失败。
+- 修复：content search 测试在缺少 ripgrep 时验证“未找到 ripgrep”降级路径并跳过后续断言（CI 通过 `taiki-e/install-action` 安装 ripgrep，继续覆盖真实搜索）；SDK 依赖测试标记 `#[ignore]`，与同文件另一个真实 Pi 测试一致，由 `--include-ignored` 在装有 SDK 的环境执行。
+- 本地复验：`cargo test` 229 通过 / 0 失败 / 4 ignored；`cargo fmt --check` 与 `clippy -D warnings` 通过。远端 CI 结果待观察。

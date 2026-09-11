@@ -46,11 +46,18 @@ jobs:
       - name: Check Rust formatting
         run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 
+      - name: Install ripgrep for content search tests
+        uses: taiki-e/install-action@v2
+        with:
+          tool: ripgrep
+
       - name: Run Rust tests
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
       - name: Run Rust clippy
-        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+        run: >-
+          cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets
+          -- -D warnings
 
       - name: Audit Rust dependencies
         uses: taiki-e/install-action@v2
