@@ -483,6 +483,66 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn real_git_index_change_still_refreshes_but_own_transaction_files_do_not() {
+        // 回归守卫：过滤 objects/*.lock/事务临时物之后，真实 Git 操作仍须上报，
+        // 否则「外部修改仓库」将不再刷新界面。
+        use crate::git_test_support::TestRepo;
+        let fixture = TestRepo::new();
+        std::fs::write(
+            fixture.root.join("tracked.txt"),
+            "one
+",
+        )
+        .unwrap();
+        fixture.git(&["add", "--", "tracked.txt"]);
+        fixture.git(&["commit", "-m", "initial"]);
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let watch = ProjectWatch::start(&fixture.root, "p", "w", move |event| {
+            sender.send(event).is_ok()
+        })
+        .unwrap();
+
+        // 排空建库后可能残留的事件。
+        while receiver.try_recv().is_ok() {}
+
+        // 复刻 DeepPi 的事务写法（GIT_INDEX_FILE 指向 .git/deeppi-index-* 下的临时索引，
+        // 并用 write-tree 产出对象）：这些写入都属于「应用自己造成」的，
+        // 必须被过滤掉，否则一次提交准备会把自己的预览刷新失效。
+        let transaction = fixture.root.join(".git").join("deeppi-index-test");
+        std::fs::create_dir(&transaction).unwrap();
+        let temporary_index = transaction.join("index");
+        let mut command = fixture.command(&["write-tree"]);
+        command.env("GIT_INDEX_FILE", &temporary_index);
+        let output = command.output().unwrap();
+        assert!(output.status.success(), "write-tree failed: {output:?}");
+        assert!(
+            receiver.recv_timeout(Duration::from_secs(3)).is_err(),
+            "DeepPi's own object/temporary-index writes must not wake the watcher"
+        );
+
+        // 真实的状态变更（更新索引）：必须上报 Git 变更。
+        std::fs::write(
+            fixture.root.join("tracked.txt"),
+            "two
+",
+        )
+        .unwrap();
+        fixture.git(&["add", "--", "tracked.txt"]);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let event = receiver
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .unwrap();
+            if event.git {
+                break;
+            }
+        }
+        drop(watch);
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn periodic_reconciliation_refreshes_even_without_native_events() {
         let directory = tempfile::tempdir().unwrap();
         let (sender, receiver) = std::sync::mpsc::channel();
