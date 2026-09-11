@@ -49,3 +49,13 @@ pnpm tauri signer generate -w "$HOME\.deeppi-updater.key" -p "<强密码>" --ci
 ## 回滚
 
 `.github/workflows/rollback.yml` 用于回滚 `stable` 更新通道（详见 workflow 输入参数）。应用内回滚由运行时组件级回滚机制处理。
+
+## 申请代码签名证书（非发布门槛）
+
+v1.0 先发未签名安装包；拿到证书后按下面的方式接入，下次 tagged 发布会自动签名。
+
+1. **SignPath.io（开源项目免费）**：DeepPi 是 MIT 许可证的公开仓库，符合 SignPath Foundation 申请条件。流程：注册 → 提交开源申请（项目、仓库、许可证、用途）→ 审核通过后安装 SignPath GitHub App 并配置签名策略；审批通常数天到 2 周。
+2. **Azure Trusted Signing**：约 $9.99/月，需要 Azure 订阅与身份验证，审核 1–2 周，适合无法走开源通道的小团队。
+3. **商业 CA 的 OV/EV 证书**（DigiCert、Sectigo、SSL.com 等）：OV 约 $200–600/年，需要组织实体与电话回拨，签发 1–5 个工作日；EV 审核更严。个人身份通常只能走前两者。
+
+拿到证书后：使用 PFX 时按“启用 Authenticode”配置两个 Secrets 即可；使用 SignPath 时由 SignPath 的 GitHub Action 完成签名，可替换 workflow 中的 signtool 步骤。
