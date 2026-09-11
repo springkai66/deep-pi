@@ -601,3 +601,14 @@ U1a -> U1b；随后 U2 和 U3 可独立推进；U4 依赖文件与进程安全�
 - U5：`project_edit` 11 项测试覆盖版本冲突、并发替换、create-only 另存、只读文件、junction 父目录、二进制/超限与删除后不重建；`file-workspace` 25 项覆盖草稿与撤销隔离、退出锁、BOM 与混合换行保留、关闭确认、保存期间继续输入、刷新不覆盖草稿与未知结果保留。编辑器比较与消息渲染按需加载（`FileComparison`、`ChatMessage`、`message-markdown` 动态 import），未进入首屏包。中文输入法、真实文件往返与屏幕阅读器仍待原生验收。
 - U6：六类设置分类与键盘导航有实现与测试；快捷键展示与实现共享定义并有文档同步测试；DSH 菜单遮挡切换已实现（原生覆盖关系待验收）。DSH 子 Webview 内宿主快捷键转发仍未实现，`KEYBOARD_SHORTCUTS.md` 已如实标注；实现需受限原生路由（不向子 Webview 开放 IPC），成本与风险较高，列为待用户决定项。
 - 新增 [NATIVE_ACCEPTANCE.md](./NATIVE_ACCEPTANCE.md)：按 U1b–U6、运行时升级与 DSH 分组给出逐项操作与预期，并明确回报方式；完成原生验收前不将 U1b–U6 视为最终验收完成。
+
+## 34. 发布工程收口与本地构建
+
+2026-09-10/11（本地时间）：
+
+- 版本统一为 1.0.0：`package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` 与 `Cargo.lock` 一致。
+- 按“未签名发布 + 签名并行申请”策略改造 `release.yml`：Authenticode 改为检测 `DEEPPI_WINDOWS_CERTIFICATE_BASE64` 后自动启用，未配置时打印未签名提示并继续；updater minisign 三个 secrets 仍为 tagged 发布必需。新增 [RELEASING.md](./RELEASING.md)（secrets 清单、密钥生成命令、发布与回滚步骤）与 [RELEASE_NOTES.md](./RELEASE_NOTES.md)；README 增加下载安装、SmartScreen 说明、已知限制与文档索引。
+- 本地构建：release 构建成功，产出 `DeepPi_1.0.0_x64-setup.exe`；`installer-smoke` 完成安装与卸载 PASS；`release-check --require-installer` 通过；`updater:prepare` 使用占位公钥 dry-run 通过（生成文件已删除）。
+- MSI 未能在本机构建：Tauri 需从 GitHub 下载 WiX 3.14，而本机无法直连 GitHub；choco 安装因 `C:\ProgramData\chocolatey\lib` 锁文件无权限修复而失败。MSI 由 GitHub runner 在 Release workflow 构建（历史 run 已验证 NSIS+MSI 构建）。
+- CI：修复后 `808e944` 与 `1b673fb` 均为 success（含 cargo audit、licenses、release check、web build）。后续 tag 发布需用户先配置 updater secrets。
+- 待用户：配置 GitHub Secrets；按 `NATIVE_ACCEPTANCE.md` 完成原生验收；决定 DSH 子 Webview 宿主快捷键转发是否纳入 v1.0。
