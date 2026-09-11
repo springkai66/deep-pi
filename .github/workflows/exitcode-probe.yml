@@ -32,7 +32,8 @@ jobs:
             $dotSource = $LASTEXITCODE
             pwsh -NoProfile -File $path *> $null
             $fileForm = $LASTEXITCODE
-            Write-Host ("MEASURED {0} dot-source={1} file={2}" -f $name, $dotSource, $fileForm)
+            $line = "MEASURED {0} dot-source={1} file={2}"
+            Write-Host ($line -f $name, $dotSource, $fileForm)
           }
 
       - name: Probe a failing gh download like the workflow does
