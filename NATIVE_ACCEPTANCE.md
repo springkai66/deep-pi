@@ -98,7 +98,9 @@ pnpm tauri build --debug --no-bundle
 ## 运行时与更新（M6）
 
 - [x] 运行时页面显示 DeepPi、Node.js、Pi、DSH、dshmarket 的版本与来源（全部应为“托管”/“配置文件”，不出现“本机”）。（自动验证 2026-09-11：「运行环境」列出 DeepPi 1.0.0 · managed、Node.js 24.13.0 · managed、Pi Coding Agent 0.84.4 · managed、DeepSeek Harness 0.1.1-rc.2 · managed、DSH Plugin Market 1.45.1 · profile；组件区同样标注「托管 / 配置文件」，全文不出现「本机」；DSH 行附固定版本说明。）
-- [ ] 在没有本机 Node/Pi/DSH 的机器上：Node 显示未安装，可从运行时页面安装（官方包 + SHA-256 校验），然后用它安装 Pi/DSH。
+- [x] 在没有本机 Node/Pi/DSH 的机器上：Node 显示未安装，可从运行时页面安装（官方包 + SHA-256 校验），然后用它安装 Pi/DSH。（自动验证 2026-09-11：把托管运行目录清空成真机新装状态（`runtimes
+ode` 只剩空目录）后启动应用——「运行环境」显示 Node.js / Pi / DSH 均为「未安装 · 不可用 · managed」，未回落本机；组件区 Node.js 出现「可更新 · 24.13.0 / 安装」。点「安装」→ 确认框「下载并激活 Node.js 24.13.0 吗？当前运行时会保留。」→ 约 36 秒完成：`versions.13.0-…` 由官方压缩包解出（含 `node.exe`、`npm`、`LICENSE`），`active.json` 指向新版本，`current` 解析到它且 `node.exe --version` 输出 `v24.13.0`；随后 Pi 0.84.4 与 DSH 0.1.1-rc.2 立即恢复为「可用」，新建 Pi 任务并进入「等待输入」正常，任务实际使用的 `node.exe` 正是 `runtimes
+odeersions\…` 下新装的那一个。**注**：Pi/DSH 只是依赖 Node 而此前已安装，所以无需重装；SHA-256 校验失败会拒绝激活（由 runtime 单元测试覆盖）。）
 - [x] 应用内升级 Pi 与 DSH：版本变化、任务可正常创建；升级期间活动任务的处理符合提示。（自动验证 2026-09-11：组件区检测到 Pi「可更新 · 0.85.1」，点「更新」弹确认框「下载并激活 Pi Coding Agent 0.85.1 吗？当前运行时会保留。」→ 确认后组件区变为「Pi Coding Agent 托管 · 0.85.1 最新」，「运行环境」同步为 0.85.1 · managed；磁盘上 `runtimes\piersions\` 新增版本目录、`active.json` 指向新版本、`current` 保留旧 0.84.4。在 0.85.1 上新建任务并完成一次流式对话（59 次增量、终态「等待输入」）正常。DSH 因上游认证变更被有意固定，不提供升级入口，只显示说明——符合设计。**升级期间活动任务**：Pi 有活动 Session 时会直接拒绝切换，实测提示「请先停止所有 Pi Session，再切换 Pi runtime」。）
 - [x] 升级失败可回滚到上一版本（可临时断网或使用测试包验证）。（自动验证 2026-09-11：在 Pi 0.85.1 上点「回滚」→ 确认框「回滚组件 / 恢复 Pi Coding Agent 的上一版本吗？」→ 确认后 `active.json` 由 `versions/0.85.1-...` 变回 `current`、`current` 目录解析为 0.84.4、0.85.1 保留为 `previous`（可再次升级/回滚）；「运行环境」显示 Pi 0.84.4 · managed；回滚后新建任务并完成一次对话正常。**注意**：若已升级一版，`previous` 记录的是「上一活跃版本」而非历史列表，仅能回退一级。）
 - [ ] 检查更新入口可用；跳过版本与稍后提醒生效。（**部分验证** 2026-09-11：「应用更新 → 检查应用更新」与「组件 → 检查组件更新」两个入口都在且可点击；组件更新已完整验证（见上两条）。「检查应用更新」在开发构建下返回 `Updater does not have any endpoints set.`（发布构建才会注入 updater endpoint），因此**跳过 / 稍后提醒**的界面行为无法在开发构建里走通——这两项连同真实自更新需在签名发布版本上验证。）
