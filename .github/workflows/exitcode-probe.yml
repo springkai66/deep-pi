@@ -59,3 +59,15 @@ jobs:
             Write-Host 'handled'
             exit 0
           }
+
+      - name: Control where gh succeeds then view a missing release
+        shell: pwsh
+        run: |
+          gh release list --repo $env:GITHUB_REPOSITORY *> $null
+          gh release view definitely-not-a-real-tag `
+            --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host 'would create the stable release here'
+            exit 0
+          }
+          Write-Host 'unexpected: a fake tag existed'
