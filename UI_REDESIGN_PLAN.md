@@ -712,3 +712,12 @@ U1a -> U1b；随后 U2 和 U3 可独立推进；U4 依赖文件与进程安全�
 - 澄清：任务侧栏只显示 Hotta 是**正确行为**，不是缺陷：数据库中 `deep-pi` 与 `project-b` 的 `removed_at` 非空（已在之前会话中从工作区移除），`list_projects` 按 `removed_at IS NULL` 过滤。
 - 一次误操作与修复：自动化脚本用 PowerShell `ConvertTo-Json` + `Set-Content -Encoding UTF8` 写入 `settings.json` 时引入了 BOM，应用正确报出 `settings.json is invalid: expected value at line 1 column 1` 错误页。已用 UTF-8 无 BOM 重写并校验（内容与原值一致、`colorMode=dark`），应用随后启动正常；同时确认 `settings-*.json` 备份机制正常。这也是一个正向证据：无效配置不会静默丢失，而是显示可重试的错误页。
 - 仍未验证：真实模型回复、应用内运行时升级 UI、关闭确认弹窗（当前 `closeBehavior=exit`）、高 DPI/多显示器、IME、DSH 聚焦快捷键。
+
+## 43. 自动化原生验收：关闭确认、DSH 崩溃隔离与恢复入口
+
+2026-09-11（本地时间，debug 构建；临时修改的设置已恢复）：
+
+- 关闭确认：临时将 `closeBehavior` 改为 `ask` 后启动，点窗口关闭按钮弹出居中模态“关闭 DeepPi”（最小化 / 退出应用两个选项，说明“这个选择会记住，也可以在设置中修改”）；按 Escape 取消后应用继续运行，弹窗关闭。随后已恢复 `closeBehavior=exit`（当前设置下直接退出是符合配置的行为）。
+- DSH 崩溃隔离：打开 DSH 页面确认渲染正常，找到应用的直接子进程（`...\com.deeppi.desktop\runtimes\node\current\node.exe ...@deepseek-ai\dsh\lib\bin.js web --host 127.0.0.1 --port 0 --no-open`）并 `taskkill /F` 杀掉。应用**不退出**，界面切到错误态：`DSH exited with code 1` + “重启 DSH”按钮，符合“DSH 崩溃不导致 DeepPi 退出”的验收标准，并附带验证了重启入口可见。
+- 证据：`artifacts/accept-m/`（关闭弹窗）、`artifacts/accept-n/`（DSH 页面）、`artifacts/accept-p/`（崩溃后界面）。
+- 仍未验证：真实模型回复、应用内运行时升级 UI、高 DPI/多显示器、IME、DSH 聚焦快捷键。
