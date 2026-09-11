@@ -1000,3 +1000,17 @@ U1a -> U1b；随后 U2 和 U3 可独立推进；U4 依赖文件与进程安全�
 - 常规尺寸：窗口 1280×800 时逐个打开五个菜单，弹层同样全部落在视口内（right 最大 520、bottom 最大 341），说明定位逻辑不会把菜单推出边界。
 - 主题：`颜色模式`（`<select>`）切换 `light` → `color-scheme: light` + 背景 `rgb(247,248,250)`；`dark` → `color-scheme: dark` + 背景 `rgb(17,20,18)`；`system` → 跟随当前系统（浅色）。截图 `artifacts/accept-x/01-narrow-light.png`。
 - 未覆盖（需人工/物理环境）：多显示器不同 DPI 缩放下菜单与对话框的物理位置；运行中切换 Windows 系统主题的即时跟随。
+
+## 64. 发布构建重建与终验（含本轮 5 个修复）
+
+2026-09-12（本地时间，`main@1756958` 的 `--bundles nsis,msi` 发布构建）：
+
+- 重建原因：上一轮安装包（02:20 构建）早于本轮提交，缺少 5 个代码修复（RPC 流式增量、提交预览失效、空目录提示、错误串本地化、task.rs 文案）。删除旧 bundle 后重新构建。
+- 产物：`DeepPi_1.0.0_x64-setup.exe`(5.96 MB)、`DeepPi_1.0.0_x64_en-US.msi`(9.42 MB)，FileVersion/ProductVersion 均为 1.0.0。
+- `release-check --require-installer` PASS；`installer:smoke`（安装/修复/卸载）PASS。
+- **发布构建（非 debug）CDP 实测**：
+  - `runtime_status` 五项全部正确（DeepPi 1.0.0 / Node 24.13.0 / Pi 0.84.4 / DSH 0.1.1-rc.2 为 `managed`，dshmarket 1.45.1 为 `profile`），**无 `system`/`development` 来源**——开发回落在发布构建中被编译掉。
+  - `start_dsh` 正常返回 `http://127.0.0.1:55078/`。
+  - 新建 Pi RPC 任务 → 「等待输入」；用本地桩服务验证这一版**流式修复已生效**（慢速回复 59 次增量、终态 64 字符）。
+  - `Stop-Process -Force` 强杀后 7 秒复查：`pi-coding-agent`、`dsh` 及任何指向 `com.deeppi.desktop` 的 node 进程数均为 **0**——无孤儿。
+- 清理：夹具项目/会话、桩服务与托管 Pi profile 配置（`models.json`、`defaultProvider/Model`）均已还原，不留验收痕迹。
