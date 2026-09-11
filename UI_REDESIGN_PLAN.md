@@ -1069,3 +1069,7 @@ if ($LASTEXITCODE -ne 0) {
 - 该步骤的「无上一版本」分支补上显式 `exit 0`，并加注释说明原因（防止后人又删掉）。
 - 顺带排查了 `release.yml` 其余 pwsh 步骤与 `rollback.yml`、`ci.yml`：`rollback.yml` 是 Ubuntu 上的 bash 且已 `set -euo pipefail`（语义正确）；`ci.yml` 的 gitleaks 步骤以原生命令结尾，其退出码正是指望传播的信号；其余失败分支要么 `throw`、要么以真实原生命令结尾。仅此一处需要修。
 - 同时把三处超过行宽限制的 PowerShell 行拆成多行。
+
+### 顺带加固：updater 配置模板的占位符守卫
+
+`prepare-updater-config.mjs` 原本只校验「输入是否存在」，然后做 `replaceAll`。若将来有人往 `tauri.release.conf.json` 里加了新占位符而忘了在脚本里替换，生成的配置会带着 `__...__` 字样被打进安装包，updater 会静默失效（构建与校验都不会报错）。已补一道守卫：渲染后若仍匹配 `__[A-Z0-9_]+__` 就直接失败并列出残留占位符。实测两条路径——正常渲染成功；人为注入 `__FUTURE_FLAG__` 后脚本以「still contains unresolved placeholders: __FUTURE_FLAG__」失败。

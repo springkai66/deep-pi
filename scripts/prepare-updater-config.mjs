@@ -42,10 +42,17 @@ if (url.protocol !== "https:" || url.username || url.password) {
 }
 
 const template = readFileSync(templatePath, "utf8");
-const config = parseConfig(
-  template
-    .replaceAll("__DEEPPI_UPDATER_PUBLIC_KEY__", publicKey)
-    .replaceAll("__DEEPPI_UPDATER_ENDPOINT__", endpoint),
-);
+const rendered = template
+  .replaceAll("__DEEPPI_UPDATER_PUBLIC_KEY__", publicKey)
+  .replaceAll("__DEEPPI_UPDATER_ENDPOINT__", endpoint);
+// 模板里若有新增占位符而这里忘了替换，出来的配置会带着 __...__ 字样直接打进安装包，
+// updater 会静默失效；因此不把「没找到就跳过」当作正常情况。
+const leftover = rendered.match(/__[A-Z0-9_]+__/g);
+if (leftover) {
+  throw new Error(
+    `tauri.release.conf.json still contains unresolved placeholders: ${leftover.join(", ")}`,
+  );
+}
+const config = parseConfig(rendered);
 writeFileSync(outputPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
 console.log(`wrote signed updater config: ${outputPath}`);
