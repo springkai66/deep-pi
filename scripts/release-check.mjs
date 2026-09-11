@@ -57,6 +57,25 @@ if (tauri) {
   }
 }
 
+// 版本号散在三个清单里；升版本时漏改其中一处，会让安装包与包元数据版本不一致
+// （updater 会拿 package.json 的版本去比对 latest.json），所以在发布检查里直接卡住。
+const cargoVersion = /^version\s*=\s*["']([^"']+)["']/m.exec(cargoToml)?.[1];
+const versionSources = {
+  "package.json": packageJson?.version,
+  "src-tauri/tauri.conf.json": tauri?.version,
+  "src-tauri/Cargo.toml": cargoVersion,
+};
+const declaredVersions = new Set(Object.values(versionSources).filter(Boolean));
+if (Object.values(versionSources).some((value) => !value)) {
+  errors.push(
+    `version is missing in: ${Object.entries(versionSources).filter(([, value]) => !value).map(([file]) => file).join(", ")}`,
+  );
+} else if (declaredVersions.size !== 1) {
+  errors.push(
+    `version mismatch across manifests: ${Object.entries(versionSources).map(([file, value]) => `${file}=${value}`).join(", ")}`,
+  );
+}
+
 for (const required of [
   "README.md",
   "SECURITY.md",
