@@ -644,3 +644,12 @@ U1a -> U1b；随后 U2 和 U3 可独立推进；U4 依赖文件与进程安全�
 - 关键发现：本机 Tauri CLI 只认 `TAURI_SIGNING_PRIVATE_KEY`（密钥内容），未识别 `TAURI_SIGNING_PRIVATE_KEY_PATH`；预演与 `release.yml` 均使用内容方式注入，一致。
 - 测试密钥文件与生成的 release config 已删除，仓库与 Secrets 未受影响。tagged 发布只差用户配置三个 updater secrets。
 - Release 说明改用仓库内 `RELEASE_NOTES.md`（`body_path`），不再自动生成提交列表，保证 Release 页面包含安装步骤、已知限制与反馈方式。
+
+## 38. DSH 子 Webview 宿主快捷键受限原生路由
+
+2026-09-11（本地时间）：
+
+- 实现：启动时安装隐藏的原生菜单（安装时不含任何加速键）。DSH 子 Webview 可见时为主机作用域命令 `Ctrl+Shift+P`（任务搜索）、`Ctrl+P`（文件搜索）、`Ctrl+,`（设置）启用加速键，隐藏或关闭时清除；`on_menu_event` 只接受白名单内 `deeppi-shortcut:` 前缀的菜单项，转发 `host-shortcut` 事件给主 Webview，复用 `hostCommandEnabled` / `runHostCommand`，不向 DSH 页面开放 Tauri IPC。
+- 依据（源码核对 Tauri 2.11.5）：Windows 消息循环对已注册的 app 菜单调用 `TranslateAcceleratorW`，与焦点在哪个子 Webview 无关；`hide_menu()` 只解除菜单栏绑定，不销毁加速键表，因此隐藏菜单的加速键仍然生效。加速键启用期间组合键会被系统消费，所以只在 DSH 可见时启用，避免影响主 Webview 与终端的按键。
+- 覆盖：Rust 单测覆盖 menu id → 命令映射与定义唯一性；前端单测覆盖 payload 白名单与 DSH 上下文下的启用状态；`pnpm check` 0 错误 0 警告。
+- 待原生验收（已加入 NATIVE_ACCEPTANCE.md）：DSH 聚焦时三个快捷键生效、其余快捷键不受影响、主窗口行为不变。未验收前不把该项计作已完成。

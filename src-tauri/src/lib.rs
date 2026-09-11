@@ -1,4 +1,4 @@
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 mod app_paths;
 mod bridge;
@@ -6,6 +6,7 @@ mod credentials;
 mod diagnostics;
 mod dsh;
 mod dsh_api;
+mod dsh_shortcuts;
 mod durable_file;
 mod external_editor;
 mod file_recovery;
@@ -99,6 +100,10 @@ pub fn run() {
             let handle = app.handle().clone();
             let roaming = app.path().app_data_dir()?;
             let local = app.path().app_local_data_dir()?;
+            // 隐藏的宿主快捷键菜单：仅在 DSH 子 Webview 可见时启用加速键。
+            if let Err(error) = dsh_shortcuts::install(app.handle()) {
+                log::warn!("event=dsh_shortcuts status=install_failed reason={error}");
+            }
             // Recovery and database migration must finish before publishing any store.
             // They never run on the native window event loop.
             drop(tauri::async_runtime::spawn(async move {
@@ -139,6 +144,13 @@ pub fn run() {
         })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .on_menu_event(|app, event| {
+            if let Some(command) = dsh_shortcuts::command_from_menu_id(event.id().as_ref()) {
+                if let Err(error) = app.emit_to("main", "host-shortcut", command) {
+                    log::warn!("event=dsh_shortcuts status=emit_failed reason={error}");
+                }
+            }
+        })
         .invoke_handler(|invoke| {
             if invoke.message.command() != "await_startup"
                 && !startup::is_ready(invoke.message.webview_ref().state())
@@ -148,6 +160,7 @@ pub fn run() {
             }
             let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
                 startup::await_startup,
+                dsh_shortcuts::set_dsh_shortcuts,
                 diagnostics::diagnostics_snapshot,
                 diagnostics::diagnostics_clear,
                 diagnostics::diagnostics_export,
