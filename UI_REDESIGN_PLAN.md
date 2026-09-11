@@ -585,6 +585,7 @@ U1a -> U1b；随后 U2 和 U3 可独立推进；U4 依赖文件与进程安全�
 - 修复：content search 测试在缺少 ripgrep 时验证“未找到 ripgrep”降级路径并跳过后续断言（CI 通过 `taiki-e/install-action` 安装 ripgrep，继续覆盖真实搜索）；SDK 依赖测试标记 `#[ignore]`，与同文件另一个真实 Pi 测试一致，由 `--include-ignored` 在装有 SDK 的环境执行。
 - 本地复验：`cargo test` 229 通过 / 0 失败 / 4 ignored；`cargo fmt --check` 与 `clippy -D warnings` 通过。远端 CI 结果待观察。
 - 第二次运行 `9e4ae05`：Rust 测试已通过（ripgrep 安装与 ignore 生效），但 `gitleaks/gitleaks-action@v2` 在下载阶段失败：上游 8.24.3 的 Windows 资产是 `.zip`，action 仍请求 `.tar.gz`，得到 HTTP 404。改为在 workflow 内固定下载 `gitleaks_8.24.3_windows_x64.zip` 并运行 `gitleaks git`，checkout 改为完整历史以便扫描仓库历史。
+- CI ripgrep 安装核实：`taiki-e/install-action` 并不支持 ripgrep（会提示 fallback），实际回退 `cargo-binstall`，从 GitHub 下载 ripgrep 15.2.0 并加入 PATH；CI 中的内容搜索测试确实运行了真实 `rg`。
 
 ## 32. U3/U4 自动化审计
 
@@ -642,3 +643,4 @@ U1a -> U1b；随后 U2 和 U3 可独立推进；U4 依赖文件与进程安全�
 - 用本地一次性 minisign 测试密钥预演 tagged 发布产物链：`updater:prepare` 生成含测试公钥的 release config → `tauri build --bundles nsis --config src-tauri/tauri.release.generated.conf.json` 产出 `DeepPi_1.0.0_x64-setup.exe` 与 `.exe.sig` → `updater:manifest` 生成 `latest.json`（version 1.0.0、HTTPS 更新 URL、signature）→ `node scripts/release-check.mjs --require-installer --require-updater` **PASS**。
 - 关键发现：本机 Tauri CLI 只认 `TAURI_SIGNING_PRIVATE_KEY`（密钥内容），未识别 `TAURI_SIGNING_PRIVATE_KEY_PATH`；预演与 `release.yml` 均使用内容方式注入，一致。
 - 测试密钥文件与生成的 release config 已删除，仓库与 Secrets 未受影响。tagged 发布只差用户配置三个 updater secrets。
+- Release 说明改用仓库内 `RELEASE_NOTES.md`（`body_path`），不再自动生成提交列表，保证 Release 页面包含安装步骤、已知限制与反馈方式。
