@@ -68,6 +68,7 @@ pnpm tauri build --no-bundle
 
 - 安装包未做 Authenticode 代码签名；开源签名通道申请中。
 - 不读取本机安装的 Pi/DSH/Node/npm；只使用 DeepPi 自带的托管运行时与配置目录（Node 由应用从官方发行包安装并校对 SHA-256）。
+- DSH 固定为已验证的 `0.1.1-rc.2`：上游 0.1.5-rc.1 改变了本地认证方式，适配前不提供升级（界面会说明原因）。
 - DSH 子 Webview 获得焦点时宿主快捷键不生效（见 [KEYBOARD_SHORTCUTS.md](./KEYBOARD_SHORTCUTS.md)）。
 - DeepPi 应用自身的自动更新管道已配置（updater 签名与 `stable` 通道），但 v1.0.0 是首个版本，跨版本自更新与回滚的真实验证将在下一个版本发布时进行。
 - 8 小时长稳、超大规模仓库与部分原生交互验收尚未完成（见 [NATIVE_ACCEPTANCE.md](./NATIVE_ACCEPTANCE.md)）。
