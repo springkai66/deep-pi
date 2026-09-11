@@ -148,3 +148,17 @@ pnpm perf:soak
 ## 发布限制
 
 正式发布还需要代码签名证书、Tauri updater signing secrets、可访问的 HTTPS 更新源、WebView2 依赖策略以及目标 Windows 设备上的输入法、终端扩展、安装升级和长稳验证。
+
+### 本地构建 MSI 时无法下载 WiX
+
+Tauri 打包 MSI 需要 WiX 3.14。首次构建会从 `github.com/wixtoolset` 下载；网络受限时会卡在下载阶段。可手动准备：
+
+```powershell
+curl.exe -sL -o "$env:TEMP\wix.nupkg" https://api.nuget.org/v3-flatcontainer/wix/3.14.1/wix.3.14.1.nupkg
+expand-archive "$env:TEMP\wix.nupkg" "$env:TEMP\wix"
+New-Item -ItemType Directory -Force "$env:LOCALAPPDATA\tauri\WixTools314" | Out-Null
+Copy-Item "$env:TEMP\wix\tools\*" "$env:LOCALAPPDATA\tauri\WixTools314" -Recurse -Force
+pnpm tauri build --bundles msi
+```
+
+GitHub runner 直连正常，CI 与 Release workflow 无需该步骤。

@@ -786,7 +786,7 @@ mod tests {
         let token = repo.budget.token.clone();
         let marker = remote.join("push-started");
         let cancellation = std::thread::spawn(move || {
-            let deadline = std::time::Instant::now() + Duration::from_secs(15);
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
             while !marker.exists() && std::time::Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(20));
             }
@@ -801,7 +801,7 @@ mod tests {
             "Server hook must be reached before cancellation"
         );
         assert_eq!(result.outcome, PushOutcome::Unknown);
-        assert!(started.elapsed() < Duration::from_secs(15));
+        assert!(started.elapsed() < Duration::from_secs(20));
         assert!(remote_oid(&fixture, &remote, "refs/heads/main").is_none());
         assert!(!remote.join("refs/heads/main.lock").exists());
     }

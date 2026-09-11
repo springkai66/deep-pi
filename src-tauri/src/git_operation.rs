@@ -70,11 +70,9 @@ impl GitBudget {
     }
 
     pub(crate) fn run(&self, command: &mut Command) -> Result<ProcessOutput, String> {
-        crate::process_runner::run_cancellable(
-            command,
-            self.remaining()?.min(Duration::from_secs(10)),
-            Some(&self.token),
-        )
+        // 单条命令的运行时间由整体等待预算限制；不再叠加更短的命令级上限，
+        // 否则慢盘或安全软件拦截进程创建时会把正常的 git 调用误判为超时。
+        crate::process_runner::run_cancellable(command, self.remaining()?, Some(&self.token))
     }
 
     pub(crate) fn lock<'a, T>(&self, mutex: &'a Mutex<T>) -> Result<MutexGuard<'a, T>, String> {

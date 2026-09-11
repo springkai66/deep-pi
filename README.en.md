@@ -1,8 +1,16 @@
 # DeepPi
 
-A Windows desktop host for Pi Coding Agent and DeepSeek Harness.
+A Windows desktop host that brings Pi Coding Agent and DeepSeek Harness (DSH) into one application: parallel Pi terminal and RPC sessions, the native DSH Web UI, a Pi package marketplace, provider and credential management, project files with Git review, and in-app runtime upgrades for Pi and DSH.
 
-## Requirements
+## Download and install
+
+Download the latest `DeepPi_<version>_x64-setup.exe` (NSIS) from [GitHub Releases](https://github.com/springkai66/deep-pi/releases).
+
+- Requires Windows 10/11 x64; WebView2 is installed by the setup bootstrapper.
+- The v1.0.0 installer is not Authenticode-signed yet. Windows SmartScreen may warn on first launch: choose "More info" → "Run anyway", after verifying the download source.
+- Uninstall from "Settings → Apps" or the uninstaller in the install directory.
+
+## Requirements (development)
 
 - Windows 10/11
 - Node.js 22+
@@ -54,13 +62,25 @@ This is not a fully self-contained portable build; WebView2 and the Pi/DSH runti
 
 ## Release
 
-Push a `v*` tag to run `.github/workflows/release.yml`. Production releases require Tauri updater signing secrets and Authenticode certificate secrets.
+Push a `v*` tag to run `.github/workflows/release.yml`, which builds, signs (optional) and publishes the Windows artifacts and syncs the `stable` updater channel. Tagged releases require the Tauri updater signing secrets; Authenticode certificate secrets are optional and enable signing automatically. See [RELEASING.md](./RELEASING.md).
+
+## Known limitations (v1.0)
+
+- The installer is not Authenticode-signed yet; an open-source signing application is in progress.
+- Local Pi/DSH configuration and task lists are not read; DeepPi only uses its managed runtimes and configuration directory.
+- Host shortcuts do not work while the DSH child Webview has focus (see [KEYBOARD_SHORTCUTS.md](./KEYBOARD_SHORTCUTS.md)).
+- The 8-hour soak, very large repositories and parts of the native interaction acceptance are still open (see [NATIVE_ACCEPTANCE.md](./NATIVE_ACCEPTANCE.md)).
 
 ## Documentation
 
+- [Keyboard shortcuts](./KEYBOARD_SHORTCUTS.md)
+- [Pi RPC compatibility baseline](./RPC_COMPATIBILITY.md)
+- [Native acceptance checklist](./NATIVE_ACCEPTANCE.md)
+- [Release process](./RELEASING.md)
 - [中文 README](./README.md)
 - [Security](./SECURITY.md)
 - [Troubleshooting](./TROUBLESHOOTING.md)
+- [UI redesign plan and records](./UI_REDESIGN_PLAN.md)
 
 ## License
 
