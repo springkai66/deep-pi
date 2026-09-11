@@ -34,6 +34,10 @@ pnpm tauri signer generate -w "$HOME\.deeppi-updater.key" -p "<强密码>" --ci
 `DEEPPI_WINDOWS_CERTIFICATE_PASSWORD`。下次 tagged 发布将自动执行 signtool
 签名与验签；未配置时 workflow 会打印未签名提示并继续发布。
 
+### tagged 路径已本地 dry-run 验证
+
+用一次性密钥把 tagged 路径整条跑通过（签名配置生成 → 签名构建 → updater 清单 → 清单校验，全部 PASS），因此配置完 Secrets 后打 tag 不应再出现流程性失败。注意 `scripts/prepare-updater-config.mjs` 与 `scripts/prepare-updater-manifest.mjs` 都依赖 `GITHUB_REPOSITORY`（CI 自动注入）来推导 `stable` 更新源；本地手动复现时需显式设置该环境变量，否则会以「DEEPPI_UPDATER_ENDPOINT is required」失败。
+
 ## 发布步骤
 
 1. 更新版本号（三处保持一致）：`package.json`、`src-tauri/tauri.conf.json`、
