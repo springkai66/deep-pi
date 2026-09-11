@@ -37,19 +37,42 @@ pub struct WatchEvent {
     status: WatchStatus,
 }
 
+/// `.git` 下不属于仓库可见状态的条目：
+///
+/// - `deeppi-index-<uuid>` / `deeppi-<uuid>.config`：DeepPi 自己的索引与配置事务临时物；
+/// - `*.lock`：Git 进行中的临时锁，真正的改动会在 index/refs 落盘时上报；
+/// - `objects`：内容寻址的对象库，准备提交自己就会写入对象，而面板展示的是
+///   索引、引用与工作区；外部提交/拉取仍会通过 index/refs/FETCH_HEAD 上报。
+///
+/// 不过滤这些条目时，一次暂存或提交准备会反过来触发刷新，使正在进行的提交预览失效。
+fn transient_git_entry(name: &str) -> bool {
+    name.starts_with("deeppi-") || name.ends_with(".lock") || name.eq_ignore_ascii_case("objects")
+}
+
 fn path_flags(root: &Path, path: &Path) -> u8 {
     let Ok(relative) = path.strip_prefix(root) else {
         return 0;
     };
     let mut flags = FILES | GIT;
+    let mut in_git = false;
     let mut components = relative.components().peekable();
     while let Some(component) = components.next() {
         match component {
             Component::Normal(name) => {
                 let name = name.to_string_lossy();
-                if name.eq_ignore_ascii_case(".git")
-                    || components.peek().is_some() && excluded_directory(&name)
-                {
+                if in_git && transient_git_entry(&name) {
+                    return 0;
+                }
+                if name.eq_ignore_ascii_case(".git") {
+                    // `.git` 目录自身的 mtime 不携带信息：真实改动总是以子路径事件
+                    // （index/refs/HEAD）上报，而 DeepPi 自己的对象与临时索引写入
+                    // 只该被忽略；否则一次提交准备会把自己的预览刷新掉。
+                    if components.peek().is_none() {
+                        return 0;
+                    }
+                    in_git = true;
+                    flags = GIT;
+                } else if components.peek().is_some() && excluded_directory(&name) {
                     flags = GIT;
                 }
             }
@@ -294,6 +317,8 @@ mod tests {
             FILES | GIT
         );
         assert_eq!(path_flags(root, &root.join(".git").join("index")), GIT);
+        // 裸的 `.git` 只是目录 mtime，真实改动会带子路径。
+        assert_eq!(path_flags(root, &root.join(".git")), 0);
         assert_eq!(
             path_flags(
                 root,
@@ -304,6 +329,64 @@ mod tests {
         assert_eq!(path_flags(root, Path::new(r"C:\other\secret")), 0);
         assert_eq!(path_flags(root, root), FILES | GIT);
         assert_eq!(path_flags(root, &root.join("target")), FILES | GIT);
+    }
+
+    #[test]
+    fn ignores_own_transaction_files_and_git_locks() {
+        let root = Path::new(r"C:\project");
+        // 事务临时物：暂存与提交准备会创建它们，不应反过来让预览失效。
+        assert_eq!(
+            path_flags(
+                root,
+                &root.join(".git").join("deeppi-index-8f14").join("index")
+            ),
+            0
+        );
+        assert_eq!(
+            path_flags(root, &root.join(".git").join("deeppi-8f14.config")),
+            0
+        );
+        // 锁文件是进行中的临时状态，真正的改动由 index/refs 上报。
+        assert_eq!(path_flags(root, &root.join(".git").join("index.lock")), 0);
+        // 对象库是内容寻址存储，面板不展示其中内容。
+        assert_eq!(
+            path_flags(
+                root,
+                &root
+                    .join(".git")
+                    .join("objects")
+                    .join("76")
+                    .join("27799c75485ff4bfc5b78fdecbd9d1c3f2c0f3")
+            ),
+            0
+        );
+        assert_eq!(path_flags(root, &root.join(".git").join("objects")), 0);
+        assert_eq!(
+            path_flags(
+                root,
+                &root
+                    .join(".git")
+                    .join("refs")
+                    .join("heads")
+                    .join("main.lock")
+            ),
+            0
+        );
+        // 真实的状态变更仍然上报。
+        assert_eq!(path_flags(root, &root.join(".git").join("index")), GIT);
+        assert_eq!(
+            path_flags(
+                root,
+                &root.join(".git").join("refs").join("heads").join("main")
+            ),
+            GIT
+        );
+        // 项目里同名的普通文件不受影响。
+        assert_eq!(
+            path_flags(root, &root.join("deeppi-index-8f14.txt")),
+            FILES | GIT
+        );
+        assert_eq!(path_flags(root, &root.join("notes.lock")), FILES | GIT);
     }
 
     #[cfg(windows)]

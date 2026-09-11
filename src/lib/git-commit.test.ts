@@ -78,6 +78,43 @@ describe("commit workflow", () => {
     expect(test.applied).not.toHaveBeenCalled();
   });
 
+  it("retries once when a refresh invalidates a preparation that is still in flight", async () => {
+    let resolveFirst!: (value: CommitPreview) => void;
+    const prepare = vi.fn()
+      .mockImplementationOnce(() => new Promise<CommitPreview>((done) => { resolveFirst = done; }))
+      .mockImplementationOnce(async () => preview);
+    const test = setup(prepare);
+    test.controller.setMessage("message");
+    const first = test.controller.prepare();
+    await Promise.resolve();
+    // 焦点/监听刷新会让在途预览失效；控制器应重试一次而不是静默丢弃。
+    test.controller.invalidate();
+    resolveFirst(preview);
+    await first;
+    expect(prepare).toHaveBeenCalledTimes(2);
+    expect(test.state().preview).toEqual(preview);
+    expect(test.state().error).toBe("");
+  });
+
+  it("surfaces a message when refreshes keep invalidating the preparation", async () => {
+    const pending: Array<(value: CommitPreview) => void> = [];
+    const prepare = vi.fn(() => new Promise<CommitPreview>((done) => { pending.push(done); }));
+    const test = setup(prepare);
+    test.controller.setMessage("message");
+    const first = test.controller.prepare();
+    await Promise.resolve();
+    test.controller.invalidate();
+    pending[0](preview);
+    await Promise.resolve();
+    await Promise.resolve();
+    test.controller.invalidate();
+    pending[1](preview);
+    await first;
+    expect(prepare).toHaveBeenCalledTimes(2);
+    expect(test.state().preview).toBeNull();
+    expect(test.state().error).toContain("暂存内容在审阅期间发生变化");
+  });
+
   it("requires a fresh preview after invalidation and ignores disposed results", async () => {
     const test = setup();
     test.controller.setMessage("message");

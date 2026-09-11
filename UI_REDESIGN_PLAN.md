@@ -829,3 +829,27 @@ U1a -> U1b；随后 U2 和 U3 可独立推进；U4 依赖文件与进程安全�
   - 创建 Pi RPC 任务成功，Pi 进程同样运行在托管 Node 上。
   - **强杀应用进程后的清理**：分别对「DSH 运行中」「Pi RPC 运行中」「Pi TUI（PTY）运行中」三种状态执行 `Stop-Process -Force`，6 秒后托管 Node 子进程数均为 **0**——DSH（Job Object）与 Pi（PTY/RPC 既有托管）都不会成为孤儿。
 - 清理：验收用的临时项目、任务（`Release Probe`、`PTY Release Probe`）与临时目录、空会话目录均已删除；未触碰用户真实数据。
+
+## 52. 自动化原生验收：Git 暂存/提交/推送全链路，以及一个真实缺陷的修复
+
+2026-09-11（本地时间，debug 构建，CDP 驱动；仓库为本机临时裸仓库夹具 `deeppi-u4-fixture`，不触及用户仓库）：
+
+- 夹具：`remote.git`（裸仓库）+ `repo`（`main` 跟踪 `origin/main`），初始 1 个提交；`a.txt` 已修改、`c.txt` 未跟踪。
+- 状态读取：侧栏显示分支 `main`、上游 `origin/main`、「领先 0 · 落后 0」、「已暂存 1」「未跟踪 1」，与 `git status --porcelain=v2` 一致；首次读取会弹出**原生信任对话框**（`with_repository` 的 `blocking_show`），确认后按应用退出生效。
+- 显式暂存/取消暂存：点「暂存 a.txt」→ 磁盘 `M  a.txt`、侧栏「已暂存 1」；点「取消暂存 c.txt」→ 磁盘回到 `?? c.txt`、侧栏「未跟踪 1」。
+- 提交预览：点「审阅暂存」→ 显示「1 个暂存路径」、目标引用 `main`、作者行、`未启用签名`、路径 `a.txt`，「提交」按钮由禁用变为可用。
+- 提交：点「提交」→ 磁盘出现 `772f63d acceptance: commit staged file`，侧栏「已提交 772f63d9d63f」「领先 1」。
+- 推送：点「加载远程」→ 列出目的地（需显式选择目的地后才出现「推送」按钮，避免默认目标）→ 选择 `origin` 后点「推送」→ 面板显示「远程已接受所选提交。772f63d9d63f refs/heads/main」；裸仓库侧核对 `git rev-parse main` = `772f63d9d63ff83821dfddc9515c0ebf26fb2600`。
+- 核对与同步：点「核对远程结果」显示目标指向本次推送提交；点「同步跟踪引用」后本地 `main...origin/main` 不再显示领先/落后（`origin/main` 亦为 `772f63d`）。
+- 证据截图：`artifacts/accept-w/01-git-commit-push.png`。
+- **非快进安全路径**：用第三方克隆向裸仓库 `main` 推送一个分叉提交（远端 `37dbc6c`，其父为本地 `772f63d`），再在应用内提交本地分叉提交（`54b235a`）后推送：界面提示「远程拒绝推送，请检查非快进、分支保护或服务器策略；未强推」，裸仓库 `main` 仍为被拒前的 `37dbc6c`，未被覆盖，也没有默认强推。
+
+### 修复的缺陷（提交预览被自己的刷新丢弃）
+
+- 现象：点「审阅暂存」后 busy 结束，但预览被静默丢弃、「提交」保持禁用；后端 `project_git_prepare_commit` 实际成功返回。
+- 根因：提交准备会写 Git 仓库（`git write-tree` 写对象、事务临时索引 `deeppi-index-<uuid>`、`index.lock`、`.git` 目录 mtime），项目监听把这些**自己造成的写入**上报为 Git 变更 → 页面 `gitWatchRefreshToken++` → `GitCommitPanel` 的 `$effect` 调 `controller.invalidate()` → 在途预览因 `generation` 变化被丢弃。
+- 修复：
+  - `project_watch::path_flags` 忽略 `.git` 下不承载面板状态的内容：`deeppi-*` 事务临时物、`*.lock`、`objects/`，以及裸 `.git` 目录本身（真实改动总是带 `index`/`refs`/`HEAD` 子路径）。
+  - `git-commit.ts` 的 `prepare()` 增加一次有界重试：若在途结果仍被刷新失效，重试一次对齐最新状态；连续失效则明确提示「暂存内容在审阅期间发生变化，请重新审阅暂存」，不再静默无反馈。
+  - 回归测试：`project_watch` 新增 `ignores_own_transaction_files_and_git_locks`；前端新增两条 prepare 重试/提示用例（`git-commit.test.ts`）。
+- 验证：修复后预览稳定出现、提交与推送全链路通过；`cargo test` 234 通过、`--include-ignored` 239 通过；前端 212 通过；clippy/fmt 干净。

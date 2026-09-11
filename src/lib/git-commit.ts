@@ -54,14 +54,24 @@ export function createCommitController(
     async prepare() {
       if (disposed || active || !state.projectId) return;
       const projectId = state.projectId;
-      const expectedGeneration = ++generation;
       active = true;
       emit({ busy: true, phase: "preparing", preview: null, error: "", result: null });
       try {
-        const preview = await ports.prepare(projectId, crypto.randomUUID());
-        if (!disposed && generation === expectedGeneration) emit({ preview });
+        // 准备提交会现场写入 Git 对象，文件监听因此可能在准备期间上报一次变更，
+        // 使在途结果失效（第二次写出的对象已存在，不会再触发）。后端已校验 HEAD、
+        // 索引与引用，提交时还有一次期望值比对，所以这里重试一次对齐最新状态。
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const expectedGeneration = ++generation;
+          const preview = await ports.prepare(projectId, crypto.randomUUID());
+          if (disposed || state.projectId !== projectId) return;
+          if (generation === expectedGeneration) {
+            emit({ preview });
+            return;
+          }
+        }
+        emit({ error: "暂存内容在审阅期间发生变化，请重新审阅暂存" });
       } catch (error) {
-        if (!disposed && generation === expectedGeneration) emit({ error: String(error) });
+        if (!disposed && state.projectId === projectId) emit({ error: String(error) });
       } finally {
         active = false;
         emit({ busy: false, phase: "idle" });
