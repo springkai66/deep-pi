@@ -670,3 +670,19 @@ U1a -> U1b；随后 U2 和 U3 可独立推进；U4 依赖文件与进程安全�
 - 升级回滚实测：`runtime::tests::installs_verifies_and_rolls_back_live_pi_in_isolation`（`--include-ignored`）在当前提交通过（200 秒），在隔离 profile 中完成官方 Pi 运行时的下载、安装、验证与回滚。结合 installer-smoke（安装/修复/卸载）、启动冒烟与无界面 DSH 冒烟，task-9 可自动化的条款已全部取证；应用内 GUI 交互（建 Pi 任务、嵌入 DSH、应用内升级）按 NATIVE_ACCEPTANCE.md 由用户执行。
 - 说明：最终本地产物（`DeepPi_1.0.0_x64-setup.exe` / `DeepPi_1.0.0_x64_en-US.msi`）已用第 38 节回退后的 `main` 重新构建，并复跑 `installer-smoke`（安装/修复/卸载 PASS）与 `release-check --require-installer`（PASS）。
 - 结论：工程侧 v1.0 就绪。剩余仅两项依赖用户：配置 updater minisign secrets 后由我打 `v1.0.0` tag 发布；按 `NATIVE_ACCEPTANCE.md` 完成原生验收（含 DSH 快捷键三项检查）并回报结果。
+
+## 40. 自动化原生验收：主窗口、设置、快捷键、文件索引、DSH 嵌入与任务创建
+
+2026-09-11（本地时间，debug 构建 = `main@2c0fd74`）：
+
+- 方法：空闲检测（`GetLastInputInfo`）→ 启动应用 → `PrintWindow` 截图 → 鼠标点击导航/菜单 → `keybd_event` 注入快捷键 → 再次截图 → 对比截图与应用日志；证据在 `artifacts/accept-a/`（gitignored）。
+- 结果：
+  - 顶部“文件 / 设置 / 帮助”均以自绘 HTML 菜单展开，无原生菜单条（截图 02-04）。
+  - 设置页六类齐全（通用/外观/模型与凭据/运行时与更新/Pi 扩展/高级与诊断）；外观页的颜色模式与字体项正常渲染（05、06）。
+  - `Ctrl+Shift+P` 聚焦并选中任务搜索（07）；`Ctrl+P` 切到“文件”页签并聚焦文件搜索（08）；`Ctrl+,` 打开设置（09）。
+  - 文件页签对一个真实大项目（Hotta，索引 13382 个文件）正常渲染并显示计数，加载中状态可见（10）。
+  - DSH 子 Webview 在窗口内成功渲染 DSH 起始页（侧栏/新建会话/输入区，见上一轮 `artifacts/ui-check/02-dsh-view.png`）。
+  - 点“+ 新建任务”创建 RPC 任务成功：出现任务页签、对话输入区与“等待输入”状态；模型显示 `unknown`，因为托管 Pi 尚未配置 provider（本机预期状态，11、12）。
+  - 全程结束后无残留 `deeppi` / 托管 `node` 进程。
+- 清理：自动化创建的任务 `Pi Task 3` 已从应用数据库删除，其空的会话目录也已移除，未留下测试数据。
+- 仍需用户：真实模型回复（需先在托管 Pi 配置 provider）、应用内运行时升级 UI、主题/DPI/IME、DSH 聚焦快捷键（已知限制）。
