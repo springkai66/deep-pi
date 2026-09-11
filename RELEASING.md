@@ -52,7 +52,7 @@ pnpm tauri signer generate -w "$HOME\.deeppi-updater.key" -p "<强密码>" --ci
 
 ## 申请代码签名证书（非发布门槛）
 
-v1.0 先发未签名安装包；拿到证书后按下面的方式接入，下次 tagged 发布会自动签名。
+v1.0 先发未签名安装包；拿到证书后按下面的方式接入，下次 tagged 发布会自动签名。可直接复制的申请表单在 [SIGNING_APPLICATION.md](./SIGNING_APPLICATION.md)。
 
 1. **SignPath.io（开源项目免费）**：DeepPi 是 MIT 许可证的公开仓库，符合 SignPath Foundation 申请条件。流程：注册 → 提交开源申请（项目、仓库、许可证、用途）→ 审核通过后安装 SignPath GitHub App 并配置签名策略；审批通常数天到 2 周。
 2. **Azure Trusted Signing**：约 $9.99/月，需要 Azure 订阅与身份验证，审核 1–2 周，适合无法走开源通道的小团队。
