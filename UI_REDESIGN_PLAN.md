@@ -1031,3 +1031,41 @@ U1a -> U1b；随后 U2 和 U3 可独立推进；U4 依赖文件与进程安全�
 - 结论：tagged 路径上「生成配置 → 签名构建 → 签名校验 → 生成清单 → 清单校验」全部可跑通，`release.yml` 里除 Secrets 之外没有阻塞点。
 - 注意点（已在 RELEASING.md 记录）：`updater:manifest` 与 `updater:prepare` 都依赖 CI 自动提供的 `GITHUB_REPOSITORY`；本地复现需显式设置，否则报文会以「DEEPPI_UPDATER_ENDPOINT is required」失败——这是脚本的有意校验，不是缺陷。
 - 清理：dry-run 的私钥/公钥文件、`.sig`、`latest.json` 与生成的配置文件全部删除；随后**重新构建了未签名的正式 bundle**，`release-check --require-installer` 与 `installer:smoke` 均 PASS，仓库工作区干净。
+
+## 66. 发布流水线的首次发布阻塞缺陷（已修）——在 GitHub Actions 上实测确认
+
+2026-09-12（本地 + 真实 Actions 探针）：
+
+### 缺陷
+
+`release.yml` 的「Download previous stable installer」步骤内容为：
+
+```powershell
+gh release download stable --repo ... --pattern '*-setup.exe' --dir $previous
+if ($LASTEXITCODE -ne 0) {
+  Write-Host 'No previous stable installer; skipping upgrade smoke.'
+}
+```
+
+看起来是「失败就算了」，但 **GitHub Actions 的 pwsh 包装器会在步骤末尾执行 `exit $LASTEXITCODE`**，而 `Write-Host` 不会重置 `$LASTEXITCODE`。因此当该步骤是最后一个原生命令时，步骤以退出码 1 结束 → 步骤失败 → job 失败。
+
+首次发布（v1.0.0）正好会命中：仓库里还没有 `stable` release，`gh release download stable` 必然失败。也就是说，**若未修，用户配置好 Secrets 后我打 tag，`Windows Release` 会在这个步骤直接失败**。
+
+### 证据（真实 Actions 探针，非本地推断）
+
+临时 workflow（验证后已删除）测了四种写法，并**去掉 `continue-on-error`** 以观察真实结论：
+
+| 步骤写法 | 步骤结论 |
+| --- | --- |
+| `cmd /c exit 3` 结尾（未处理） | failure |
+| `cmd /c exit 3` + `if` 里只 `Write-Host` | **failure** ← 就是 release.yml 原来的写法 |
+| 同上，但 `if` 里追加 `exit 0` | success |
+| `gh release download <不存在的 tag>` + `if` 里只 `Write-Host` | **failure**（日志末尾 `##[error]Process completed with exit code 1.`，而同一日志里我的提示语已经打印出来了） |
+
+另外测到 `$LASTEXITCODE` 在 `Write-Host` 之后仍为 1、`exit $LASTEXITCODE` 于脚本末尾（dot-source、`&`、`-File` 三种调用形式）都会把失败传播出去；`pwsh -File` 对未处理失败在部分情况返回 64 而非 1。结论一致：**依赖 `$LASTEXITCODE` 判断的分支，成功路径必须显式 `exit 0`**。
+
+### 修复
+
+- 该步骤的「无上一版本」分支补上显式 `exit 0`，并加注释说明原因（防止后人又删掉）。
+- 顺带排查了 `release.yml` 其余 pwsh 步骤与 `rollback.yml`、`ci.yml`：`rollback.yml` 是 Ubuntu 上的 bash 且已 `set -euo pipefail`（语义正确）；`ci.yml` 的 gitleaks 步骤以原生命令结尾，其退出码正是指望传播的信号；其余失败分支要么 `throw`、要么以真实原生命令结尾。仅此一处需要修。
+- 同时把三处超过行宽限制的 PowerShell 行拆成多行。
