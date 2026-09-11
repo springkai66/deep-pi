@@ -1,0 +1,49 @@
+name: Exit code probe (temporary)
+
+# 临时探针：确认 pwsh 步骤在「原生命令失败但被 if 处理」时的退出码行为。
+# 结论用于判断 release.yml 的首次发布路径是否会失败。验证后删除本文件。
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: windows-latest
+    steps:
+      - name: A handled native failure without reset
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          cmd /c exit 1
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host 'A: handled with if, no reset'
+          }
+
+      - name: B handled native failure then explicit exit 0
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          cmd /c exit 1
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host 'B: handled with if, then exit 0'
+            exit 0
+          }
+
+      - name: C native failure as last statement
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          Write-Host 'C: about to fail as the last statement'
+          cmd /c exit 1
+
+      - name: D handled failure then a later successful native command
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          cmd /c exit 1
+          if ($LASTEXITCODE -ne 0) { Write-Host 'D: handled' }
+          cmd /c exit 0
+
+      - name: Report
+        shell: pwsh
+        run: |
+          Write-Host 'probe finished; inspect per-step conclusions'
