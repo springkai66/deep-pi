@@ -991,3 +991,12 @@ U1a -> U1b；随后 U2 和 U3 可独立推进；U4 依赖文件与进程安全�
   - 新建 Pi 任务 → 状态「等待输入」；进程列表显示该任务使用的 `node.exe` 正是 `runtimes\node\versions\…` 下新装的那一个，验证了「用托管 Node 跑 Pi」的完整链路。
 - 顺带确认：这一路径下 `previous` 为 `null`（首次安装无可回退版本），与「当前运行时会保留」的提示一致。
 - 失败注入说明：此前故意移走 `active.json` 指向的目录时，安装会以「runtime pointer target is missing」明确失败而非静默损坏——属预期防护，不是缺陷。
+
+## 63. 自动化原生验收：窄窗口、菜单定位与主题切换
+
+2026-09-11（本地时间，debug 构建，CDP 驱动 + 窗口缩放）：
+
+- 窄窗口：用 `SetWindowPos` 把主窗口设为 820×700（实际视口 804×661）——`documentElement.scrollWidth` 未超过视口宽度，**无横向溢出**；五个顶部菜单（文件/编辑/视图/设置/帮助）弹层全部在视口内（最大 right=520、bottom=277）。
+- 常规尺寸：窗口 1280×800 时逐个打开五个菜单，弹层同样全部落在视口内（right 最大 520、bottom 最大 341），说明定位逻辑不会把菜单推出边界。
+- 主题：`颜色模式`（`<select>`）切换 `light` → `color-scheme: light` + 背景 `rgb(247,248,250)`；`dark` → `color-scheme: dark` + 背景 `rgb(17,20,18)`；`system` → 跟随当前系统（浅色）。截图 `artifacts/accept-x/01-narrow-light.png`。
+- 未覆盖（需人工/物理环境）：多显示器不同 DPI 缩放下菜单与对话框的物理位置；运行中切换 Windows 系统主题的即时跟随。
