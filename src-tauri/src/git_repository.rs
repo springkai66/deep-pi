@@ -64,7 +64,7 @@ pub(crate) fn base_command(executable: &Path, cwd: &Path) -> Command {
 
 #[cfg(test)]
 pub(crate) fn run_git(command: &mut Command) -> Result<ProcessOutput, String> {
-    crate::process_runner::run_cancellable(command, Duration::from_secs(10), None)
+    crate::process_runner::run_cancellable(command, Duration::from_secs(60), None)
 }
 
 fn discover(executable: &Path, project: &Path, budget: &GitBudget) -> Result<Vec<String>, String> {

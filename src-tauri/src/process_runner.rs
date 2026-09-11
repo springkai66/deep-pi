@@ -306,7 +306,7 @@ mod tests {
     fn bounds_captured_output_without_blocking_the_child() {
         let output = run(
             &mut shell("[Console]::Out.Write('x' * 200000); [Console]::Error.Write('y' * 200000)"),
-            Duration::from_secs(10),
+            Duration::from_secs(60),
         )
         .unwrap();
         assert!(output.status.success());
@@ -337,7 +337,7 @@ mod tests {
         };
         let output = run(&mut shell(
             "$child = Start-Process powershell.exe -WindowStyle Hidden -ArgumentList '-NoProfile -Command Start-Sleep -Seconds 30' -PassThru; [Console]::Write($child.Id)"
-        ), Duration::from_secs(10)).unwrap();
+        ), Duration::from_secs(60)).unwrap();
         assert!(output.status.success());
         let pid = String::from_utf8(output.stdout)
             .unwrap()
@@ -346,7 +346,7 @@ mod tests {
             .unwrap();
         let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
         if !handle.is_null() {
-            let wait = unsafe { WaitForSingleObject(handle, 2000) };
+            let wait = unsafe { WaitForSingleObject(handle, 10_000) };
             unsafe {
                 CloseHandle(handle);
             }

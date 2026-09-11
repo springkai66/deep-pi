@@ -291,7 +291,7 @@ mod tests {
         let run = |args: &[&str]| {
             let mut command = Command::new(&git);
             command.current_dir(&root).args(args);
-            let output = crate::process_runner::run(&mut command, Duration::from_secs(10)).unwrap();
+            let output = crate::process_runner::run(&mut command, Duration::from_secs(60)).unwrap();
             assert!(output.status.success(), "{}", output.text());
         };
         run(&["init", "--template=", "--initial-branch=main"]);

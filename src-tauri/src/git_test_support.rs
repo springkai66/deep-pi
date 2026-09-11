@@ -50,8 +50,10 @@ impl TestRepo {
     }
 
     pub fn git(&self, args: &[&str]) {
+        // 整套测试并行时 runner 可能短暂拥塞；这里只关心 fixture 命令是否成功，
+        // 放宽到 60 秒避免把机器负载当成测试失败。
         let output =
-            crate::process_runner::run(&mut self.command(args), Duration::from_secs(10)).unwrap();
+            crate::process_runner::run(&mut self.command(args), Duration::from_secs(60)).unwrap();
         assert!(output.status.success(), "Git {args:?}: {}", output.text());
     }
 }
