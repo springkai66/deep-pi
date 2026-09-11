@@ -566,3 +566,13 @@ U1a -> U1b；随后 U2 和 U3 可独立推进；U4 依赖文件与进程安全�
 - `cargo fmt` 全量格式化（此前 CI 的 `fmt --check` 未通过）；修复 `task.rs` 中 `HashMap` 仅测试使用导致的 clippy unused-import。
 - 验证：`cargo test` 默认并行 230 通过 / 0 失败 / 3 ignored；`cargo test -- --include-ignored` 233 通过 / 0 失败（含联网模型目录、隔离运行时下载与真实 Pi 会话）；`clippy -D warnings` 与 `fmt --check` 通过；`pnpm check` 0 错误 0 警告；前端 210 项通过。
 - 本轮未访问被拒绝的浏览器页面、未接管桌面；原生交互、主题/DPI 与 8 小时长稳仍未验收。U1b–U6 的界面与原生验收在后续章节继续推进。
+
+## 30. 基线提交与 U1b/U2 自动化审计
+
+2026-09-10（本地时间），目标 v1.0 确认后的第一批收口：
+
+- 基线提交：`4e9975e` 后端切片、`83adefb` 前端、`567eaf8` 文档与仓库卫生。工作区干净，`main` 与 `origin/main` 一致。GitHub HTTPS 直连被阻断，改用已认证 SSH 推送成功，本地 remote 已改为 `git@github.com:springkai66/deep-pi.git`；推送触发 CI run `34498817897`（截至本节写入仍在进行）。
+- U1b 自动化审计：`cargo test --lib project_files::` 14 项通过；前端 `files` / `file-workspace` / `file-comparison` / `project-watch` 共 38 项通过。六条验收标准逐项有代码与测试证据：Ctrl+P 聚焦文件搜索不打开浮层；“任务/文件”切换与常驻搜索；根目录按项目 ID 从 TaskStore 解析，`validate_relative` 拒绝绝对路径/穿越/保留设备名；有界遍历与 `.git`、`node_modules`、构建目录排除；模糊过滤保留父目录且不修改展开集合；预览 2 MiB 上限、NUL/非 UTF-8 拒绝、读取前后元数据与身份校验、过期结果忽略；junction/reparse point 与根替换拒绝。
+- U2 自动化审计：命令白名单、事件映射、扩展 UI 交互、停止（`clear_queue` + `abort`）、Ctrl+L 聚焦对话输入、taskId+runId 订阅与过期过滤均有实现与测试；新增 [RPC_COMPATIBILITY.md](./RPC_COMPATIBILITY.md)，按托管 Pi 0.84.4 的官方 `docs/rpc.md` 锁定已验证的命令、事件、扩展 UI 方法与原生会话恢复方式，并列出接收但不映射的事件与未知扩展交互的兼容模式行为。
+- 原生交互验收（U1b–U6 共 6 个任务）仍待执行：当前环境没有可用的桌面自动化工具，浏览器访问仍被拒绝。计划在可自动化审计全部完成后产出一份 `NATIVE_ACCEPTANCE.md` 清单，由用户在本机逐项操作并回报结果。
+- 未修改业务代码，未新增依赖；`cargo fmt`/`clippy` 状态与第 29 节相同。
