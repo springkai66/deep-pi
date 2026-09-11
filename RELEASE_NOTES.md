@@ -22,7 +22,7 @@ DeepPi 的第一个稳定版本：在同一个 Windows 桌面应用中使用 Pi 
 
 - 安装包未做 Authenticode 代码签名（开源签名通道申请中）。
 - 不读取本机已安装 Pi/DSH 的配置与任务列表，只使用 DeepPi 托管运行时。
-- DSH 子 Webview 聚焦时仅路由 Ctrl+P / Ctrl+Shift+P / Ctrl+,（受限原生加速键，不向 DSH 页面开放 IPC）；其余快捷键需要主窗口焦点，原生验收待完成。
+- DSH 子 Webview 获得焦点时宿主快捷键不生效。
 - v1.0.0 是首个版本，DeepPi 应用自更新的跨版本升级与回滚验证将在下个版本发布时进行。
 - 8 小时长稳与部分原生交互验收尚未完成，详见仓库内 `NATIVE_ACCEPTANCE.md`。
 

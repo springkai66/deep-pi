@@ -34,7 +34,6 @@
   import type { GitDiffArea } from "$lib/git-status";
   import ChatPane from "$lib/ChatPane.svelte";
   import { hostCommandEnabled, hostShortcutDecision, shortcutLabel, shortcutAria, type HostCommand, type HostShortcutContext } from "$lib/shortcuts";
-  import { dshShortcutCommand } from "$lib/dsh-shortcuts";
   import { createTaskModeSwitcher, type InteractionMode } from "$lib/task-mode";
   import AppDialog from "$lib/AppDialog.svelte";
   import { checkAppUpdate, installAppUpdate, type AppUpdateState, type Update } from "$lib/app-update";
@@ -216,13 +215,6 @@
       if (child) {
         if (visible) await child.show();
         else await child.hide();
-      }
-      if (!isTauri()) return;
-      try {
-        // DSH 持有键盘焦点时宿主快捷键走受限原生路由；Webview 关闭或隐藏后立即清除。
-        await invoke("set_dsh_shortcuts", { enabled: visible && !!child });
-      } catch (error) {
-        console.error("DSH shortcuts:", error);
       }
     }).catch((error) => { console.error("DSH visibility:", error); });
   });
@@ -603,10 +595,6 @@
         dialogs.cancelScope(`rpc:${task.id}:${task.runId}`);
       }
     });
-    const hostShortcutListener = listen<string>("host-shortcut", ({ payload }) => {
-      const command = dshShortcutCommand(payload);
-      if (command) runHostCommand(command);
-    });
     const observer = new ResizeObserver(() => void syncDshBounds());
     observer.observe(workspace);
 
@@ -623,7 +611,6 @@
       void dshStatusListener.then((unlisten) => unlisten());
       void statusListener.then((unlisten) => unlisten());
       void rpcExitListener.then((unlisten) => unlisten());
-      void hostShortcutListener.then((unlisten) => unlisten());
       dialogs.dispose();
       void dshWebview?.close();
     };

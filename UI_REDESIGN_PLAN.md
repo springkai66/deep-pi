@@ -645,14 +645,18 @@ U1a -> U1b；随后 U2 和 U3 可独立推进；U4 依赖文件与进程安全�
 - 测试密钥文件与生成的 release config 已删除，仓库与 Secrets 未受影响。tagged 发布只差用户配置三个 updater secrets。
 - Release 说明改用仓库内 `RELEASE_NOTES.md`（`body_path`），不再自动生成提交列表，保证 Release 页面包含安装步骤、已知限制与反馈方式。
 
-## 38. DSH 子 Webview 宿主快捷键受限原生路由
+## 38. DSH 子 Webview 宿主快捷键：原生加速键路线实测不成立
 
 2026-09-11（本地时间）：
 
-- 实现：启动时安装隐藏的原生菜单（安装时不含任何加速键）。DSH 子 Webview 可见时为主机作用域命令 `Ctrl+Shift+P`（任务搜索）、`Ctrl+P`（文件搜索）、`Ctrl+,`（设置）启用加速键，隐藏或关闭时清除；`on_menu_event` 只接受白名单内 `deeppi-shortcut:` 前缀的菜单项，转发 `host-shortcut` 事件给主 Webview，复用 `hostCommandEnabled` / `runHostCommand`，不向 DSH 页面开放 Tauri IPC。
-- 依据（源码核对 Tauri 2.11.5）：Windows 消息循环对已注册的 app 菜单调用 `TranslateAcceleratorW`，与焦点在哪个子 Webview 无关；`hide_menu()` 只解除菜单栏绑定，不销毁加速键表，因此隐藏菜单的加速键仍然生效。加速键启用期间组合键会被系统消费，所以只在 DSH 可见时启用，避免影响主 Webview 与终端的按键。
-- 覆盖：Rust 单测覆盖 menu id → 命令映射与定义唯一性；前端单测覆盖 payload 白名单与 DSH 上下文下的启用状态；`pnpm check` 0 错误 0 警告。
-- 待原生验收（已加入 NATIVE_ACCEPTANCE.md）：DSH 聚焦时三个快捷键生效、其余快捷键不受影响、主窗口行为不变。未验收前不把该项计作已完成。
+- 曾实现「隐藏原生菜单 + 加速键 + Tauri `on_menu_event` 转发」（提交 `c69f438`）：DSH 可见时为主机作用域命令 `Ctrl+Shift+P` / `Ctrl+P` / `Ctrl+,` 注册加速键，经白名单转发 `host-shortcut` 事件给主 Webview，不向 DSH 页面开放 IPC；Rust/前端单测、CI 与发布预演均通过。
+- 自动化原生按键验收发现该路线在本架构下不成立（Win32 `keybd_event` 注入 + `PrintWindow` 截图 + 应用日志核对）：
+  - DSH 子 Webview 聚焦时按 `Ctrl+P`，出现的是 WebView2 自带的打印对话框，宿主菜单事件未触发；
+  - `Ctrl+,`（非 WebView2 内置快捷键）同样没有触发菜单事件；日志只有 `event=dsh_shortcuts status=enabled`，没有任何 `dsh_shortcut_menu status=received`。
+  - 结论：焦点在 WebView2 子窗口时，按键由 WebView2 自行处理或不会进入宿主的 `GetMessage` / `msg_hook` 链路，`TranslateAcceleratorW` 无法命中；Tauri 菜单加速键只适用于焦点在宿主窗口自身的情况。
+- 处理：撤销该实现（删除 `dsh_shortcuts` 模块、`lib.rs` 菜单与事件转发、前端 `host-shortcut` 监听与 `set_dsh_shortcuts` 调用及相关单测），文档恢复为「DSH 子 Webview 聚焦时宿主快捷键不生效」的已知限制。
+- 正确方案（待实现，v1.0.x）：使用 WebView2 的 `AcceleratorKeyPressed` 事件（`ICoreWebView2Controller`，经 `Webview::with_webview` 获取），在 DSH 子 Webview 创建时注册处理器，命中白名单组合键时置 `Handled` 并向主 Webview 发送同一套 host 命令；需要把 `webview2-com` 提为直接依赖并处理 COM 回调生命周期。
+- 保留可复用的自动化验收方法：空闲检测（`GetLastInputInfo`）→ 启动 debug 应用 → `PrintWindow` 截图 → 点击左侧导航 → `keybd_event` 注入组合键 → 再次截图 → 查日志；证据在 `artifacts/ui-check*`（gitignored）。
 
 ## 39. 最终预发布验证（工程侧就绪）
 

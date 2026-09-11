@@ -68,7 +68,7 @@ Push a `v*` tag to run `.github/workflows/release.yml`, which builds, signs (opt
 
 - The installer is not Authenticode-signed yet; an open-source signing application is in progress.
 - Local Pi/DSH configuration and task lists are not read; DeepPi only uses its managed runtimes and configuration directory.
-- While the DSH child Webview has focus only Ctrl+P / Ctrl+Shift+P / Ctrl+, are routed through a restricted native accelerator path (no IPC is granted to the DSH page); all other shortcuts require main window focus and still need native verification.
+- Host shortcuts do not work while the DSH child Webview has focus (see [KEYBOARD_SHORTCUTS.md](./KEYBOARD_SHORTCUTS.md)).
 - The DeepPi self-update pipeline is configured (updater signature and `stable` channel), but v1.0.0 is the first release; real cross-version self-update and rollback will be validated when the next version ships.
 - The 8-hour soak, very large repositories and parts of the native interaction acceptance are still open (see [NATIVE_ACCEPTANCE.md](./NATIVE_ACCEPTANCE.md)).
 

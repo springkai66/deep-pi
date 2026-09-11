@@ -1,12 +1,12 @@
 # DeepPi 快捷键
 
-菜单、工具提示、可访问性标注、宿主按键处理及文件差异按键均从 `src/lib/shortcuts.ts` 读取定义。主 Webview 聚焦时所有快捷键走 DOM 按键处理；DSH 原生子 Webview 聚焦时，下表标注的三个 host 作用域命令改走受限原生加速键路由（不向 DSH 页面开放 IPC，隐藏菜单仅在 DSH 可见时启用加速键）；其余快捷键需要主窗口焦点。
+菜单、工具提示、可访问性标注、宿主按键处理及文件差异按键均从 `src/lib/shortcuts.ts` 读取定义。此清单描述主 Webview 中已接入的行为；DSH 原生子 Webview 内的宿主快捷键转发仍待实现和验收（Tauri 菜单加速键在 WebView2 子窗口聚焦时不会触发，需改用 WebView2 `AcceleratorKeyPressed`，见 `UI_REDESIGN_PLAN.md` 第 38 节）。
 
 | 快捷键 | 操作 | 生效范围 |
 | --- | --- | --- |
-| Ctrl+Shift+P | 聚焦并选中任务搜索 | 主窗口；DSH 聚焦时经原生加速键路由（切回 Pi 工作区） |
-| Ctrl+P | 切换到文件名模式并聚焦文件搜索 | 主窗口；DSH 聚焦时经原生加速键路由（切回 Pi 工作区） |
-| Ctrl+, | 打开应用设置 | 主窗口；DSH 聚焦时经原生加速键路由 |
+| Ctrl+Shift+P | 聚焦并选中任务搜索 | 主窗口；受保护的设置操作结束后可切换 |
+| Ctrl+P | 切换到文件名模式并聚焦文件搜索 | 主窗口；常驻搜索框，不打开浮层 |
+| Ctrl+, | 打开应用设置 | 主窗口 |
 | Ctrl+B | 显示或隐藏项目侧栏 | Pi 工作区 |
 | Ctrl+L | 聚焦对话输入 | Pi 工作区的 RPC 任务 |
 | Ctrl+S | 保存当前文件 | 已加载文件的 Pi 编辑区 |
@@ -25,4 +25,4 @@
 
 ## 验证边界
 
-共享路由、作用域、重复按键、输入法标记及真实 CodeMirror 差异状态有自动化测试；DSH 原生路由的 menu id 映射与 payload 白名单也有单元测试。自动化逻辑测试不替代 Windows IME、真实焦点、屏幕阅读器或 DSH 子 Webview 的原生验收：需要在 DSH 聚焦时实按 Ctrl+P / Ctrl+Shift+P / Ctrl+, 确认生效，并确认 Ctrl+B / Ctrl+L / Ctrl+S / F7 不受影响。
+共享路由、作用域、重复按键、输入法标记及真实 CodeMirror 差异状态有自动化测试。自动化逻辑测试不替代 Windows IME、真实焦点、屏幕阅读器或 DSH 子 Webview 的原生验收。
