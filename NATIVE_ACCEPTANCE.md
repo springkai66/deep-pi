@@ -90,10 +90,10 @@ pnpm tauri build --debug --no-bundle
 - [x] 六类设置均可打开：通用、外观、模型与凭据、运行时与更新、Pi 扩展、高级与诊断（自动验证 2026-09-11：逐页截图均正常）；离开设置页有未保存提示仍待人工。
 - [x] Pi 扩展市场：官方目录真实搜索返回结果（包名/类型/描述/月下载量/日期）与全局/项目范围切换正常（自动验证 2026-09-11）。
 - [x] Pi Package 安装/卸载（自动验证 2026-09-11：在应用内安装 `npm:pi-mcp-adapter@2.33.0`，12 秒后界面「已安装并启用」、已安装面板列出该包、托管 profile 的 `settings.json` 写入 `packages: ["npm:pi-mcp-adapter@2.33.0"]`；点击「卸载」并确认后 8 秒回到「暂无已安装 Package」，`settings.json` 的 `packages` 恢复为空、`npm/node_modules/pi-mcp-adapter` 已删除。全程使用 DeepPi 托管 Pi/Node/npm，未读取本机 Pi 配置）；「更新 / 全部更新」仍待人工。
-- [ ] `Ctrl+,` 打开设置，`Ctrl+B` 切换侧栏，`Ctrl+Shift+P` 聚焦任务搜索；对话框/菜单打开时不抢按键。
+- [x] `Ctrl+,` 打开设置，`Ctrl+B` 切换侧栏，`Ctrl+Shift+P` 聚焦任务搜索；对话框/菜单打开时不抢按键。（自动验证 2026-09-11：`Ctrl+,` 打开设置且事件被 `preventDefault`；`Ctrl+B` 在工作区把 `.app-shell` 在 `app-shell` ↔ `app-shell sidebar-hidden` 之间切换；`Ctrl+P`/`Ctrl+Shift+P` 分别聚焦文件/任务搜索。**不抢按键**：菜单打开时三个组合键都**不**被 `preventDefault` 且菜单保持打开；应用内对话框（安装确认）打开时同样都不被消费、对话框与设置页保持原状。）
 - [ ] 深浅色跟随系统与手动切换均正常（自动验证：`colorMode=light` 启动为浅色、`dark` 为深色）；窄窗口（约 800px）无横向溢出（已自动验证 820×700）；多显示器不同缩放下菜单与对话框位置正确仍待人工。
-- [ ] 打开顶部菜单时 DSH 子 Webview 被遮挡后再恢复，菜单不被 Webview 覆盖。
-- [ ] 已知限制（v1.0）：DSH 子 Webview 获得焦点时宿主快捷键不生效。实测 `Ctrl+P` 会触发 WebView2 自带的打印对话框（非宿主行为），其他宿主组合键无响应；正确实现（WebView2 `AcceleratorKeyPressed`）列入 v1.0.x。焦点回到主窗口后全部快捷键行为正常。
+- [x] 打开顶部菜单时 DSH 子 Webview 被遮挡后再恢复，菜单不被 Webview 覆盖。（自动验证 2026-09-11：DSH 子 Webview 已渲染（独立 CDP target `http://127.0.0.1:63576/`，标题 `DeepSeek Harness`，含侧栏/会话/工作区/输入框/模型选择器 17 个按钮）时打开「文件」菜单，用 `elementFromPoint` 探测菜单项中心点全部命中菜单自身（`hitInside: true`），说明未被 Webview 覆盖；点「搜索文件」菜单项后菜单关闭且文件搜索框获得焦点。）
+- [x] 已知限制（v1.0）：DSH 子 Webview 获得焦点时宿主快捷键不生效。实测 `Ctrl+P` 会触发 WebView2 自带的打印对话框（非宿主行为），其他宿主组合键无响应；正确实现（WebView2 `AcceleratorKeyPressed`）列入 v1.0.x。焦点回到主窗口后全部快捷键行为正常。（2026-09-11 复核：该限制由 DSH 已渲染并聚焦其输入框时的独立 CDP target 证实——DSH 是独立 Webview 进程，宿主主 Webview 的 `keydown` 收不到其按键；主 Webview 聚焦时全部组合键行为正常，已在上一条验证。列入 v1.0.x，不阻塞 v1.0 发布。）
 
 ## 运行时与更新（M6）
 
@@ -101,7 +101,7 @@ pnpm tauri build --debug --no-bundle
 - [ ] 在没有本机 Node/Pi/DSH 的机器上：Node 显示未安装，可从运行时页面安装（官方包 + SHA-256 校验），然后用它安装 Pi/DSH。
 - [x] 应用内升级 Pi 与 DSH：版本变化、任务可正常创建；升级期间活动任务的处理符合提示。（自动验证 2026-09-11：组件区检测到 Pi「可更新 · 0.85.1」，点「更新」弹确认框「下载并激活 Pi Coding Agent 0.85.1 吗？当前运行时会保留。」→ 确认后组件区变为「Pi Coding Agent 托管 · 0.85.1 最新」，「运行环境」同步为 0.85.1 · managed；磁盘上 `runtimes\piersions\` 新增版本目录、`active.json` 指向新版本、`current` 保留旧 0.84.4。在 0.85.1 上新建任务并完成一次流式对话（59 次增量、终态「等待输入」）正常。DSH 因上游认证变更被有意固定，不提供升级入口，只显示说明——符合设计。**升级期间活动任务**：Pi 有活动 Session 时会直接拒绝切换，实测提示「请先停止所有 Pi Session，再切换 Pi runtime」。）
 - [x] 升级失败可回滚到上一版本（可临时断网或使用测试包验证）。（自动验证 2026-09-11：在 Pi 0.85.1 上点「回滚」→ 确认框「回滚组件 / 恢复 Pi Coding Agent 的上一版本吗？」→ 确认后 `active.json` 由 `versions/0.85.1-...` 变回 `current`、`current` 目录解析为 0.84.4、0.85.1 保留为 `previous`（可再次升级/回滚）；「运行环境」显示 Pi 0.84.4 · managed；回滚后新建任务并完成一次对话正常。**注意**：若已升级一版，`previous` 记录的是「上一活跃版本」而非历史列表，仅能回退一级。）
-- [ ] 检查更新入口可用；跳过版本与稍后提醒生效。
+- [ ] 检查更新入口可用；跳过版本与稍后提醒生效。（**部分验证** 2026-09-11：「应用更新 → 检查应用更新」与「组件 → 检查组件更新」两个入口都在且可点击；组件更新已完整验证（见上两条）。「检查应用更新」在开发构建下返回 `Updater does not have any endpoints set.`（发布构建才会注入 updater endpoint），因此**跳过 / 稍后提醒**的界面行为无法在开发构建里走通——这两项连同真实自更新需在签名发布版本上验证。）
 
 ## DSH 完整功能
 

@@ -933,3 +933,18 @@ U1a -> U1b；随后 U2 和 U3 可独立推进；U4 依赖文件与进程安全�
 - **活跃任务保护**：Pi 存在活动 Session 时切换 runtime 被拒绝，界面提示「请先停止所有 Pi Session，再切换 Pi runtime」——不会静默杀掉正在运行的任务。
 - **回滚**：确认框「恢复 Pi Coding Agent 的上一版本吗？」→ 完成后 `active.json` 回到 `current`、`current` 解析为 0.84.4、0.85.1 记为 `previous`；「运行环境」同步回 0.84.4；回滚后新建任务并完成对话正常。
 - 已知边界：`previous` 只记录「上一活跃版本」，因此回退只有一级；连续升级两次后无法回到更早版本（需重新安装）。这与「当前运行时会保留」的提示一致，但值得在 v1.0.x 文档中说明。
+
+## 58. 自动化原生验收：快捷键矩阵（含菜单/对话框不抢键）与 DSH 菜单层级
+
+2026-09-11（本地时间，debug 构建，CDP 驱动；DSH 子 Webview 用独立 CDP target 验证）：
+
+- 快捷键矩阵（主 Webview 聚焦）：
+  - `Ctrl+,` 打开设置且被 `preventDefault`；设置页列出六个分类。
+  - `Ctrl+B` 在工作区把 `.app-shell` 在 `app-shell` ↔ `app-shell sidebar-hidden` 之间切换（两次切换均可逆）。
+  - `Ctrl+P` / `Ctrl+Shift+P` 分别聚焦「搜索文件名或路径」与「搜索任务」，互不串台。
+  - `Ctrl+L` 聚焦对话输入（见 §54）。
+- **不抢按键**（关键回归点）：
+  - 菜单打开时三个组合键都**不**被 `preventDefault`，且菜单保持打开——快捷键不会在用户浏览菜单时误触发导航。
+  - 应用内对话框打开时同样都不被消费，对话框与所在设置页保持原状。
+- DSH 菜单层级：DSH 子 Webview 以独立 CDP target 存在（`http://127.0.0.1:63576/`，标题 `DeepSeek Harness`，侧栏/会话/工作区/输入框/模型选择器齐全，17 个按钮）。在其渲染状态下打开「文件」菜单，`elementFromPoint` 探测每个菜单项的中心点全部命中菜单自身（`hitInside: true`），说明菜单没有被 Webview 覆盖；点击「搜索文件」后菜单关闭且文件搜索框获得焦点。
+- 已知限制（同 `NATIVE_ACCEPTANCE.md`）：DSH Webview 聚焦时宿主组合键不生效（WebView2 加速键未接入），列入 v1.0.x；焦点回到主窗口后全部行为正常。
