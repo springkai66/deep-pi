@@ -15,12 +15,13 @@ pnpm tauri dev
 
 ## Pi 无法启动
 
-DeepPi 优先读取 `%LOCALAPPDATA%\com.deeppi.desktop\runtimes\pi\active.json` 中的托管运行时指针，新版本位于同级 `versions` 目录。没有指针文件的旧安装继续使用 `current`。设置页显示 `system` 时，应用正在回退到 PATH 中的 `pi`，这只适合开发环境。指针损坏或指向缺失的运行时会报错，不会静默切换到本机 Pi。
+DeepPi 只使用自己托管的运行时（Node、Pi、DSH），不读取电脑上安装的 Pi/Node/npm。托管运行时位于 `%LOCALAPPDATA%\com.deeppi.desktop\runtimes\<组件>\active.json`，实际版本在同级 `versions` 目录；没有指针文件的旧安装继续使用 `current`。缺失或损坏时，请到“设置 → 运行时与更新”安装或修复对应组件（Node 是安装 Pi/DSH 的前提，由应用从官方发行包下载并校对 SHA-256）。指针损坏或指向缺失的运行时会直接报错，不会静默使用本机环境。
 
 确认以下目录可写，并检查日志：
 
 ```text
 %APPDATA%\com.deeppi.desktop\agents\pi
+%LOCALAPPDATA%\com.deeppi.desktop\runtimes\node
 %LOCALAPPDATA%\com.deeppi.desktop\runtimes\pi
 %LOCALAPPDATA%\com.deeppi.desktop\logs
 ```
@@ -67,8 +68,6 @@ node scripts/release-check.mjs --require-installer --require-updater
 ```
 
 如果下载、签名或版本校验失败，当前版本会继续运行。回滚使用上一个已签名 Release 重新发布其 `latest.json` 和安装包；不要关闭签名校验，也不要把 HTTP endpoint 写入 Release 配置。
-
-
 
 DeepPi 的数据位置：
 

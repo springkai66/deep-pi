@@ -27,7 +27,7 @@
   let { settings, runtimes, updates, isCheckingUpdates, busyRuntime, runtimeOperation, onCancelRuntime,
     appUpdate, onCheckUpdates, onCheckAppUpdate, onInstallAppUpdate, onUpdateRuntime, onRollbackRuntime,
     onSnoozeRuntime, onSkipRuntime }: RuntimeSettingsProps = $props();
-  const sourceLabels = { managed: "托管", system: "本机", development: "开发目录", profile: "配置文件" };
+  const sourceLabels = { managed: "托管", development: "开发目录", profile: "配置文件" };
 </script>
 
 <section class="settings-group" aria-labelledby="app-update-heading">
