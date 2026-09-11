@@ -653,3 +653,12 @@ U1a -> U1b；随后 U2 和 U3 可独立推进；U4 依赖文件与进程安全�
 - 依据（源码核对 Tauri 2.11.5）：Windows 消息循环对已注册的 app 菜单调用 `TranslateAcceleratorW`，与焦点在哪个子 Webview 无关；`hide_menu()` 只解除菜单栏绑定，不销毁加速键表，因此隐藏菜单的加速键仍然生效。加速键启用期间组合键会被系统消费，所以只在 DSH 可见时启用，避免影响主 Webview 与终端的按键。
 - 覆盖：Rust 单测覆盖 menu id → 命令映射与定义唯一性；前端单测覆盖 payload 白名单与 DSH 上下文下的启用状态；`pnpm check` 0 错误 0 警告。
 - 待原生验收（已加入 NATIVE_ACCEPTANCE.md）：DSH 聚焦时三个快捷键生效、其余快捷键不受影响、主窗口行为不变。未验收前不把该项计作已完成。
+
+## 39. 最终预发布验证（工程侧就绪）
+
+2026-09-11（本地时间）：
+
+- 代码与测试（当前 `main` = `28899ef`）：默认并行 `cargo test` 连续两轮 **232 通过 / 0 失败 / 5 ignored**；`cargo test -- --include-ignored --test-threads=6` **237 通过 / 0 失败 / 0 ignored**（含联网模型目录、隔离运行时下载与回滚、真实 Pi 会话）；前端 34 个文件 **213 项通过**；`pnpm check` 0 错误 0 警告；`cargo fmt --check` 与 `cargo clippy --all-targets -- -D warnings` 干净。
+- 发布流水线：在当前 HEAD（含 DSH 快捷键与测试稳定性修复）上再次 `workflow_dispatch` 预演 `Windows Release`，run `34592658950` **success**：release checks → `pnpm test` → NSIS+MSI 构建 → installer-smoke 安装/修复/卸载 → 产物上传；tagged-only 步骤按预期跳过。
+- CI：`c69f438`、`28899ef` 均为 success，`main` 全绿。
+- 结论：工程侧 v1.0 就绪。剩余仅两项依赖用户：配置 updater minisign secrets 后由我打 `v1.0.0` tag 发布；按 `NATIVE_ACCEPTANCE.md` 完成原生验收（含 DSH 快捷键三项检查）并回报结果。
