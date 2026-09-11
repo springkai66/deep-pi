@@ -663,4 +663,5 @@ U1a -> U1b；随后 U2 和 U3 可独立推进；U4 依赖文件与进程安全�
 - CI：`c69f438`、`28899ef` 均为 success，`main` 全绿。
 - 追加无界面运行时冒烟（托管运行时，临时 DSH_HOME）：按应用相同参数启动 `node <dsh cli> web --host 127.0.0.1 --port 0 --no-open`，解析到与应用一致的 `dsh web: http://127.0.0.1:<port>`，HTTP 200，结束后进程树无残留托管 `node`。Pi 侧的真实发送/工具/停止/恢复/历史分页已由 `--include-ignored` 集成测试覆盖；DSH 原生窗口嵌入与 Pi TUI 交互仍需按 NATIVE_ACCEPTANCE.md 人工验收。
 - 原生启动与界面验证（自动化）：用当前代码重建 debug 应用并启动，主窗口出现且标题为 `DeepPi`，日志 `event=app_initialization status=ready duration_ms=20`，无 `dsh_shortcuts install_failed` 警告，结束无残留进程；`PrintWindow` 截图（`artifacts/v1.0.0-main-window.png`）确认顶部仍为自绘 HTML 菜单栏、无原生菜单条、侧栏与工作区布局正常——即隐藏快捷键菜单未引入可见菜单栏或布局回归。DSH 聚焦时的实际按键路由仍需人工实按验证。
+- 升级回滚实测：`runtime::tests::installs_verifies_and_rolls_back_live_pi_in_isolation`（`--include-ignored`）在当前提交通过（200 秒），在隔离 profile 中完成官方 Pi 运行时的下载、安装、验证与回滚。结合 installer-smoke（安装/修复/卸载）、启动冒烟与无界面 DSH 冒烟，task-9 可自动化的条款已全部取证；应用内 GUI 交互（建 Pi 任务、嵌入 DSH、应用内升级）按 NATIVE_ACCEPTANCE.md 由用户执行。
 - 结论：工程侧 v1.0 就绪。剩余仅两项依赖用户：配置 updater minisign secrets 后由我打 `v1.0.0` tag 发布；按 `NATIVE_ACCEPTANCE.md` 完成原生验收（含 DSH 快捷键三项检查）并回报结果。
