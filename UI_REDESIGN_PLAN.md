@@ -625,3 +625,12 @@ U1a -> U1b；随后 U2 和 U3 可独立推进；U4 依赖文件与进程安全�
 - 内容搜索规模测试拆分：默认套件保留 4 目录/40 文件的跨目录回归；1200 文件规模检查标记 `#[ignore]` 单独运行。测试构建的 `MAX_SEARCH_TIME` 放宽为 90 秒（生产仍 10 秒），避免新写入大批临时文件时被安全软件实时扫描造成假超时。
 - 证据：默认并行 `cargo test` 连续两次 230 通过 / 0 失败 / 5 ignored；`cargo test -- --include-ignored --test-threads=6` 235 通过 / 0 失败 / 0 ignored。
 - 环境限制：本机 SkyGuard 向 `git.exe` 注入钩子，重负载下偶发退出码 `0xC0000005`（git.exe 自身崩溃）；CI 干净 runner 无此问题。该现象已在实施记录中保留，不用它作为放宽生产断言的依据。
+
+## 36. Release workflow 未签名预演（workflow_dispatch）
+
+2026-09-11（本地时间）：
+
+- 通过 GitHub API 对 `main` 触发 `Windows Release` 的 workflow_dispatch（非 tag 路径），预演完整发布流水线：release checks → `pnpm test`（check + web + cargo）→ 构建 NSIS+MSI → installer-smoke 安装/修复/卸载 → 上传产物。
+- 结果：run `34565555612`（head `d3d36bd`）**success**；产物 `deeppi-windows-d3d36bd...` 大小 13,804,138 字节（bundle 目录，含 NSIS 与 MSI），未过期；tagged-only 步骤（updater secrets、签名、发布与 stable 通道）按预期跳过。
+- 结论：发布流水线在干净 runner 上可用，MSI 所需的 WiX 下载在 GitHub runner 正常。只差用户配置 updater secrets 后打 `v1.0.0` tag。
+- 同期 CI：`c3a92cc`、`cb22ae2`、`e997487`、`d3d36bd` 全部 success，main 为绿。
