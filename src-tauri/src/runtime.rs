@@ -545,7 +545,9 @@ fn npm_install(
     }
     let output = process_runner::run_cancellable(
         &mut command,
-        Duration::from_secs(600),
+        // 安装预算取安全网而非预期时长：DSH 依赖树很大（慢网下可超过 10 分钟），
+        // 但仍可由“取消”立即中断。
+        Duration::from_secs(1800),
         Some(cancellation),
     )?;
     if output.status.success() {
