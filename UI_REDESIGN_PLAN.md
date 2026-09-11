@@ -816,3 +816,16 @@ U1a -> U1b；随后 U2 和 U3 可独立推进；U4 依赖文件与进程安全�
   - **磁盘内容保持 `external-conflict`，未被草稿静默覆盖**；草稿仍在编辑器内，可继续比较或另存。
 - 清理：临时项目与临时目录已删除，应用项目列表恢复为空；未触碰用户真实文件。
 - 结论：U5 的“保存/另存、外部并发修改不静默覆盖”在原生层已自动验证；中文 IME 与多文件脏状态仍待人工。
+
+## 51. 发布构建（release）自包含与进程托管实测
+
+2026-09-11（本地时间，`main@fe7dc4e` 的 `--bundles nsis,msi` 发布构建）：
+
+- 全新构建产物：`DeepPi_1.0.0_x64-setup.exe`、`DeepPi_1.0.0_x64_en-US.msi`；`deeppi.exe` 与 NSIS 安装包 FileVersion 均为 1.0.0。
+- `installer-smoke`（安装/修复/卸载）与 `release-check --require-installer` 均 PASS。
+- **发布构建（非 debug）** 以 CDP 驱动实测：
+  - `runtime_status` 全部托管：DeepPi 1.0.0 / Node 24.13.0 / Pi 0.84.4 / DSH 0.1.1-rc.2（固定版本）/ dshmarket 1.45.1（DSH profile）；不存在 `system`/开发目录来源，说明 `#[cfg(debug_assertions)]` 的开发回落在发布构建中确实编译不进去。
+  - `start_dsh` 成功并返回无 token 的旧格式 URL（固定版本 DSH 的预期行为），DSH 子进程运行在托管 Node 上且父进程为发布版应用。
+  - 创建 Pi RPC 任务成功，Pi 进程同样运行在托管 Node 上。
+  - **强杀应用进程后的清理**：分别对「DSH 运行中」「Pi RPC 运行中」「Pi TUI（PTY）运行中」三种状态执行 `Stop-Process -Force`，6 秒后托管 Node 子进程数均为 **0**——DSH（Job Object）与 Pi（PTY/RPC 既有托管）都不会成为孤儿。
+- 清理：验收用的临时项目、任务（`Release Probe`、`PTY Release Probe`）与临时目录、空会话目录均已删除；未触碰用户真实数据。
