@@ -601,6 +601,7 @@ U1a -> U1b；随后 U2 和 U3 可独立推进；U4 依赖文件与进程安全�
 - U5：`project_edit` 11 项测试覆盖版本冲突、并发替换、create-only 另存、只读文件、junction 父目录、二进制/超限与删除后不重建；`file-workspace` 25 项覆盖草稿与撤销隔离、退出锁、BOM 与混合换行保留、关闭确认、保存期间继续输入、刷新不覆盖草稿与未知结果保留。编辑器比较与消息渲染按需加载（`FileComparison`、`ChatMessage`、`message-markdown` 动态 import），未进入首屏包。中文输入法、真实文件往返与屏幕阅读器仍待原生验收。
 - U6：六类设置分类与键盘导航有实现与测试；快捷键展示与实现共享定义并有文档同步测试；DSH 菜单遮挡切换已实现（原生覆盖关系待验收）。DSH 子 Webview 内宿主快捷键转发仍未实现，`KEYBOARD_SHORTCUTS.md` 已如实标注；实现需受限原生路由（不向子 Webview 开放 IPC），成本与风险较高，列为待用户决定项。
 - 新增 [NATIVE_ACCEPTANCE.md](./NATIVE_ACCEPTANCE.md)：按 U1b–U6、运行时升级与 DSH 分组给出逐项操作与预期，并明确回报方式；完成原生验收前不将 U1b–U6 视为最终验收完成。
+- 包体积核验（1.0.0 构建）：`build/index.html` 首屏 modulepreload 共 11 个文件，gzip 合计约 34 KB；含 CodeMirror 的编辑器/比较块（最大 339 KB raw / 87 KB gzip）与终端块均为按需 chunk，不进入首屏；客户端产物总量约 2.8 MB，分布在按需块中。
 
 ## 34. 发布工程收口与本地构建
 
