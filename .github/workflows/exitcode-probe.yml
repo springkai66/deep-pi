@@ -38,6 +38,7 @@ jobs:
 
       - name: Probe a failing gh download like the workflow does
         shell: pwsh
+        continue-on-error: true
         run: |
           gh release download definitely-not-a-real-tag `
             --repo $env:GITHUB_REPOSITORY `
