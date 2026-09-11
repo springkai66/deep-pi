@@ -1,7 +1,8 @@
 name: Exit code probe (temporary)
 
-# 临时探针：确认 pwsh 步骤在「原生命令失败但被 if 处理」时的退出码行为。
-# 结论用于判断 release.yml 的首次发布路径是否会失败。验证后删除本文件。
+# 临时探针：测量 pwsh 中「原生命令失败但被 if 处理」之后脚本的真实退出码，
+# 用于判断 release.yml 首次发布路径（gh release download 失败 → 被 if 处理）
+# 是否会失败。结论取得后删除本文件。
 on:
   workflow_dispatch:
 
@@ -9,41 +10,39 @@ jobs:
   probe:
     runs-on: windows-latest
     steps:
-      - name: A handled native failure without reset
-        continue-on-error: true
+      - name: Measure exit codes of each pattern
         shell: pwsh
         run: |
-          cmd /c exit 1
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host 'A: handled with if, no reset'
+          $dir = Join-Path $env:RUNNER_TEMP 'exitprobe'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $fail = 'cmd /c exit 3'
+          $guard = "if (`$LASTEXITCODE -ne 0) { Write-Host 'handled' }"
+
+          $cases = [ordered]@{}
+          $cases['a_ends_with_failing_native'] = "$fail"
+          $cases['b_handled_no_reset'] = "$fail`n$guard"
+          $cases['c_handled_then_native_ok'] = "$fail`n$guard`ncmd /c exit 0"
+          $cases['d_handled_then_exit0'] = "$fail`n$guard`nexit 0"
+          $cases['e_handled_then_cmdlet'] = "$fail`n$guard`nWrite-Host 'more'"
+
+          foreach ($name in $cases.Keys) {
+            $path = Join-Path $dir "$name.ps1"
+            Set-Content -Path $path -Value $cases[$name] -NoNewline
+            pwsh -NoProfile -Command ". '$path'" *> $null
+            Write-Host ("{0} => dot-source {1}" -f $name, $LASTEXITCODE)
+            pwsh -NoProfile -File $path *> $null
+            Write-Host ("{0} => -File {1}" -f $name, $LASTEXITCODE)
           }
 
-      - name: B handled native failure then explicit exit 0
-        continue-on-error: true
+      - name: Probe a failing gh download like the workflow does
         shell: pwsh
+        continue-on-error: true
         run: |
-          cmd /c exit 1
+          gh release download definitely-not-a-real-tag `
+            --repo $env:GITHUB_REPOSITORY `
+            --pattern '*-setup.exe' `
+            --dir $env:RUNNER_TEMP
           if ($LASTEXITCODE -ne 0) {
-            Write-Host 'B: handled with if, then exit 0'
-            exit 0
+            Write-Host 'No previous stable installer; skipping upgrade smoke.'
           }
-
-      - name: C native failure as last statement
-        continue-on-error: true
-        shell: pwsh
-        run: |
-          Write-Host 'C: about to fail as the last statement'
-          cmd /c exit 1
-
-      - name: D handled failure then a later successful native command
-        continue-on-error: true
-        shell: pwsh
-        run: |
-          cmd /c exit 1
-          if ($LASTEXITCODE -ne 0) { Write-Host 'D: handled' }
-          cmd /c exit 0
-
-      - name: Report
-        shell: pwsh
-        run: |
-          Write-Host 'probe finished; inspect per-step conclusions'
+          Write-Host "reached end of step; LASTEXITCODE=$LASTEXITCODE"
