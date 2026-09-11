@@ -634,3 +634,11 @@ U1a -> U1b；随后 U2 和 U3 可独立推进；U4 依赖文件与进程安全�
 - 结果：run `34565555612`（head `d3d36bd`）**success**；产物 `deeppi-windows-d3d36bd...` 大小 13,804,138 字节（bundle 目录，含 NSIS 与 MSI），未过期；tagged-only 步骤（updater secrets、签名、发布与 stable 通道）按预期跳过。
 - 结论：发布流水线在干净 runner 上可用，MSI 所需的 WiX 下载在 GitHub runner 正常。只差用户配置 updater secrets 后打 `v1.0.0` tag。
 - 同期 CI：`c3a92cc`、`cb22ae2`、`e997487`、`d3d36bd` 全部 success，main 为绿。
+
+## 37. Updater 产物链本地预演（一次性测试密钥）
+
+2026-09-11（本地时间）：
+
+- 用本地一次性 minisign 测试密钥预演 tagged 发布产物链：`updater:prepare` 生成含测试公钥的 release config → `tauri build --bundles nsis --config src-tauri/tauri.release.generated.conf.json` 产出 `DeepPi_1.0.0_x64-setup.exe` 与 `.exe.sig` → `updater:manifest` 生成 `latest.json`（version 1.0.0、HTTPS 更新 URL、signature）→ `node scripts/release-check.mjs --require-installer --require-updater` **PASS**。
+- 关键发现：本机 Tauri CLI 只认 `TAURI_SIGNING_PRIVATE_KEY`（密钥内容），未识别 `TAURI_SIGNING_PRIVATE_KEY_PATH`；预演与 `release.yml` 均使用内容方式注入，一致。
+- 测试密钥文件与生成的 release config 已删除，仓库与 Secrets 未受影响。tagged 发布只差用户配置三个 updater secrets。
