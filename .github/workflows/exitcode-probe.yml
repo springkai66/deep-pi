@@ -29,14 +29,14 @@ jobs:
             $path = Join-Path $dir "$name.ps1"
             Set-Content -Path $path -Value $cases[$name] -NoNewline
             pwsh -NoProfile -Command ". '$path'" *> $null
-            Write-Host ("{0} => dot-source {1}" -f $name, $LASTEXITCODE)
+            $dotSource = $LASTEXITCODE
             pwsh -NoProfile -File $path *> $null
-            Write-Host ("{0} => -File {1}" -f $name, $LASTEXITCODE)
+            $fileForm = $LASTEXITCODE
+            Write-Host ("MEASURED {0} dot-source={1} file={2}" -f $name, $dotSource, $fileForm)
           }
 
       - name: Probe a failing gh download like the workflow does
         shell: pwsh
-        continue-on-error: true
         run: |
           gh release download definitely-not-a-real-tag `
             --repo $env:GITHUB_REPOSITORY `
@@ -46,3 +46,15 @@ jobs:
             Write-Host 'No previous stable installer; skipping upgrade smoke.'
           }
           Write-Host "reached end of step; LASTEXITCODE=$LASTEXITCODE"
+
+      - name: Control with the same failure then exit 0
+        shell: pwsh
+        run: |
+          gh release download definitely-not-a-real-tag `
+            --repo $env:GITHUB_REPOSITORY `
+            --pattern '*-setup.exe' `
+            --dir $env:RUNNER_TEMP
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host 'handled'
+            exit 0
+          }
