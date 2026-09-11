@@ -25,6 +25,11 @@ use crate::{
 
 const MIN_DSHMARKET_DSH_VERSION: &str = "0.1.1-rc.2";
 
+/// v1.0 兼容上限：DSH 仍处于 RC，契约会变。0.1.5-rc.1 起启动 URL 带进程 token，
+/// 且 Host API 需要由浏览器交换得到的签名 cookie，宿主的会话同步与就绪探测尚未适配，
+/// 因此只安装已验证的 0.1.1-rc.2；完成适配后可抬高此常量。
+const VERIFIED_DSH_VERSION: &str = "0.1.1-rc.2";
+
 /// DeepPi 托管的 Node 版本。Pi、DSH、dshmarket 均由它执行；
 /// 不使用电脑上安装的 Node/npm。版本变更需与兼容矩阵一起验证。
 const MANAGED_NODE_VERSION: &str = "24.13.0";
@@ -191,6 +196,8 @@ pub struct RuntimeUpdate {
     pub can_rollback: bool,
     pub stale: bool,
     pub error: Option<String>,
+    /// 版本说明（例如上游有更新但尚未通过兼容验证）。
+    pub note: Option<String>,
 }
 
 #[derive(Default)]
@@ -968,9 +975,16 @@ fn install_runtime_inner(
     let package = runtime_package(&request.component_id)
         .ok_or_else(|| "runtime component is not supported".to_string())?;
     let proxy = configured_update_proxy()?;
-    let latest = latest_package_version(package, proxy.as_deref())?;
+    let registry_latest = latest_package_version(package, proxy.as_deref())?;
     cancellation.check()?;
-    if latest != request.version {
+    // DSH 固定兼容版本：即使通过 IPC 直接请求，也不能安装未验证的上游版本。
+    if request.component_id == "dsh" && request.version != VERIFIED_DSH_VERSION {
+        let requested = &request.version;
+        return Err(format!(
+            "DSH {requested} 尚未通过 DeepPi 兼容验证，请安装 {VERIFIED_DSH_VERSION}"
+        ));
+    }
+    if registry_latest != request.version && request.component_id != "dsh" {
         return Err("只能安装刚从官方 registry 验证的最新版本".into());
     }
     if request.component_id == "dshmarket" {
@@ -1154,25 +1168,48 @@ fn check_runtime_updates_inner(
                     can_rollback: runtime_backup_exists(&paths, component.id),
                     stale: false,
                     error: None,
+                    note: None,
                 };
             };
             match configured_update_proxy()
                 .and_then(|proxy| latest_package_version(package, proxy.as_deref()))
             {
-                Ok(latest_version) => RuntimeUpdate {
-                    id: component.id.to_owned(),
-                    name: component.name.to_owned(),
-                    update_available: component
-                        .current_version
-                        .as_deref()
-                        .is_some_and(|current| version_is_newer(current, &latest_version)),
-                    current_version: component.current_version,
-                    latest_version: Some(latest_version),
-                    installable: component_installable(&paths, component.id),
-                    can_rollback: runtime_backup_exists(&paths, component.id),
-                    stale: false,
-                    error: None,
-                },
+                Ok(registry_latest) => {
+                    // DSH 固定在已验证版本：上游有更新时只提示，不提供安装。
+                    let (latest_version, note) = if component.id == "dsh" {
+                        (
+                            VERIFIED_DSH_VERSION.to_owned(),
+                            (registry_latest != VERIFIED_DSH_VERSION).then(|| {
+                                format!(
+                                    "上游已有 {registry_latest}；该版本改变了本地认证方式，尚未通过兼容验证，暂时固定 {VERIFIED_DSH_VERSION}"
+                                )
+                            }),
+                        )
+                    } else {
+                        (registry_latest, None)
+                    };
+                    RuntimeUpdate {
+                        id: component.id.to_owned(),
+                        name: component.name.to_owned(),
+                        // DSH 固定版本：版本不一致（含高于兼容上限）时都提供安装入口，
+                        // 让误装未验证版本的用户能回到已验证版本。
+                        update_available: if component.id == "dsh" {
+                            component.current_version.as_deref() != Some(latest_version.as_str())
+                        } else {
+                            component
+                                .current_version
+                                .as_deref()
+                                .is_some_and(|current| version_is_newer(current, &latest_version))
+                        },
+                        current_version: component.current_version,
+                        latest_version: Some(latest_version),
+                        installable: component_installable(&paths, component.id),
+                        can_rollback: runtime_backup_exists(&paths, component.id),
+                        stale: false,
+                        error: None,
+                        note,
+                    }
+                }
                 Err(error) => RuntimeUpdate {
                     id: component.id.to_owned(),
                     name: component.name.to_owned(),
@@ -1183,6 +1220,7 @@ fn check_runtime_updates_inner(
                     can_rollback: runtime_backup_exists(&paths, component.id),
                     stale: false,
                     error: Some(error),
+                    note: None,
                 },
             }
         })

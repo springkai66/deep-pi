@@ -18,6 +18,9 @@ use crate::{app_paths::AppPaths, dsh_api, task::TaskStore};
 #[derive(Default)]
 struct DshProcess {
     child: Option<Child>,
+    /// Kill-on-close Job Object：应用进程意外终止（含被强杀）时，
+    /// 由系统结束 DSH 及其子进程，避免遗留持有端口的孤儿进程。
+    tree: Option<crate::process_runner::ProcessTree>,
     url: Option<String>,
     generation: u64,
 }
@@ -35,9 +38,27 @@ struct DshHostStatus {
     error: Option<String>,
 }
 
+/// 解析 DSH 启动行。旧版输出 `dsh web: http://127.0.0.1:<port>`；
+/// 0.1.5-rc.1 起额外带 token（`…:<port>/?token=…`）。整段 URL 都会返回：
+/// Webview 需要 token 才能通过 DSH 的本地鉴权；API 调用会另行归一化到 origin。
 fn extract_dsh_url(line: &str) -> Option<String> {
-    let address = line.trim().strip_prefix("dsh web: http://127.0.0.1:")?;
-    let port = address.parse::<u16>().ok().filter(|port| *port > 0)?;
+    let address = line.trim().strip_prefix("dsh web: ")?;
+    let url = Url::parse(address.trim()).ok()?;
+    if url.scheme() != "http" || url.host_str() != Some("127.0.0.1") {
+        return None;
+    }
+    let port = url.port().filter(|port| *port > 0)?;
+    let _ = port;
+    Some(url.to_string())
+}
+
+/// 把 DSH URL 归一化为 `http://127.0.0.1:<port>`，供 API 调用使用（丢弃 token 路径）。
+pub(crate) fn dsh_api_base(url: &str) -> Option<String> {
+    let parsed = Url::parse(url).ok()?;
+    if parsed.scheme() != "http" || parsed.host_str() != Some("127.0.0.1") {
+        return None;
+    }
+    let port = parsed.port().filter(|port| *port > 0)?;
     Some(format!("http://127.0.0.1:{port}"))
 }
 
@@ -59,6 +80,7 @@ impl DshManager {
             return Ok(true);
         }
         state.child = None;
+        state.tree = None;
         state.url = None;
         Ok(false)
     }
@@ -157,6 +179,7 @@ fn start_dsh_inner(
         }
     }
     state.child = None;
+    state.tree = None;
     state.url = None;
 
     let runtime = paths.dsh_runtime()?;
@@ -174,14 +197,8 @@ fn start_dsh_inner(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x0800_0000);
-    }
-
-    let mut child = command
-        .spawn()
+    // 由 Job Object 托管，应用异常结束时系统会一起结束 DSH。
+    let (mut child, tree) = crate::process_runner::spawn_owned(&mut command)
         .map_err(|error| format!("failed to start DSH: {error}"))?;
     let stdout = child
         .stdout
@@ -217,6 +234,7 @@ fn start_dsh_inner(
     state.generation = state.generation.wrapping_add(1);
     let generation = state.generation;
     state.child = Some(child);
+    state.tree = Some(tree);
     state.url = Some(url.clone());
     drop(state);
 
@@ -253,11 +271,13 @@ fn monitor_dsh(app: AppHandle, generation: u64, url: String) {
                 Ok(None) => None,
                 Ok(Some(status)) => {
                     state.child = None;
+                    state.tree = None;
                     state.url = None;
                     Some(Ok(Some(status.code())))
                 }
                 Err(error) => {
                     state.child = None;
+                    state.tree = None;
                     state.url = None;
                     Some(Err(error.to_string()))
                 }
@@ -280,9 +300,10 @@ fn monitor_dsh(app: AppHandle, generation: u64, url: String) {
             return;
         }
 
-        if let (Ok(sessions), Some(store)) =
-            (dsh_api::list_sessions(&url), app.try_state::<TaskStore>())
-        {
+        if let (Ok(sessions), Some(store)) = (
+            dsh_api::list_sessions(&dsh_api_base(&url).unwrap_or_else(|| url.clone())),
+            app.try_state::<TaskStore>(),
+        ) {
             if store.sync_dsh_sessions(&sessions).is_ok() {
                 if let Ok(tasks) = store.list() {
                     let dsh_tasks = tasks
@@ -314,6 +335,7 @@ fn stop_dsh_inner(app: AppHandle, manager: State<'_, DshManager>) -> Result<(), 
     }
     state.generation = state.generation.wrapping_add(1);
     state.child = None;
+    state.tree = None;
     state.url = None;
     drop(state);
     let _ = app.emit(
@@ -342,7 +364,7 @@ impl Drop for DshManager {
 mod tests {
     use tauri::Url;
 
-    use super::{dsh_url_is_allowed, extract_dsh_url};
+    use super::{dsh_api_base, dsh_url_is_allowed, extract_dsh_url};
 
     #[test]
     fn allows_only_the_active_loopback_origin() {
@@ -362,10 +384,30 @@ mod tests {
 
     #[test]
     fn extracts_loopback_dsh_url() {
+        // 旧版：端口结尾（Url 规范化会补上根路径斜杠）。
         assert_eq!(
             extract_dsh_url("dsh web: http://127.0.0.1:63358"),
+            Some("http://127.0.0.1:63358/".into())
+        );
+        // 0.1.5-rc.1 起：启动 URL 带进程 token，必须整段保留交给 Webview 鉴权。
+        assert_eq!(
+            extract_dsh_url("dsh web: http://127.0.0.1:63358/?token=abc-123_XYZ"),
+            Some("http://127.0.0.1:63358/?token=abc-123_XYZ".into())
+        );
+    }
+
+    #[test]
+    fn api_base_drops_token_and_keeps_origin() {
+        assert_eq!(
+            dsh_api_base("http://127.0.0.1:63358/"),
             Some("http://127.0.0.1:63358".into())
         );
+        assert_eq!(
+            dsh_api_base("http://127.0.0.1:63358/?token=abc"),
+            Some("http://127.0.0.1:63358".into())
+        );
+        assert_eq!(dsh_api_base("http://192.168.1.20:63358/"), None);
+        assert_eq!(dsh_api_base("https://127.0.0.1:63358/"), None);
     }
 
     #[test]

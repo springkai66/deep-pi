@@ -92,6 +92,7 @@
         </div>
       </div>
       {#if update?.error}<p role="alert">{update.error}</p>{/if}
+      {#if update?.note && !update.error}<p class="muted" role="status">{update.note}</p>{/if}
     {/each}
   {/if}
 </section>

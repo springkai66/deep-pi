@@ -16,4 +16,6 @@ export interface RuntimeUpdate {
   canRollback: boolean;
   stale: boolean;
   error: string | null;
+  /** 版本说明，例如上游有更新但尚未通过兼容验证。 */
+  note: string | null;
 }
