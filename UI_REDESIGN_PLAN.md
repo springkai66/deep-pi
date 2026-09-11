@@ -661,4 +661,5 @@ U1a -> U1b；随后 U2 和 U3 可独立推进；U4 依赖文件与进程安全�
 - 代码与测试（当前 `main` = `28899ef`）：默认并行 `cargo test` 连续两轮 **232 通过 / 0 失败 / 5 ignored**；`cargo test -- --include-ignored --test-threads=6` **237 通过 / 0 失败 / 0 ignored**（含联网模型目录、隔离运行时下载与回滚、真实 Pi 会话）；前端 34 个文件 **213 项通过**；`pnpm check` 0 错误 0 警告；`cargo fmt --check` 与 `cargo clippy --all-targets -- -D warnings` 干净。
 - 发布流水线：在当前 HEAD（含 DSH 快捷键与测试稳定性修复）上再次 `workflow_dispatch` 预演 `Windows Release`，run `34592658950` **success**：release checks → `pnpm test` → NSIS+MSI 构建 → installer-smoke 安装/修复/卸载 → 产物上传；tagged-only 步骤按预期跳过。
 - CI：`c69f438`、`28899ef` 均为 success，`main` 全绿。
+- 追加无界面运行时冒烟（托管运行时，临时 DSH_HOME）：按应用相同参数启动 `node <dsh cli> web --host 127.0.0.1 --port 0 --no-open`，解析到与应用一致的 `dsh web: http://127.0.0.1:<port>`，HTTP 200，结束后进程树无残留托管 `node`。Pi 侧的真实发送/工具/停止/恢复/历史分页已由 `--include-ignored` 集成测试覆盖；DSH 原生窗口嵌入与 Pi TUI 交互仍需按 NATIVE_ACCEPTANCE.md 人工验收。
 - 结论：工程侧 v1.0 就绪。剩余仅两项依赖用户：配置 updater minisign secrets 后由我打 `v1.0.0` tag 发布；按 `NATIVE_ACCEPTANCE.md` 完成原生验收（含 DSH 快捷键三项检查）并回报结果。
