@@ -611,6 +611,7 @@ U1a -> U1b；随后 U2 和 U3 可独立推进；U4 依赖文件与进程安全�
 - 本地构建：release 构建成功，产出 `DeepPi_1.0.0_x64-setup.exe`；`installer-smoke` 完成安装与卸载 PASS；`release-check --require-installer` 通过；`updater:prepare` 使用占位公钥 dry-run 通过（生成文件已删除）。
 - MSI 未能在本机构建：Tauri 需从 GitHub 下载 WiX 3.14，而本机无法直连 GitHub；choco 安装因 `C:\ProgramData\chocolatey\lib` 锁文件无权限修复而失败。MSI 由 GitHub runner 在 Release workflow 构建（历史 run 已验证 NSIS+MSI 构建）。
 - 后续已本地补齐 MSI：从 nuget.org 取 `wix.3.14.1.nupkg`，将 `tools/*` 解压到 `%LOCALAPPDATA%\tauri\WixTools314`，`pnpm tauri build --bundles msi` 成功产出 `DeepPi_1.0.0_x64_en-US.msi`；`release-check --require-installer` 现在同时识别 NSIS 与 MSI。该变通写入 TROUBLESHOOTING.md。
+- 安装包内容核验：`deeppi.exe` 与 NSIS 安装包 FileVersion 均为 1.0.0；MSI 用 `msiexec /a` 管理安装解包成功（不修改系统），载荷 `deeppi.exe` 版本 1.0.0，解包目录已清理。
 - CI：修复后 `808e944` 与 `1b673fb` 均为 success（含 cargo audit、licenses、release check、web build）。后续 tag 发布需用户先配置 updater secrets。
 - 待用户：配置 GitHub Secrets；按 `NATIVE_ACCEPTANCE.md` 完成原生验收；决定 DSH 子 Webview 宿主快捷键转发是否纳入 v1.0。
 
