@@ -1,8 +1,8 @@
 export interface RuntimeComponent {
-  id: "deeppi" | "pi" | "dsh" | "dshmarket";
+  id: "deeppi" | "node" | "pi" | "dsh" | "dshmarket";
   name: string;
   currentVersion: string | null;
-  source: "system" | "managed" | "development" | "profile";
+  source: "managed" | "development" | "profile";
   available: boolean;
 }
 

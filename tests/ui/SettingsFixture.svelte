@@ -44,7 +44,7 @@
     onDiagnosticsBusy={() => {}} confirmDiagnosticsClear={async () => false}
     onChangeSettings={(next) => { settings = next; changes++; }}
     onEditorSaved={() => {}} onClose={() => { action = "返回工作区"; }}
-    runtimes={[{ id: "pi", name: "Pi", currentVersion: "1.0.0", source: "managed", available: true }, { id: "dsh", name: "DSH", currentVersion: null, source: "system", available: false }]}
+    runtimes={[{ id: "pi", name: "Pi", currentVersion: "1.0.0", source: "managed", available: true }, { id: "dsh", name: "DSH", currentVersion: null, source: "managed", available: false }]}
     updates={[{ id: "pi", name: "Pi", currentVersion: "1.0.0", latestVersion: "1.1.0", updateAvailable: true, installable: true, canRollback: true, stale: false, error: null }]}
     busyRuntime={null} runtimeOperation={null} isCheckingUpdates={false}
     appUpdate={{ status: "available", version: "2.0.0", notes: "Fixture release notes", error: null }}
