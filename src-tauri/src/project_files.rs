@@ -1003,6 +1003,33 @@ mod tests {
         }
 
         #[test]
+        fn content_search_handles_a_large_tree_within_the_time_budget() {
+            let fixture = Fixture::new();
+            for directory in 0..20 {
+                let path = fixture.0.join(format!("dir{directory:02}"));
+                std::fs::create_dir(&path).unwrap();
+                for file in 0..20 {
+                    let content = if file % 10 == 0 {
+                        "needle\n"
+                    } else {
+                        "haystack\n"
+                    };
+                    std::fs::write(path.join(format!("file{file:02}.txt")), content).unwrap();
+                }
+            }
+            let started = Instant::now();
+            let Some(result) = content_search(&fixture.0, request("needle")) else {
+                return;
+            };
+            assert_eq!(result.matches.len(), 40);
+            assert!(
+                started.elapsed() < Duration::from_secs(15),
+                "large tree search took {:?}",
+                started.elapsed()
+            );
+        }
+
+        #[test]
         fn content_search_bounds_results_and_honors_cancellation() {
             let fixture = Fixture::new();
             std::fs::write(fixture.0.join("many"), "needle\n".repeat(700)).unwrap();
