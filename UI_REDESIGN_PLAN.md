@@ -701,3 +701,14 @@ U1a -> U1b；随后 U2 和 U3 可独立推进；U4 依赖文件与进程安全�
   - 大项目索引：Hotta 项目 15000+ 文件，底部计数随索引推进更新。
 - 澄清一次误报：先前“无法打开预览”是自动化脚本点击坐标落在目录行、且中文输入法把 `TypeText` 转成拼音所致；修正为剪贴板输入 + 文件行坐标后确认预览正常，**不是应用缺陷**。
 - 仍未验证：真实模型回复、应用内运行时升级 UI、关闭确认弹窗（当前设置为“退出应用”）、主题/DPI/IME、DSH 聚焦快捷键。
+
+## 42. 自动化原生验收：主题、窄窗口、侧栏项目过滤与一次误操作
+
+2026-09-11（本地时间，debug 构建）：
+
+- 通过：
+  - 浅色主题：将 `colorMode` 置为 `light` 后启动，界面变为浅色（浅色背景、深色文字、绿色主按钮），说明主题体系按设置生效；随之恢复为 `dark`。
+  - 窄窗口：窗口缩到 820×700 后布局正常，侧栏/工具栏/工作区无横向溢出或遮挡。
+- 澄清：任务侧栏只显示 Hotta 是**正确行为**，不是缺陷：数据库中 `deep-pi` 与 `project-b` 的 `removed_at` 非空（已在之前会话中从工作区移除），`list_projects` 按 `removed_at IS NULL` 过滤。
+- 一次误操作与修复：自动化脚本用 PowerShell `ConvertTo-Json` + `Set-Content -Encoding UTF8` 写入 `settings.json` 时引入了 BOM，应用正确报出 `settings.json is invalid: expected value at line 1 column 1` 错误页。已用 UTF-8 无 BOM 重写并校验（内容与原值一致、`colorMode=dark`），应用随后启动正常；同时确认 `settings-*.json` 备份机制正常。这也是一个正向证据：无效配置不会静默丢失，而是显示可重试的错误页。
+- 仍未验证：真实模型回复、应用内运行时升级 UI、关闭确认弹窗（当前 `closeBehavior=exit`）、高 DPI/多显示器、IME、DSH 聚焦快捷键。
