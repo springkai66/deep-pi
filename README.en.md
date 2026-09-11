@@ -70,6 +70,7 @@ Push a `v*` tag to run `.github/workflows/release.yml`, which builds, signs (opt
 - Local Pi/DSH/Node/npm installations are not read; DeepPi only uses its own managed runtimes and configuration directory (Node is installed by the app from the official distribution and verified against SHA-256).
 - DSH is pinned to the verified `0.1.1-rc.2`: upstream 0.1.5-rc.1 changed local authentication, so upgrades are withheld until adapted (the UI explains why).
 - Host shortcuts do not work while the DSH child Webview has focus (see [KEYBOARD_SHORTCUTS.md](./KEYBOARD_SHORTCUTS.md)).
+- **Content** search in the file sidebar depends on `rg.exe` (ripgrep) being available on the system `PATH`: DeepPi neither bundles nor auto-installs it, and shows a "ripgrep not found" message in that mode when it is missing (file-name search is unaffected; see [TROUBLESHOOTING.md](./TROUBLESHOOTING.md)).
 - The DeepPi self-update pipeline is configured (updater signature and `stable` channel), but v1.0.0 is the first release; real cross-version self-update and rollback will be validated when the next version ships.
 - The 8-hour soak, very large repositories and parts of the native interaction acceptance are still open (see [NATIVE_ACCEPTANCE.md](./NATIVE_ACCEPTANCE.md)).
 
