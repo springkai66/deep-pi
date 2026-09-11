@@ -16,6 +16,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
@@ -78,9 +80,15 @@ jobs:
         run: pnpm audit --prod --audit-level high
 
       - name: Scan repository for secrets
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          $version = '8.24.3'
+          $archive = Join-Path $env:RUNNER_TEMP 'gitleaks.zip'
+          $directory = Join-Path $env:RUNNER_TEMP 'gitleaks'
+          $url = "https://github.com/gitleaks/gitleaks/releases/download/v$version/gitleaks_${version}_windows_x64.zip"
+          Invoke-WebRequest -Uri $url -OutFile $archive
+          Expand-Archive -Path $archive -DestinationPath $directory -Force
+          & (Join-Path $directory 'gitleaks.exe') git --redact --no-banner -v .
 
       - name: Build web assets
         run: pnpm build

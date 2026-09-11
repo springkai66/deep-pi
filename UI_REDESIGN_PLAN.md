@@ -584,6 +584,7 @@ U1a -> U1b；随后 U2 和 U3 可独立推进；U4 依赖文件与进程安全�
 - 推送 `567eaf8` 后 CI run `34498817897` 在 “Run Rust tests” 失败：3 项 content search 测试在 GitHub runner 上因没有 `rg.exe` 直接 unwrap 失败；`real_pi_pages_a_large_native_session_without_replaying_prompts` 因 runner 没有 Pi SDK 断言失败。
 - 修复：content search 测试在缺少 ripgrep 时验证“未找到 ripgrep”降级路径并跳过后续断言（CI 通过 `taiki-e/install-action` 安装 ripgrep，继续覆盖真实搜索）；SDK 依赖测试标记 `#[ignore]`，与同文件另一个真实 Pi 测试一致，由 `--include-ignored` 在装有 SDK 的环境执行。
 - 本地复验：`cargo test` 229 通过 / 0 失败 / 4 ignored；`cargo fmt --check` 与 `clippy -D warnings` 通过。远端 CI 结果待观察。
+- 第二次运行 `9e4ae05`：Rust 测试已通过（ripgrep 安装与 ignore 生效），但 `gitleaks/gitleaks-action@v2` 在下载阶段失败：上游 8.24.3 的 Windows 资产是 `.zip`，action 仍请求 `.tar.gz`，得到 HTTP 404。改为在 workflow 内固定下载 `gitleaks_8.24.3_windows_x64.zip` 并运行 `gitleaks git`，checkout 改为完整历史以便扫描仓库历史。
 
 ## 32. U3/U4 自动化审计
 
