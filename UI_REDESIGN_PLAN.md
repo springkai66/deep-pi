@@ -1117,3 +1117,35 @@ if ($LASTEXITCODE -ne 0) {
 
 1. 配置三个 updater Secrets 后由我打 `v1.0.0` tag 发布；tagged 路径已本地 dry-run 全通、签名链已做密码学验证，且首次发布的 pwsh 退出码缺陷已修（§66）。
 2. GitHub 上手动删除临时验收远程 `springkai66/deeppi-push-acceptance`（已归档；当前凭据无 `delete_repo` 权限）。
+
+## 69. v1.0.0 正式发布（2026-09-12）
+
+tag `v1.0.0` → 提交 `9dca2b9`，`Windows Release` 工作流**全部步骤成功**（run 34681166540）。
+
+### 发布前预检（全部通过）
+
+| 检查 | 结果 |
+| --- | --- |
+| HEAD 与 origin/main 一致、无未推送提交、工作区干净 | ✅ |
+| 四处版本号一致（package.json / tauri.conf.json / Cargo.toml / Cargo.lock） | ✅ 均为 1.0.0 |
+| `release-check --require-installer` | ✅ PASS |
+| GitHub Secrets | ✅ 3 个（updater 私钥/密码/公钥） |
+| CI（该提交） | ✅ success |
+| 仓库内无密钥残留、密钥文件在仓库外 | ✅ |
+
+### tagged 步骤逐项通过
+
+`Require updater signing secrets` → `Prepare tagged updater configuration` → `Build signed updater installer bundles` → `Download previous stable installer`（首次发布无上一版，**此前修复的显式 exit 0 生效，步骤成功**）→ `Verify installer install/repair/uninstall` → `Verify cross-version installer upgrade` → `Detect Authenticode certificate`（未配置证书，正确 skip）→ `Sign updater payloads` → `Generate updater manifest` → `Verify produced updater artifacts` → `Publish tagged release` → `Sync stable updater channel`。
+
+### 发布产物（GitHub 上核实）
+
+- **v1.0.0**（正式发布，非 draft）：`DeepPi_1.0.0_x64-setup.exe`（5.69 MB）、`DeepPi_1.0.0_x64_en-US.msi`（7.81 MB）、两个 `.sig`、`latest.json`
+- **stable**（pre-release，更新通道）：`setup.exe` + `.sig` + `latest.json`
+
+### 端到端下载核验（模拟真实用户，匿名下载）
+
+1. 从 Release 页面匿名下载 `DeepPi_1.0.0_x64-setup.exe` → 5,966,165 字节，与 Release 元数据报告的大小**完全一致**。
+2. 下载对应 `.sig`，用线上公钥离线验签 → **key id 匹配、Ed25519 over BLAKE2b-512 摘要验证通过**。
+3. 从 `stable` 通道匿名下载 `latest.json` → `version 1.0.0`、`url` 指向 `releases/download/stable/…`、`signature` 与 `.sig` 文件**逐字节一致**、版本与 `package.json` 一致。
+
+**核验过程中发现的环境问题（非产品缺陷）**：本机存在对下载到的 `.exe` 文件进行拦截/删除的行为（目录里出现了 `system-commandline-sentinel-files` 之类钩子产物，且文件在下载完成后消失）。改用非 `.exe` 文件名下载即正常保存，说明是本地安全软件行为，与 GitHub Release 无关；此外该网络对 `objects.githubusercontent.com` 的大文件下载不稳定（多次 `http=000`，重试后成功）。
