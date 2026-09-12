@@ -1,89 +1,57 @@
 # DeepPi
 
-Windows 桌面宿主，将 Pi Coding Agent 和 DeepSeek Harness (DSH) 集成到同一应用中：多任务 Pi 终端与 RPC 对话、DSH 原生 Web UI、扩展市场、Provider 与凭据管理、项目文件与 Git 审阅，以及 Pi/DSH 运行时的应用内升级。
+Windows 桌面宿主，把 Pi Coding Agent 和 DeepSeek Harness (DSH) 集成到同一个应用里：并行运行多个 Pi 任务（原生终端或结构化对话）、使用 DSH 原生界面、浏览与编辑项目文件、审阅 Git 变更与提交推送、安装 Pi 扩展、管理模型凭据，并在应用内升级运行时。
+
+不需要预装 Node、Pi 或 DSH —— 运行时由应用自己管理，不与电脑上已安装的环境互相影响。
 
 ## 下载安装
 
-从 [GitHub Releases](https://github.com/springkai66/deep-pi/releases) 下载最新的 `DeepPi_<版本>_x64-setup.exe`（NSIS 安装包）。
+从 [GitHub Releases](https://github.com/springkai66/deep-pi/releases) 下载最新的 `DeepPi_<版本>_x64-setup.exe`（NSIS 安装包），双击安装。
 
-- 系统要求：Windows 10/11 x64；WebView2 由安装包自动下载安装。
+- 系统要求：Windows 10/11 x64。WebView2 由安装包自动下载安装。
 - v1.0.0 安装包尚未做 Authenticode 代码签名，首次运行可能出现 SmartScreen 提示：选择「更多信息」→「仍要运行」。请先核对下载来源。
-- 卸载通过「设置 → 应用」或在安装目录运行卸载程序完成。
+- 卸载：在「设置 → 应用」中卸载，或运行安装目录里的卸载程序。
 
-## 环境（开发）
+## 首次使用
 
-- Windows 10/11
-- Node.js 22+
-- pnpm 10.30.3
-- Rust stable MSVC
-- Microsoft C++ Build Tools
-- Microsoft Edge WebView2
+1. **配置模型凭据**：打开「设置 → 模型与凭据」，填入 Provider 的 API Key（密钥保存在 Windows Credential Manager，不写入配置文件）。
+2. **打开项目**：在左栏点「添加项目目录」选择代码目录。
+3. **新建任务**：点「新建 Pi 任务」创建 Terminal 或对话任务，即可与 Pi 协作。
 
-## 开发
+首次使用某个功能时，应用会按需从官方发行包安装托管运行时（Node、Pi、DSH），安装前的确认框会说明将要下载的版本。
 
-```powershell
-pnpm install --frozen-lockfile --ignore-scripts
-pnpm tauri dev
-```
+## 主要功能
 
-## 检查
-
-```powershell
-pnpm check
-pnpm test
-pnpm build
-pnpm security:audit
-pnpm licenses:check
-```
-
-## 打包
-
-生成 NSIS 安装包：
-
-```powershell
-pnpm tauri build --bundles nsis
-```
-
-生成 NSIS 和 MSI：
-
-```powershell
-pnpm tauri build --bundles nsis,msi
-```
-
-产物位于 `src-tauri/target/release/bundle/`。
-
-只构建应用可执行文件：
-
-```powershell
-pnpm tauri build --no-bundle
-```
-
-这不是完整便携版，仍需要 WebView2 和 Pi/DSH runtime。
-
-## 发布
-
-推送 `v*` tag 后，`.github/workflows/release.yml` 会构建、签名（可选）并发布 Windows 产物，同时同步 `stable` 更新通道。tagged 发布必须配置 Tauri updater signing secrets；Authenticode 证书 secrets 可选，配置后自动启用签名。步骤与密钥生成方式见 [RELEASING.md](./RELEASING.md)。
+- **Pi 任务**：多个任务并行；终端模式与对话模式可随时互相切换，且共享同一会话，不丢上下文。
+- **DSH 工作区**：在同一窗口内加载 DSH 原生 Web UI，会话、设置与插件市场可用。
+- **文件**：文件树、文件名与内容搜索、只读预览、内置编辑器、差异比较与恢复副本。
+- **Git**：变更分类、差异查看、显式暂存/取消暂存、提交、推送与远程核对；不会默认强推。
+- **Pi 扩展**：搜索、安装、更新、卸载 Pi Package，安装前确认来源与版本。
+- **模型凭据**：协议、Base URL、Header、代理与连接测试。
+- **运行时与更新**：应用内升级 Node / Pi / DSH / dshmarket，保留上一版本以便回滚。
 
 ## 已知限制（v1.0）
 
 - 安装包未做 Authenticode 代码签名；开源签名通道申请中。
 - 不读取本机安装的 Pi/DSH/Node/npm；只使用 DeepPi 自带的托管运行时与配置目录（Node 由应用从官方发行包安装并校对 SHA-256）。
 - DSH 固定为已验证的 `0.1.1-rc.2`：上游 0.1.5-rc.1 改变了本地认证方式，适配前不提供升级（界面会说明原因）。
-- DSH 子 Webview 获得焦点时宿主快捷键不生效（见 [KEYBOARD_SHORTCUTS.md](./KEYBOARD_SHORTCUTS.md)）。
-- 文件侧栏的**内容**搜索依赖系统 `PATH` 上的 `rg.exe`（ripgrep）：应用不自带也不自动安装，未安装时该模式会提示「未找到 ripgrep」而文件名搜索不受影响（见 [TROUBLESHOOTING.md](./TROUBLESHOOTING.md)）。
-- DeepPi 应用自身的自动更新管道已配置（updater 签名与 `stable` 通道），但 v1.0.0 是首个版本，跨版本自更新与回滚的真实验证将在下一个版本发布时进行。
+- DSH 子界面获得焦点时，宿主快捷键不生效（见 [KEYBOARD_SHORTCUTS.md](./KEYBOARD_SHORTCUTS.md)）。
+- 文件侧栏的**内容**搜索依赖系统 `PATH` 上的 `rg.exe`（ripgrep）：应用不自带也不自动安装，未安装时该模式会提示「未找到 ripgrep」，文件名搜索不受影响（见 [TROUBLESHOOTING.md](./TROUBLESHOOTING.md)）。
+- DeepPi 自身的自动更新管道已配置，但 v1.0.0 是首个版本，跨版本自更新与回滚的真实验证将在下一个版本发布时进行。
 - 8 小时长稳、超大规模仓库与部分原生交互验收尚未完成（见 [NATIVE_ACCEPTANCE.md](./NATIVE_ACCEPTANCE.md)）。
+
+## 开发
+
+构建、测试与发布流程见 [DEVELOPMENT.md](./DEVELOPMENT.md) 与 [RELEASING.md](./RELEASING.md)。
 
 ## 文档
 
 - [键盘快捷键](./KEYBOARD_SHORTCUTS.md)
+- [疑难排查](./TROUBLESHOOTING.md)
 - [Pi RPC 兼容基线](./RPC_COMPATIBILITY.md)
-- [原生验收清单](./NATIVE_ACCEPTANCE.md)
+- [安全说明](./SECURITY.md)
 - [发布流程](./RELEASING.md)
 - [English README](./README.en.md)
-- [Security](./SECURITY.md)
-- [Troubleshooting](./TROUBLESHOOTING.md)
-- [UI 重设计计划与实施记录](./UI_REDESIGN_PLAN.md)
 
 ## 许可证
 

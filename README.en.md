@@ -1,89 +1,57 @@
 # DeepPi
 
-A Windows desktop host that brings Pi Coding Agent and DeepSeek Harness (DSH) into one application: parallel Pi terminal and RPC sessions, the native DSH Web UI, a Pi package marketplace, provider and credential management, project files with Git review, and in-app runtime upgrades for Pi and DSH.
+A Windows desktop host that brings Pi Coding Agent and DeepSeek Harness (DSH) into one application: run several Pi tasks in parallel (native terminal or structured chat), use the native DSH UI, browse and edit project files, review Git changes and commit/push, install Pi extensions, manage model credentials, and upgrade the runtimes in-app.
+
+No need to install Node, Pi, or DSH beforehand — DeepPi manages its own runtimes and does not interfere with anything already installed on the machine.
 
 ## Download and install
 
-Download the latest `DeepPi_<version>_x64-setup.exe` (NSIS) from [GitHub Releases](https://github.com/springkai66/deep-pi/releases).
+Download the latest `DeepPi_<version>_x64-setup.exe` (NSIS) from [GitHub Releases](https://github.com/springkai66/deep-pi/releases) and run it.
 
-- Requires Windows 10/11 x64; WebView2 is installed by the setup bootstrapper.
+- Requires Windows 10/11 x64. WebView2 is installed by the setup bootstrapper.
 - The v1.0.0 installer is not Authenticode-signed yet. Windows SmartScreen may warn on first launch: choose "More info" → "Run anyway", after verifying the download source.
-- Uninstall from "Settings → Apps" or the uninstaller in the install directory.
+- Uninstall from "Settings → Apps", or run the uninstaller in the install directory.
 
-## Requirements (development)
+## Getting started
 
-- Windows 10/11
-- Node.js 22+
-- pnpm 10.30.3
-- Stable Rust MSVC toolchain
-- Microsoft C++ Build Tools
-- Microsoft Edge WebView2
+1. **Add model credentials** — open "Settings → Models & credentials" and enter your provider API key (keys are kept in Windows Credential Manager, never written to a config file).
+2. **Open a project** — click "Add project directory" in the left rail and pick a code directory.
+3. **Start a task** — click "New Pi task" to create a terminal or chat task and start working with Pi.
 
-## Development
+The managed runtimes (Node, Pi, DSH) are installed on demand from official distributions the first time a feature needs them; the confirmation dialog states which version will be downloaded.
 
-```powershell
-pnpm install --frozen-lockfile --ignore-scripts
-pnpm tauri dev
-```
+## Features
 
-## Checks
-
-```powershell
-pnpm check
-pnpm test
-pnpm build
-pnpm security:audit
-pnpm licenses:check
-```
-
-## Build
-
-Build an NSIS installer:
-
-```powershell
-pnpm tauri build --bundles nsis
-```
-
-Build NSIS and MSI installers:
-
-```powershell
-pnpm tauri build --bundles nsis,msi
-```
-
-Artifacts are written to `src-tauri/target/release/bundle/`.
-
-Build the application executable without an installer:
-
-```powershell
-pnpm tauri build --no-bundle
-```
-
-This is not a fully self-contained portable build; WebView2 and the Pi/DSH runtimes are still required.
-
-## Release
-
-Push a `v*` tag to run `.github/workflows/release.yml`, which builds, signs (optional) and publishes the Windows artifacts and syncs the `stable` updater channel. Tagged releases require the Tauri updater signing secrets; Authenticode certificate secrets are optional and enable signing automatically. See [RELEASING.md](./RELEASING.md).
+- **Pi tasks** — several tasks in parallel; terminal and chat modes can be switched at any time and share the same session, so context is never lost.
+- **DSH workspace** — the native DSH Web UI loaded in the same window, with sessions, settings, and the plugin marketplace.
+- **Files** — file tree, file-name and content search, read-only preview, built-in editor, diff comparison, and recovery copies.
+- **Git** — change classification, diff view, explicit stage/unstage, commit, push, and remote verification; never force-pushes by default.
+- **Pi extensions** — search, install, update, and uninstall Pi packages, confirming the source and version first.
+- **Model credentials** — protocol, base URL, headers, proxy, and connection test.
+- **Runtimes & updates** — upgrade Node / Pi / DSH / dshmarket in-app, keeping the previous version for rollback.
 
 ## Known limitations (v1.0)
 
 - The installer is not Authenticode-signed yet; an open-source signing application is in progress.
 - Local Pi/DSH/Node/npm installations are not read; DeepPi only uses its own managed runtimes and configuration directory (Node is installed by the app from the official distribution and verified against SHA-256).
 - DSH is pinned to the verified `0.1.1-rc.2`: upstream 0.1.5-rc.1 changed local authentication, so upgrades are withheld until adapted (the UI explains why).
-- Host shortcuts do not work while the DSH child Webview has focus (see [KEYBOARD_SHORTCUTS.md](./KEYBOARD_SHORTCUTS.md)).
+- Host shortcuts do not work while the DSH child view has focus (see [KEYBOARD_SHORTCUTS.md](./KEYBOARD_SHORTCUTS.md)).
 - **Content** search in the file sidebar depends on `rg.exe` (ripgrep) being available on the system `PATH`: DeepPi neither bundles nor auto-installs it, and shows a "ripgrep not found" message in that mode when it is missing (file-name search is unaffected; see [TROUBLESHOOTING.md](./TROUBLESHOOTING.md)).
-- The DeepPi self-update pipeline is configured (updater signature and `stable` channel), but v1.0.0 is the first release; real cross-version self-update and rollback will be validated when the next version ships.
+- The DeepPi self-update pipeline is configured, but v1.0.0 is the first release; real cross-version self-update and rollback will be validated when the next version ships.
 - The 8-hour soak, very large repositories and parts of the native interaction acceptance are still open (see [NATIVE_ACCEPTANCE.md](./NATIVE_ACCEPTANCE.md)).
+
+## Development
+
+Build, test, and release procedures are documented in [DEVELOPMENT.md](./DEVELOPMENT.md) and [RELEASING.md](./RELEASING.md).
 
 ## Documentation
 
 - [Keyboard shortcuts](./KEYBOARD_SHORTCUTS.md)
+- [Troubleshooting](./TROUBLESHOOTING.md)
 - [Pi RPC compatibility baseline](./RPC_COMPATIBILITY.md)
-- [Native acceptance checklist](./NATIVE_ACCEPTANCE.md)
+- [Security](./SECURITY.md)
 - [Release process](./RELEASING.md)
 - [中文 README](./README.md)
-- [Security](./SECURITY.md)
-- [Troubleshooting](./TROUBLESHOOTING.md)
-- [UI redesign plan and records](./UI_REDESIGN_PLAN.md)
 
 ## License
 
