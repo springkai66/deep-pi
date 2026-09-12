@@ -10,7 +10,7 @@ DeepPi 的第一个稳定版本：在同一个 Windows 桌面应用中使用 Pi 
 - **Git 审阅**：状态分类、差异查看、显式暂存/取消暂存、提交与推送，不默认强推。
 - **Pi 扩展市场**：搜索、安装、更新与卸载 Pi Package，安装前确认来源。
 - **Provider 与凭据**：协议、Base URL、Header、代理与连接测试，密钥保存在 Windows Credential Manager。
-- **运行时升级**：应用内升级 Pi/DSH/dshmarket，失败可回滚。
+- **运行时升级**：应用内升级 Node.js / Pi / DSH 与 dshmarket，激活后保留上一版本，失败或想回退时可一键回滚（回退深度为一级：只记录「上一活跃版本」）。
 
 ## 安装
 
