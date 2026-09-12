@@ -59,11 +59,20 @@ if (tauri) {
 
 // 版本号散在三个清单里；升版本时漏改其中一处，会让安装包与包元数据版本不一致
 // （updater 会拿 package.json 的版本去比对 latest.json），所以在发布检查里直接卡住。
+// `Cargo.lock` 也带版本：`cargo build` 会自动把它改成 Cargo.toml 的值，如果忘了提交，
+// 下次 CI 会以脏工作区构建或产生额外 diff，因此一并校验。
 const cargoVersion = /^version\s*=\s*["']([^"']+)["']/m.exec(cargoToml)?.[1];
+const cargoLockPath = join(root, "src-tauri", "Cargo.lock");
+// 注意：仓库里 Cargo.lock 是 CRLF（Windows 检出），所以不能用 `\n` 锚定行尾，
+// 否则在本地能跑、在 CI（LF 检出）或反之会静默取不到版本。
+const cargoLockVersion = existsSync(cargoLockPath)
+  ? /\[\[package\]\]\r?\nname = "deeppi"\r?\nversion = "([^"]+)"/.exec(readFileSync(cargoLockPath, "utf8"))?.[1]
+  : undefined;
 const versionSources = {
   "package.json": packageJson?.version,
   "src-tauri/tauri.conf.json": tauri?.version,
   "src-tauri/Cargo.toml": cargoVersion,
+  "src-tauri/Cargo.lock": cargoLockVersion,
 };
 const declaredVersions = new Set(Object.values(versionSources).filter(Boolean));
 if (Object.values(versionSources).some((value) => !value)) {
