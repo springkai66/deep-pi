@@ -119,6 +119,8 @@ odeersions\…` 下新装的那一个。**注**：Pi/DSH 只是依赖 Node 而�
   - 进程数稳定为 7（应用 + WebView2 子进程），退出后脚本对采样到的进程树断言无残留 —— 未报清理错误，且事后复查 `deeppi` 进程与指向 `com.deeppi.desktop` 的 node 进程数均为 **0**。
   - 原始数据：`artifacts/perf-soak-45min.json`（`artifacts/` 已被 gitignore，仅作本机证据）。
 - [ ] **完整 8 小时长稳**（`pnpm perf:soak`，默认 28800 秒）仍待执行——45 分钟只能排除「快速泄漏/空转占用」，不能替代 8 小时；本项保持未勾选。
+  - 进行中：08:49 首次启动，11:17 被中断（原因见下），11:18 已重新启动，预计 19:18 完成。
+  - **重要操作约束**：跑长稳期间**不能执行安装/卸载或 `installer:smoke`**。Tauri 生成的 NSIS 脚本含 `CheckIfAppIsRunning "${MAINBINARYNAME}.exe"`，安装器会把正在运行的 `deeppi.exe` 结束掉——实测一次 `installer:smoke`（为演练跨版本升级）就把运行了 2.5 小时的 soak 进程杀掉了。这条对后续任何「一边长稳一边验收」的安排都适用：长稳必须独占运行中的实例。
 
 ## 回报方式
 

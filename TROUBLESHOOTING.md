@@ -182,3 +182,12 @@ pnpm tauri build --bundles msi
 ```
 
 GitHub runner 直连正常，CI 与 Release workflow 无需该步骤。
+
+## 长稳测试期间不要安装或卸载 DeepPi
+
+`pnpm perf:soak` 需要独占一个正在运行的 `deeppi.exe`。而 Tauri 生成的 NSIS 安装脚本包含 `CheckIfAppIsRunning "${MAINBINARYNAME}.exe"`，安装/卸载（包括 `pnpm installer:smoke`）会去结束正在运行的同名进程——实测一次 installer-smoke 直接把已跑 2.5 小时的长稳进程杀掉了，长稳结果作废且不会生成 JSON。
+
+- 跑长稳期间不要执行：安装/修复/卸载、`pnpm installer:smoke`、跨版本升级演练。
+- 长稳结束后脚本会自己结束进程并断言进程树无残留，届时再做安装类验收。
+- 如果确实需要同时进行，请在另一台机器或另一个用户会话中跑长稳。
+
