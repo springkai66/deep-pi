@@ -21,17 +21,33 @@ DeepPi 是 MIT 许可证的公开仓库，符合 SignPath Foundation 的申请�
 - **Maintainer**: springkai66 `<填写你的姓名/邮箱，用于申请审核>`
 - **Additional information**: `<可补充：项目用途、目标用户、下载渠道（GitHub Releases）、是否有公司实体等>`
 
+### 资格自查（2026-09 按官方条款核对，已逐项确认）
+
+SignPath Foundation 对 OSS 项目的硬性条件与 DeepPi 的实际情况：
+
+| 条件 | DeepPi 现状 |
+| --- | --- |
+| OSI 认可的开源许可证、无商业双许可 | MIT（根目录 `LICENSE`、`package.json`、`Cargo.toml` 三处一致，`pnpm licenses:check` 通过） |
+| 源码在公开仓库 | 公开仓库 `springkai66/deep-pi`（已确认 `public`、未归档） |
+| 分发包可免费下载 | GitHub Releases 免费下载 |
+| 由 CI 构建（不得本地手搓产物送签） | `windows-latest` 上的 `.github/workflows/release.yml`，由 `v*` tag 触发，产物经 `release-check` 校验 |
+| 无恶意/PUP 行为 | 应用不收集数据、不上传遥测；凭据存 Windows Credential Manager 且不进日志 |
+| 证书签发给 SignPath Foundation（其作为 publisher） | 需接受；这属于该计划的既有规则 |
+
 ### 申请与接入步骤
 
-1. 注册 [SignPath.io](https://signpath.io/) 账号，提交上述开源申请。
+1. 打开 <https://signpath.io/product/open-source>（或 <https://signpath.org/apply.html>）提交开源申请；审核通常 1–3 个工作日。
 2. 审核通过后安装 SignPath GitHub App，并在 SignPath 中创建 DeepPi 项目与签名策略（release signing policy）。
 3. 接入 CI：把 `release.yml` 中现有的 `signtool` 步骤替换为 SignPath 的签名 Action（或把待签文件作为 artifact 交给 SignPath 签名后再上传），其余流程不变。
 4. 在 Release 页面更新说明，去掉 SmartScreen 提示，并补发签名版安装包。
 
 ## 备选路径
 
-- **Azure Trusted Signing**：约 $9.99/月，需要 Azure 订阅与身份验证，审核 1-2 周；接入方式与 PFX 相同（配置 `DEEPPI_WINDOWS_CERTIFICATE_BASE64` / `_PASSWORD` 两个 Secrets）。
-- **商业 CA 的 OV/EV 证书**（DigiCert、Sectigo、SSL.com 等）：OV 约 $200-600/年，需要组织实体与电话回拨，签发 1-5 个工作日；个人身份通常无法申请，建议优先前两者。
+以下信息按 2026-09 的公开资料核对，申请前请再确认一次最新政策。
+
+- **Azure Trusted Signing（现名 Azure Artifact Signing）**：约 $9.99/月。**但存在地区限制——组织仅限美国、加拿大、欧盟、英国，个人开发者仅限美国与加拿大。中国大陆的个人开发者不符合条件**（微软官方在受限地区会把个人导向 OV 证书）。因此本路径对当前维护者**不可用**。
+- **商业 CA 的 OV/EV 证书**（DigiCert、Sectigo、SSL.com 等）：OV 约 $200-600/年。多数 CA 要求**组织实体**与电话回拨，个人身份通常无法申请；若无公司实体，这条路也可能走不通。
+- **结论**：对个人维护者的中国大陆主体，**SignPath Foundation（开源免费）是唯一现实可行的路径**，应作为主攻方向；若将来有公司实体，再考虑 OV。
 
 ## 完成标准
 
