@@ -1114,5 +1114,6 @@ if ($LASTEXITCODE -ne 0) {
 - 「8 小时长稳」：45 分钟实测已记录（工作集 400–404 MB 平稳、空闲 CPU ≈0.08%、退出无残留），**8 小时整跑进行中**（08:49 启动，预计 16:49 完成）。
 
 **仍待用户操作的两件事**（与工程无关）：
+
 1. 配置三个 updater Secrets 后由我打 `v1.0.0` tag 发布；tagged 路径已本地 dry-run 全通、签名链已做密码学验证，且首次发布的 pwsh 退出码缺陷已修（§66）。
 2. GitHub 上手动删除临时验收远程 `springkai66/deeppi-push-acceptance`（已归档；当前凭据无 `delete_repo` 权限）。
