@@ -130,6 +130,10 @@ pub(crate) fn excluded_directory(name: &str) -> bool {
             | ".next"
             | ".venv"
             | "__pycache__"
+            // 开发时 DeepPi 自己的运行时剖面（`.deeppi-runtime/`）会落在仓库里，
+            // 里面有 node_modules 与配置文件；不排除会在“用 DeepPi 开发 DeepPi”时
+            // 把运行时内部文件混进文件树与搜索结果。
+            | ".deeppi-runtime"
     )
 }
 
@@ -761,6 +765,42 @@ pub fn cancel_project_search(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn excludes_build_and_runtime_directories_case_insensitively() {
+        // 这些目录要么是构建产物、要么是依赖树，混进文件树与搜索都只是噪音；
+        // `.deeppi-runtime` 是开发时 DeepPi 自己的运行时剖面（“用 DeepPi 开发 DeepPi”
+        // 会把它放在仓库里），也必须排除。
+        for name in [
+            ".git",
+            "node_modules",
+            "target",
+            "build",
+            "dist",
+            ".svelte-kit",
+            ".next",
+            ".venv",
+            "__pycache__",
+            ".deeppi-runtime",
+        ] {
+            assert!(excluded_directory(name), "{name} should be excluded");
+            assert!(
+                excluded_directory(&name.to_uppercase()),
+                "{name} matched case-insensitively"
+            );
+        }
+        // 正常源码目录不能误伤。
+        for name in [
+            "src",
+            "src-tauri",
+            "scripts",
+            "tests",
+            "artifacts",
+            "deeppi-runtime",
+        ] {
+            assert!(!excluded_directory(name), "{name} must stay visible");
+        }
+    }
 
     #[test]
     fn rejects_unsafe_relative_paths() {
