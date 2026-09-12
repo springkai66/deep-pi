@@ -503,8 +503,17 @@ mod tests {
         })
         .unwrap();
 
-        // 排空建库后可能残留的事件。
-        while receiver.try_recv().is_ok() {}
+        // 排空建库后残留的事件。watcher 按 1 秒定时批量上报，建库（init/add/commit）
+        // 产生的突发事件可能在第一次排空之后才到达；因此等到「连续一段时间没有新事件」
+        // 再继续，否则这条断言会与被测行为无关的建库事件竞争而随机失败。
+        let quiet_since = std::time::Instant::now();
+        while quiet_since.elapsed() < Duration::from_secs(2) {
+            match receiver.recv_timeout(Duration::from_millis(250)) {
+                Ok(_) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
 
         // 复刻 DeepPi 的事务写法（GIT_INDEX_FILE 指向 .git/deeppi-index-* 下的临时索引，
         // 并用 write-tree 产出对象）：这些写入都属于「应用自己造成」的，

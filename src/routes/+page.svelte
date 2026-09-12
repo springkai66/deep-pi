@@ -47,6 +47,7 @@
   import TaskSidebar from "$lib/TaskSidebar.svelte";
   import TaskTabs from "$lib/TaskTabs.svelte";
   import type { RuntimeComponent, RuntimeUpdate } from "$lib/runtime";
+  import { SNOOZE_DURATION_MS } from "$lib/runtime";
   import {
     DEFAULT_APP_SETTINGS,
     cssFontFamily,
@@ -427,7 +428,7 @@
       ...settings,
       snoozedUpdates: {
         ...settings.snoozedUpdates,
-        [update.id]: Date.now() + 24 * 60 * 60 * 1000,
+        [update.id]: Date.now() + SNOOZE_DURATION_MS,
       },
     });
   }

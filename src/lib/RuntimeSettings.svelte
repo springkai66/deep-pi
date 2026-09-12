@@ -2,6 +2,7 @@
   import type { AppSettings } from "./settings";
   import type { AppUpdateState } from "./app-update";
   import type { RuntimeComponent, RuntimeUpdate } from "./runtime";
+  import { updateActionsVisible, updateSuppressed } from "./runtime";
   import type { OperationState } from "./operation";
   export interface RuntimeSettingsProps {
     settings: AppSettings;
@@ -60,8 +61,7 @@
   {:else}
     {#each runtimes as runtime (runtime.id)}
       {@const update = updates.find((candidate) => candidate.id === runtime.id)}
-      {@const skipped = Boolean(update?.latestVersion && settings.skippedUpdates[runtime.id] === update.latestVersion)}
-      {@const snoozed = Boolean(update && (settings.snoozedUpdates[runtime.id] ?? 0) > Date.now())}
+      {@const { skipped, snoozed } = updateSuppressed(update, runtime.id, settings.skippedUpdates, settings.snoozedUpdates)}
       <div class="setting-control">
         <span class="setting-copy"><strong>{runtime.name}</strong><small>{sourceLabels[runtime.source]} · {runtime.currentVersion ?? "未安装"}</small></span>
         <div class="runtime-actions">
@@ -74,7 +74,7 @@
             {:else if update?.updateAvailable}可更新 · {update.latestVersion}
             {:else if update?.latestVersion}最新{:else}未检查{/if}
           </span>
-          {#if update?.latestVersion && update.installable && !skipped && !snoozed}
+          {#if updateActionsVisible(update, skipped, snoozed)}
             {#if update.updateAvailable}
               <button type="button" class="quiet-button" disabled={busyRuntime !== null} onclick={() => onUpdateRuntime(update)}>{runtime.currentVersion ? "更新" : "安装"}</button>
               <button type="button" class="quiet-button" onclick={() => onSnoozeRuntime(update)}>稍后</button>
