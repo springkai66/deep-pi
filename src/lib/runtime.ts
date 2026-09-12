@@ -31,16 +31,19 @@ export const SNOOZE_DURATION_MS = 24 * 60 * 60 * 1000;
  * - 稍后提醒：带过期时间，过期后自动重新提示。
  * - 两者都依赖 `latestVersion`：没有已知新版本时不抑制任何东西。
  */
-export function updateSuppressed(
-  update: Pick<RuntimeUpdate, "latestVersion"> | undefined,
-  componentId: string,
-  skippedUpdates: Record<string, string>,
-  snoozedUpdates: Record<string, number>,
-  now: number = Date.now(),
-): { skipped: boolean; snoozed: boolean; suppressed: boolean } {
-  const latest = update?.latestVersion ?? null;
-  const skipped = Boolean(latest && skippedUpdates[componentId] === latest);
-  const snoozed = Boolean(latest && (snoozedUpdates[componentId] ?? 0) > now);
+export interface SuppressionInput {
+  componentId: string;
+  update: Pick<RuntimeUpdate, "latestVersion"> | undefined;
+  skippedUpdates: Record<string, string>;
+  snoozedUpdates: Record<string, number>;
+  /** 可注入的「当前时间」，便于测试稍后提醒的过期行为。 */
+  now?: number;
+}
+
+export function updateSuppressed(input: SuppressionInput): { skipped: boolean; snoozed: boolean; suppressed: boolean } {
+  const latest = input.update?.latestVersion ?? null;
+  const skipped = Boolean(latest && input.skippedUpdates[input.componentId] === latest);
+  const snoozed = Boolean(latest && (input.snoozedUpdates[input.componentId] ?? 0) > (input.now ?? Date.now()));
   return { skipped, snoozed, suppressed: skipped || snoozed };
 }
 

@@ -61,7 +61,7 @@
   {:else}
     {#each runtimes as runtime (runtime.id)}
       {@const update = updates.find((candidate) => candidate.id === runtime.id)}
-      {@const { skipped, snoozed } = updateSuppressed(update, runtime.id, settings.skippedUpdates, settings.snoozedUpdates)}
+      {@const { skipped, snoozed } = updateSuppressed({ componentId: runtime.id, update, skippedUpdates: settings.skippedUpdates, snoozedUpdates: settings.snoozedUpdates })}
       <div class="setting-control">
         <span class="setting-copy"><strong>{runtime.name}</strong><small>{sourceLabels[runtime.source]} · {runtime.currentVersion ?? "未安装"}</small></span>
         <div class="runtime-actions">

@@ -10,24 +10,24 @@ const update = (patch: Partial<RuntimeUpdate> = {}): RuntimeUpdate => ({
 describe("runtime update suppression", () => {
   it("suppresses only the exact skipped version, so a newer release re-surfaces", () => {
     const skipped = { pi: "0.85.1" };
-    expect(updateSuppressed(update(), "pi", skipped, {})).toEqual({ skipped: true, snoozed: false, suppressed: true });
+    expect(updateSuppressed({ componentId: "pi", update: update(), skippedUpdates: skipped, snoozedUpdates: {} })).toEqual({ skipped: true, snoozed: false, suppressed: true });
     // 上游发布更新的版本后必须重新提示，否则用户会被永久静音。
-    expect(updateSuppressed(update({ latestVersion: "0.86.0" }), "pi", skipped, {}).skipped).toBe(false);
+    expect(updateSuppressed({ componentId: "pi", update: update({ latestVersion: "0.86.0" }), skippedUpdates: skipped, snoozedUpdates: {} }).skipped).toBe(false);
     // 跳到的是别的组件时不影响本组件。
-    expect(updateSuppressed(update(), "dsh", skipped, {}).skipped).toBe(false);
+    expect(updateSuppressed({ componentId: "dsh", update: update(), skippedUpdates: skipped, snoozedUpdates: {} }).skipped).toBe(false);
   });
 
   it("treats snooze as time-bounded and expires it", () => {
     const now = 1_000_000;
     const snoozed = { pi: now + SNOOZE_DURATION_MS };
-    expect(updateSuppressed(update(), "pi", {}, snoozed, now).snoozed).toBe(true);
-    expect(updateSuppressed(update(), "pi", {}, snoozed, now + SNOOZE_DURATION_MS + 1).snoozed).toBe(false);
+    expect(updateSuppressed({ componentId: "pi", update: update(), skippedUpdates: {}, snoozedUpdates: snoozed, now }).snoozed).toBe(true);
+    expect(updateSuppressed({ componentId: "pi", update: update(), skippedUpdates: {}, snoozedUpdates: snoozed, now: now + SNOOZE_DURATION_MS + 1 }).snoozed).toBe(false);
   });
 
   it("does not suppress anything without a known latest version", () => {
     const unknown = update({ latestVersion: null, updateAvailable: false });
-    expect(updateSuppressed(unknown, "pi", { pi: "" }, { pi: 9e15 })).toEqual({ skipped: false, snoozed: false, suppressed: false });
-    expect(updateSuppressed(undefined, "pi", { pi: "" }, { pi: 9e15 }).suppressed).toBe(false);
+    expect(updateSuppressed({ componentId: "pi", update: unknown, skippedUpdates: { pi: "" }, snoozedUpdates: { pi: 9e15 } })).toEqual({ skipped: false, snoozed: false, suppressed: false });
+    expect(updateSuppressed({ componentId: "pi", update: undefined, skippedUpdates: { pi: "" }, snoozedUpdates: { pi: 9e15 } }).suppressed).toBe(false);
   });
 
   it("reports whether the update/install/repair entry should be visible", () => {
