@@ -1084,3 +1084,18 @@ if ($LASTEXITCODE -ne 0) {
 - 同时确认 `--bundles nsis,msi` 会为**两个**安装包都产出 `.sig`（NSIS 与 MSI），与发布步骤的 glob 完全对应；`latest.json` 的 `signature` 字段与 `.sig` 文件内容逐字节一致、`url` 为 `https://github.com/springkai66/deep-pi/releases/download/stable/DeepPi_1.0.0_x64-setup.exe`、`version` 为 `1.0.0`、`notes` 取自 `DEEPPI_RELEASE_NOTES`。
 
 验证后已删除测试密钥、`.sig` 与 `latest.json`，并**重新构建未签名正式 bundle**（`release-check --require-installer` 与 `installer:smoke` 再次 PASS），工作区干净。
+
+## 67. 真实远程推送验收（U4 最后一项，已完成）
+
+2026-09-12（本地时间，debug 构建，CDP 驱动 + GitHub API 独立核对）：
+
+验收清单明确要求「真实远程推送」且**不以本地 bare remote 代替**。此前只能证明本地裸仓库，本轮补上真实远程：
+
+- 在 GitHub 上新建专用远程 `springkai66/deeppi-push-acceptance`（临时夹具，非用户仓库），夹具仓库以该 SSH 地址为 origin。
+- 全流程走应用界面：读取状态（未暂存 1 → 「暂存 notes.txt」→ 填提交说明 → 「审阅暂存」显示 1 个暂存路径/作者/未启用签名 → 「提交」得 `540188c`、面板「领先 1」）。
+- 「加载远程」正确列出 `origin · git@github.com:springkai66/deeppi-push-acceptance.git`；选中后「推送」显示「远程已接受所选提交。540188c1a397 refs/heads/main」。
+- 「核对远程结果」显示「远程当前公布的目标指向本次推送提交 540188c1a397」；「同步跟踪引用」显示「本次跟踪引用已同步」，随后 leading/behind 归零。
+- **独立只读核对**：用 GitHub API 查询该远端仓库 commit 列表，返回 `540188c acceptance: push to real GitHub remote`（作者 DeepPi Acceptance）——确认提交确实到达远端，而不是本地自证。证据截图 `artifacts/accept-y/01-real-remote-push.png`。
+- 结论：U4 的「真实远程推送 + 只读核对远端结果」在原生层通过；连同此前的**非快进拒绝且远端未被覆盖**（§52），U4 的推送安全路径完整覆盖。
+
+遗留（需用户一步操作）：临时远程仓库已**归档**（写操作被阻断），但当前凭据无 `delete_repo` 权限，无法代为删除；请在 GitHub 删除 `springkai66/deeppi-push-acceptance`。仓库内只有两个夹具提交，不含凭据或私有数据。

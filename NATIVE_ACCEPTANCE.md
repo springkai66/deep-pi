@@ -72,7 +72,7 @@ pnpm tauri build --debug --no-bundle
 - [x] 首次操作弹出原生信任确认（自动验证 2026-09-11：出现原生对话框，回车确认后正常读取）；取消后不执行 Git 命令仍待人工。
 - [x] 提交后工作树与索引保持不变（除预期的提交结果）；提交信息与作者正确。（自动验证 2026-09-11：提交后磁盘仅多出提交 `772f63d acceptance: commit staged file`，`c.txt` 仍为未跟踪、已暂存列表清空；预览显示作者行为仓库配置的 `DeepPi Acceptance <acceptance@localhost>`，提交信息与输入完全一致。）
 - [x] 推送显示远程和目标分支；非快进被拒绝且不覆盖远端；不会默认强推。（自动验证 2026-09-11：推送前需显式选择目的地，面板显示「远程目的地 origin · <路径>」「目标分支 refs/heads/main」与源提交；第三方克隆制造分叉后推送被拒，界面提示「远程拒绝推送，请检查非快进、分支保护或服务器策略；未强推」，裸仓库目标分支仍停在被拒前的提交，未被覆盖。）
-- [ ] 使用获准的测试远程（例如你自有的 GitHub 空仓库）完成一次真实推送，并只读核对远端结果。**本项不以本地 bare remote 代替。**
+- [x] 使用获准的测试远程（例如你自有的 GitHub 空仓库）完成一次真实推送，并只读核对远端结果。（自动验证 2026-09-12：在 GitHub 上新建**真实远程** `springkai66/deeppi-push-acceptance`（已加说明「Temporary bare remote…safe to delete」），夹具仓库以 `git@github.com:…` 为 origin。全程走应用界面：读取状态（未暂存 1）→「暂存 notes.txt」→ 填写提交说明 →「审阅暂存」（显示 1 个暂存路径、作者、未启用签名）→「提交」得到 `540188c`、面板显示「领先 1」→「加载远程」列出目的地 `origin · git@github.com:springkai66/deeppi-push-acceptance.git` →「推送」显示「远程已接受所选提交。540188c1a397 refs/heads/main」→「核对远程结果」显示「远程当前公布的目标指向本次推送提交 540188c1a397」→「同步跟踪引用」显示「本次跟踪引用已同步」，随后侧栏领先/落后归零。**只读核对远端**：用 GitHub API 独立查询该仓库 commit 列表，返回 `540188c acceptance: push to real GitHub remote`（作者 DeepPi Acceptance）——确认提交真的落在远端，非本地自证。证据截图 `artifacts/accept-y/01-real-remote-push.png`。**说明**：这是为本项验收专门创建的临时远程仓库（不使用你已有的仓库）。验收后已把它**归档**（推送被阻断、内容只读）——当前凭据没有 `delete_repo` 权限所以无法代为删除，**需要你在 GitHub 上手动删除** `springkai66/deeppi-push-acceptance`（或其 Settings 页里的 Delete this repository）。仓库内容仅有两个夹具提交（`initial`、`acceptance: push to real GitHub remote`），无任何凭据或私有数据。）
 
 ## U5 内置编辑与恢复副本
 
