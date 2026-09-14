@@ -321,10 +321,30 @@ fn configured_update_proxy() -> Result<Option<String>, String> {
     Ok(None)
 }
 
-fn latest_package_version(package: &str, proxy: Option<&str>) -> Result<String, String> {
+/// npm 官方 registry 与国内镜像（npmmirror，元数据与包文件与官方同步）。
+/// 官方源不可达时自动回落镜像，避免安装卡在“查询官方 registry”。
+const REGISTRY_OFFICIAL: &str = "https://registry.npmjs.org";
+const REGISTRY_MIRROR: &str = "https://registry.npmmirror.com";
+
+/// Node 发行包镜像（npmmirror 托管同一份文件，SHA-256 校验仍然生效）。
+const NODE_DIST_MIRROR: &str = "https://npmmirror.com/mirrors/node";
+
+fn registry_alternate(registry: &str) -> &'static str {
+    if registry == REGISTRY_OFFICIAL {
+        REGISTRY_MIRROR
+    } else {
+        REGISTRY_OFFICIAL
+    }
+}
+
+fn fetch_latest_from_registry(
+    registry: &str,
+    package: &str,
+    proxy: Option<&str>,
+) -> Result<String, String> {
     let encoded = package.replace('/', "%2f");
     let mut config = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(15)))
+        .timeout_global(Some(Duration::from_secs(10)))
         .http_status_as_error(false);
     if let Some(proxy) = proxy {
         let proxy =
@@ -333,7 +353,7 @@ fn latest_package_version(package: &str, proxy: Option<&str>) -> Result<String, 
     }
     let agent = config.build().new_agent();
     let mut response = agent
-        .get(&format!("https://registry.npmjs.org/{encoded}"))
+        .get(&format!("{registry}/{encoded}"))
         .call()
         .map_err(|error| format!("update check failed: {error}"))?;
     let status = response.status().as_u16();
@@ -356,6 +376,22 @@ fn latest_package_version(package: &str, proxy: Option<&str>) -> Result<String, 
         .filter(|version| valid_package_version(version))
         .ok_or_else(|| "update response has no valid latest version".to_string())?;
     Ok(version.to_owned())
+}
+
+/// 查询包的最新版本：先试官方 registry，失败时回落 npmmirror 镜像。
+/// 返回 `(版本, 实际使用的 registry)`，安装时优先走同一来源。
+fn latest_package_version(
+    package: &str,
+    proxy: Option<&str>,
+) -> Result<(String, &'static str), String> {
+    let mut errors = Vec::new();
+    for registry in [REGISTRY_OFFICIAL, REGISTRY_MIRROR] {
+        match fetch_latest_from_registry(registry, package, proxy) {
+            Ok(version) => return Ok((version, registry)),
+            Err(error) => errors.push(format!("{registry}: {error}")),
+        }
+    }
+    Err(errors.join("；"))
 }
 
 fn version_parts(version: &str) -> Option<([u64; 3], Option<&str>)> {
@@ -508,10 +544,13 @@ fn ensure_runtime_idle(
 }
 
 /// 只用托管 Node 自带的 npm；不回落到电脑上全局安装的 npm。
-fn npm_install(
+/// `registry` 为空时使用 npm 默认源；安装失败时由 [`npm_install_with_fallback`]
+/// 自动切换到另一个源重试。
+fn npm_install_with_registry(
     paths: &AppPaths,
     prefix: &Path,
     spec: &str,
+    registry: Option<&str>,
     cancellation: &Cancellation,
 ) -> Result<(), String> {
     let prefix = prefix.to_string_lossy().into_owned();
@@ -535,7 +574,11 @@ fn npm_install(
             "--fetch-retries=2",
         ])
         .arg("--cache")
-        .arg(&npm_cache)
+        .arg(&npm_cache);
+    if let Some(registry) = registry {
+        command.arg("--registry").arg(registry);
+    }
+    command
         .arg(spec)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -560,6 +603,31 @@ fn npm_install(
     }
     let details = output.text();
     Err(format!("runtime installation failed: {details}"))
+}
+
+/// 安装 npm 包：优先使用指定 registry，失败后自动换另一个源重试一次。
+/// 官方 registry 在部分网络下不可达或极慢，这是“一直卡在查询/下载”的根因；
+/// npmmirror 与官方同步，切换后重装通常能立即成功。
+fn npm_install_with_fallback(
+    paths: &AppPaths,
+    prefix: &Path,
+    spec: &str,
+    preferred: Option<&str>,
+    cancellation: &Cancellation,
+) -> Result<(), String> {
+    let (first, second) = match preferred {
+        Some(registry) => (Some(registry), Some(registry_alternate(registry))),
+        None => (None, Some(REGISTRY_MIRROR)),
+    };
+    match npm_install_with_registry(paths, prefix, spec, first, cancellation) {
+        Ok(()) => Ok(()),
+        Err(first_error) => {
+            log::warn!("event=npm_install status=fallback reason=\"{first_error}\"");
+            // 失败的 staging 目录由调用方清理；这里只负责重试。
+            npm_install_with_registry(paths, prefix, spec, second, cancellation)
+                .map_err(|second_error| format!("{first_error}；备用源也失败：{second_error}"))
+        }
+    }
 }
 
 fn dshmarket_backup_root(paths: &AppPaths) -> PathBuf {
@@ -605,7 +673,13 @@ fn install_dshmarket(
         .join(format!("staging-{}", Uuid::new_v4()));
     fs::create_dir_all(&staging).map_err(|error| error.to_string())?;
     let spec = format!("dshmarket@{version}");
-    if let Err(error) = npm_install(paths, &staging, &spec, cancellation) {
+    if let Err(error) = npm_install_with_fallback(
+        paths,
+        &staging,
+        &spec,
+        Some(REGISTRY_OFFICIAL),
+        cancellation,
+    ) {
         let _ = fs::remove_dir_all(&staging);
         return Err(error);
     }
@@ -630,7 +704,14 @@ fn install_dshmarket(
         &package,
         &backups.join(format!("dshmarket-previous-{}", Uuid::new_v4())),
     )?;
-    let installed = npm_install(paths, &profile, &spec, cancellation).and_then(|()| {
+    let installed = npm_install_with_fallback(
+        paths,
+        &profile,
+        &spec,
+        Some(REGISTRY_OFFICIAL),
+        cancellation,
+    )
+    .and_then(|()| {
         let installed = fs::read_to_string(paths.dshmarket_manifest())
             .ok()
             .and_then(|content| package_version_from_json(&content));
@@ -822,16 +903,28 @@ fn install_node(
             config = config.proxy(Some(proxy));
         }
         let agent = config.build().new_agent();
-        let shasums = download_node_text(
-            &agent,
-            &format!("{NODE_DIST_BASE}/v{version}/SHASUMS256.txt"),
-        )?;
+        // SHASUMS 是小文件：先试官方源（短超时），不可达时回落镜像；
+        // 之后归档下载也走同一来源，SHA-256 校验始终对内容本身生效。
+        let mut shasums_errors = Vec::new();
+        let mut resolved = None;
+        for base in [NODE_DIST_BASE, NODE_DIST_MIRROR] {
+            match download_node_text(&agent, &format!("{base}/v{version}/SHASUMS256.txt")) {
+                Ok(text) => {
+                    resolved = Some((base, text));
+                    break;
+                }
+                Err(error) => shasums_errors.push(format!("{base}: {error}")),
+            }
+        }
+        let Some((base, shasums)) = resolved else {
+            return Err(shasums_errors.join("；"));
+        };
         let expected = parse_sha256(&shasums, &archive_name)
             .ok_or_else(|| format!("官方校验文件缺少 {archive_name}"))?;
         progress.report("下载 Node 官方发行包", Some(0));
         let digest = download_node_archive(
             &agent,
-            &format!("{NODE_DIST_BASE}/v{version}/{archive_name}"),
+            &format!("{base}/v{version}/{archive_name}"),
             &archive_path,
             cancellation,
             Some(&|percent| progress.report("下载 Node 官方发行包", Some(percent))),
@@ -1061,7 +1154,7 @@ fn install_runtime_inner(
         .ok_or_else(|| "runtime component is not supported".to_string())?;
     progress.report("查询官方 registry", None);
     let proxy = configured_update_proxy()?;
-    let registry_latest = latest_package_version(package, proxy.as_deref())?;
+    let (registry_latest, registry_used) = latest_package_version(package, proxy.as_deref())?;
     cancellation.check()?;
     // DSH 固定兼容版本：即使通过 IPC 直接请求，也不能安装未验证的上游版本。
     if request.component_id == "dsh" && request.version != VERIFIED_DSH_VERSION {
@@ -1091,7 +1184,9 @@ fn install_runtime_inner(
     fs::create_dir_all(&staging)
         .map_err(|error| format!("failed to create runtime staging directory: {error}"))?;
     let spec = format!("{package}@{}", request.version);
-    if let Err(error) = npm_install(&paths, &staging, &spec, cancellation) {
+    if let Err(error) =
+        npm_install_with_fallback(&paths, &staging, &spec, Some(registry_used), cancellation)
+    {
         let _ = fs::remove_dir_all(&staging);
         return Err(error);
     }
@@ -1259,6 +1354,7 @@ fn check_runtime_updates_inner(
             };
             match configured_update_proxy()
                 .and_then(|proxy| latest_package_version(package, proxy.as_deref()))
+                .map(|(version, _registry)| version)
             {
                 Ok(registry_latest) => {
                     // DSH 固定在已验证版本：上游有更新时只提示，不提供安装。
@@ -1395,13 +1491,14 @@ mod tests {
         let staging = runtime.join("versions/first");
         std::fs::create_dir_all(&staging).unwrap();
         let proxy = super::configured_update_proxy().unwrap();
-        let version =
+        let (version, registry_used) =
             super::latest_package_version("@earendil-works/pi-coding-agent", proxy.as_deref())
                 .unwrap();
-        super::npm_install(
+        super::npm_install_with_fallback(
             &paths,
             &staging,
             &format!("@earendil-works/pi-coding-agent@{version}"),
+            Some(registry_used),
             &cancellation,
         )
         .unwrap();
@@ -1413,10 +1510,11 @@ mod tests {
         .unwrap();
         let first = paths.managed_pi_runtime().unwrap();
         let second = runtime.join("versions/second");
-        super::npm_install(
+        super::npm_install_with_fallback(
             &paths,
             &second,
             &format!("@earendil-works/pi-coding-agent@{version}"),
+            Some(registry_used),
             &cancellation,
         )
         .unwrap();
