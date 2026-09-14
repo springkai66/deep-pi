@@ -15,9 +15,24 @@ pub struct AppPaths {
 }
 
 impl AppPaths {
+    /// 兼容入口（测试与旧调用方）：runtimes 落在 local 目录下。
+    /// 生产启动使用 [`Self::from_roots_with_runtimes`]，把运行时放到安装目录下。
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn from_roots(
         roaming: PathBuf,
         local: PathBuf,
+        project_root: PathBuf,
+    ) -> Result<Self, String> {
+        let runtimes = local.join("runtimes");
+        Self::from_roots_with_runtimes(roaming, local, runtimes, project_root)
+    }
+
+    /// `runtimes` 由调用方决定：发布构建放在 DeepPi 安装目录下的 `runtimes` 子文件夹
+    /// （跟随安装盘符，不写 C 盘 AppData），开发构建放在仓库 `.deeppi-runtime/runtimes`。
+    pub fn from_roots_with_runtimes(
+        roaming: PathBuf,
+        local: PathBuf,
+        runtimes: PathBuf,
         project_root: PathBuf,
     ) -> Result<Self, String> {
         let paths = Self {
@@ -26,7 +41,7 @@ impl AppPaths {
             backups: roaming.join("backups"),
             pi_home: roaming.join("agents").join("pi"),
             dsh_home: roaming.join("agents").join("dsh"),
-            runtimes: local.join("runtimes"),
+            runtimes,
             cache: local.join("cache"),
             logs: local.join("logs"),
             temp: local.join("temp"),
@@ -38,7 +53,6 @@ impl AppPaths {
             &paths.backups,
             &paths.pi_home,
             &paths.dsh_home,
-            &paths.runtimes,
             &paths.cache,
             &paths.logs,
             &paths.temp,
@@ -46,6 +60,14 @@ impl AppPaths {
             fs::create_dir_all(directory)
                 .map_err(|error| format!("failed to create {}: {error}", directory.display()))?;
         }
+        // 运行时安装在 DeepPi 安装目录的子文件夹里；目录创建失败通常意味着
+        // DeepPi 被装进了受保护的目录（如 Program Files），需要给出可操作的提示。
+        fs::create_dir_all(&paths.runtimes).map_err(|error| {
+            format!(
+                "无法创建运行时目录 {}：{error}。Pi/DSH 运行时安装在 DeepPi 安装目录下的 runtimes 子文件夹，请把 DeepPi 安装到可写的位置（不要安装在受保护的系统目录）",
+                paths.runtimes.display()
+            )
+        })?;
         Ok(paths)
     }
 
@@ -194,6 +216,20 @@ impl AppPaths {
     }
 }
 
+/// 托管运行时（Node/Pi/DSH/dshmarket）的安装根目录。
+/// 发布构建：DeepPi 安装目录下的 `runtimes` 子文件夹，跟随安装位置，不写 C 盘 AppData。
+/// 开发构建：仓库内 `.deeppi-runtime/runtimes`，与“用 DeepPi 开发 DeepPi”的开发剖面放在一起。
+pub fn managed_runtimes_root(
+    install_dir: &std::path::Path,
+    project_root: &std::path::Path,
+) -> PathBuf {
+    if cfg!(debug_assertions) {
+        project_root.join(".deeppi-runtime").join("runtimes")
+    } else {
+        install_dir.join("runtimes")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::AppPaths;
@@ -221,6 +257,12 @@ mod tests {
         assert!(paths.logs.is_dir());
         assert!(paths.backups.is_dir());
 
+        assert_eq!(
+            paths.runtimes,
+            root.join("local").join("runtimes"),
+            "from_roots 保持旧行为：runtimes 位于 local 目录下"
+        );
+
         let node = paths.runtimes.join("node").join("current").join("node.exe");
         let pi = paths
             .runtimes
@@ -244,6 +286,36 @@ mod tests {
         // 托管缺失时必须报错，而不是回落到本机环境。
         std::fs::remove_file(&node).unwrap();
         assert!(paths.node_runtime().is_err());
+
+        std::fs::remove_dir_all(root).expect("test paths should be removed");
+    }
+
+    #[test]
+    fn runtimes_root_follows_the_install_directory() {
+        let root = std::env::temp_dir().join(format!("deeppi-path-install-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+
+        let install_dir = root.join("install");
+        let project_root = root.join("project");
+        let runtimes = super::managed_runtimes_root(&install_dir, &project_root);
+        let expected = if cfg!(debug_assertions) {
+            project_root.join(".deeppi-runtime").join("runtimes")
+        } else {
+            install_dir.join("runtimes")
+        };
+        assert_eq!(runtimes, expected);
+
+        let paths = AppPaths::from_roots_with_runtimes(
+            root.join("roaming"),
+            root.join("local"),
+            runtimes.clone(),
+            project_root,
+        )
+        .expect("application paths should initialize");
+        assert_eq!(paths.runtimes, runtimes);
+        assert!(paths.runtimes.is_dir());
+        // roaming 侧的目录不受影响。
+        assert!(paths.pi_home.is_dir());
 
         std::fs::remove_dir_all(root).expect("test paths should be removed");
     }

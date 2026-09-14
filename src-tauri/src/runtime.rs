@@ -517,6 +517,9 @@ fn npm_install(
     let prefix = prefix.to_string_lossy().into_owned();
     let proxy = configured_update_proxy()?;
     let npm = paths.npm_runtime()?;
+    // npm 默认缓存在用户目录（C 盘）；显式指到 DeepPi 自己的 cache 目录，
+    // 安装/升级 Pi、DSH、dshmarket 时也不写 C 盘。
+    let npm_cache = paths.cache.join("npm");
     let mut command = Command::new(npm);
     command
         .args([
@@ -531,6 +534,8 @@ fn npm_install(
             "--fetch-timeout=30000",
             "--fetch-retries=2",
         ])
+        .arg("--cache")
+        .arg(&npm_cache)
         .arg(spec)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

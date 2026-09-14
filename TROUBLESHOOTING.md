@@ -15,16 +15,18 @@ pnpm tauri dev
 
 ## Pi 无法启动
 
-DeepPi 只使用自己托管的运行时（Node、Pi、DSH），不读取电脑上安装的 Pi/Node/npm。托管运行时位于 `%LOCALAPPDATA%\com.deeppi.desktop\runtimes\<组件>\active.json`，实际版本在同级 `versions` 目录；没有指针文件的旧安装继续使用 `current`。缺失或损坏时，请到“设置 → 运行时与更新”安装或修复对应组件（Node 是安装 Pi/DSH 的前提，由应用从官方发行包下载并校对 SHA-256）。指针损坏或指向缺失的运行时会直接报错，不会静默使用本机环境。
+DeepPi 只使用自己托管的运行时（Node、Pi、DSH），不读取电脑上安装的 Pi/Node/npm。托管运行时安装在 DeepPi 安装目录下的 `runtimes` 子文件夹（跟随安装盘符，不写 C 盘 AppData），即 `<DeepPi 安装目录>\runtimes\<组件>\active.json`，实际版本在同级 `versions` 目录；没有指针文件的旧安装继续使用 `current`。开发构建则放在仓库 `.deeppi-runtime\runtimes`。缺失或损坏时，请到“设置 → 运行时与更新”安装或修复对应组件（Node 是安装 Pi/DSH 的前提，由应用从官方发行包下载并校对 SHA-256）。指针损坏或指向缺失的运行时会直接报错，不会静默使用本机环境。
 
 确认以下目录可写，并检查日志：
 
 ```text
 %APPDATA%\com.deeppi.desktop\agents\pi
-%LOCALAPPDATA%\com.deeppi.desktop\runtimes\node
-%LOCALAPPDATA%\com.deeppi.desktop\runtimes\pi
+<DeepPi 安装目录>\runtimes\node
+<DeepPi 安装目录>\runtimes\pi
 %LOCALAPPDATA%\com.deeppi.desktop\logs
 ```
+
+如果 DeepPi 安装在受保护的目录（如 Program Files），运行时目录会创建失败并报错；请把 DeepPi 安装到可写的位置（例如非系统盘的自选目录）。
 
 不要把 API Key、完整提示词或工具参数写进问题报告。
 

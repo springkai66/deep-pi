@@ -109,7 +109,19 @@ pub fn run() {
                     let project_root = std::env::current_dir()
                         .map(pty::resolve_default_working_directory)
                         .map_err(|error| error.to_string())?;
-                    let paths = app_paths::AppPaths::from_roots(roaming, local, project_root)?;
+                    // Pi/DSH 运行时安装在 DeepPi 安装目录下的 runtimes 子文件夹，
+                    // 跟随安装盘符，不写 C 盘 AppData。
+                    let install_dir = std::env::current_exe()
+                        .ok()
+                        .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
+                        .ok_or_else(|| "无法确定 DeepPi 安装目录".to_string())?;
+                    let runtimes = app_paths::managed_runtimes_root(&install_dir, &project_root);
+                    let paths = app_paths::AppPaths::from_roots_with_runtimes(
+                        roaming,
+                        local,
+                        runtimes,
+                        project_root,
+                    )?;
                     snapshot::Snapshot::recover_pending(&paths.backups)?;
                     paths.managed_pi_runtime()?;
                     paths.managed_dsh_runtime()?;
