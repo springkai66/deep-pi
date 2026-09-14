@@ -14,6 +14,8 @@ export interface ConfiguredModel {
   maxTokens: number;
   thinkingLevels: string[];
   cost: ModelCostConfig | null;
+  /** 覆盖 Provider 的 API 类型；空值时继承 Provider 设置。 */
+  api: string | null;
 }
 
 export interface ProviderRecord {

@@ -3,10 +3,14 @@
     Archive,
     ArchiveRestore,
     Pencil,
+    Plus,
     RefreshCw,
     RotateCcw,
+    SplitSquareHorizontal,
+    SplitSquareVertical,
     Square,
     Trash2,
+    X,
   } from "@lucide/svelte";
   import { onMount } from "svelte";
   import type { Task } from "$lib/task";
@@ -21,6 +25,9 @@
     onRestart: (task: Task) => void;
     onRestore: (task: Task) => void;
     onDelete: (task: Task) => void;
+    onClose: (task: Task) => void;
+    onAdd: () => void;
+    onSplit: (task: Task, direction: "right" | "down") => void;
   }
 
   let {
@@ -33,6 +40,9 @@
     onRestart,
     onRestore,
     onDelete,
+    onClose,
+    onAdd,
+    onSplit,
   }: Props = $props();
   let contextMenu = $state<{ task: Task; x: number; y: number } | null>(null);
   let contextMenuElement = $state<HTMLDivElement>();
@@ -54,7 +64,7 @@
     event.preventDefault();
     event.stopPropagation();
     const menuWidth = 196;
-    const menuHeight = 160;
+    const menuHeight = 220;
     contextMenu = {
       task,
       x: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
@@ -62,7 +72,9 @@
     };
   }
 
-  function chooseAction(action: "archive" | "restore" | "rename" | "stop" | "restart" | "remove") {
+  function chooseAction(
+    action: "archive" | "restore" | "rename" | "stop" | "restart" | "remove" | "splitRight" | "splitDown",
+  ) {
     const task = contextMenu?.task;
     contextMenu = null;
     if (!task) return;
@@ -71,6 +83,8 @@
     else if (action === "rename") onRename(task);
     else if (action === "stop") onStop(task);
     else if (action === "restart") onRestart(task);
+    else if (action === "splitRight") onSplit(task, "right");
+    else if (action === "splitDown") onSplit(task, "down");
     else onDelete(task);
   }
 
@@ -85,11 +99,10 @@
 <div class="task-tabs-shell">
   <nav class="task-tabs" aria-label="Session 标签">
     {#each tasks as task (task.id)}
-      <button
+      <div
+        class="session-tab"
         class:active={task.id === activeTaskId}
-        type="button"
-        title={task.title}
-        onclick={() => onOpen(task)}
+        role="presentation"
         oncontextmenu={(event) => showContextMenu(event, task)}
       >
         {#if activeStatuses.includes(task.status)}
@@ -97,9 +110,28 @@
         {:else}
           <span class:failed={task.status === "failed"} class:cancelled={task.status === "cancelled"} class="session-status" aria-hidden="true"></span>
         {/if}
-        <span>{task.title}</span>
-      </button>
+        <button
+          type="button"
+          class="session-tab-label"
+          title={task.title}
+          onclick={() => onOpen(task)}
+        >
+          <span>{task.title}</span>
+        </button>
+        <button
+          type="button"
+          class="session-tab-close"
+          aria-label={`关闭 ${task.title}`}
+          title="关闭 Session"
+          onclick={(event) => { event.stopPropagation(); onClose(task); }}
+        >
+          <X size={13} aria-hidden="true" />
+        </button>
+      </div>
     {/each}
+    <button type="button" class="session-tab-add" title="新建 Session" aria-label="新建 Session" onclick={onAdd}>
+      <Plus size={15} aria-hidden="true" />
+    </button>
   </nav>
 
   {#if contextMenu}
@@ -134,6 +166,12 @@
           <ArchiveRestore size={14} />恢复
         </button>
       {/if}
+      <button type="button" role="menuitem" onclick={() => chooseAction("splitRight")}>
+        <SplitSquareHorizontal size={14} />向右分割窗口
+      </button>
+      <button type="button" role="menuitem" onclick={() => chooseAction("splitDown")}>
+        <SplitSquareVertical size={14} />向下分割窗口
+      </button>
       <button type="button" role="menuitem" onclick={() => chooseAction("remove")}>
         <Trash2 size={14} />移除 Session
       </button>
@@ -151,40 +189,87 @@
     min-width: 0;
     height: 32px;
     overflow-x: auto;
-    border-bottom: 1px solid #303832;
-    background: #161a17;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface-alt);
     scrollbar-width: thin;
   }
 
-  .task-tabs > button {
+  .session-tab {
     display: grid;
-    grid-template-columns: 14px minmax(60px, 140px);
+    grid-template-columns: 14px minmax(60px, 140px) 18px;
     align-items: center;
     gap: 6px;
-    min-width: 110px;
+    min-width: 128px;
     height: 31px;
-    padding: 0 9px;
+    padding: 0 4px 0 9px;
+    border-right: 1px solid var(--border);
+    color: var(--text-muted);
+    background: transparent;
+  }
+
+  .session-tab:hover {
+    color: var(--text);
+    background: var(--surface-hover);
+  }
+
+  .session-tab.active {
+    color: var(--text-strong);
+    background: var(--surface-raised);
+    box-shadow: inset 0 -2px var(--accent);
+  }
+
+  .session-tab-label {
+    display: block;
+    min-width: 0;
+    height: 100%;
+    padding: 0;
     border: 0;
-    border-right: 1px solid #303832;
-    color: #89928b;
+    color: inherit;
+    background: transparent;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .session-tab-label > span {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .session-tab-close {
+    display: grid;
+    place-items: center;
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    border: 0;
+    border-radius: 3px;
+    color: inherit;
     background: transparent;
     cursor: pointer;
   }
 
-  .task-tabs > button:hover {
-    color: #d8ded9;
-    background: #202521;
+  .session-tab-close:hover {
+    color: var(--text-strong);
+    background: var(--surface-hover);
   }
 
-  .task-tabs > button.active {
-    color: #f4f7f5;
-    background: #252b27;
-    box-shadow: inset 0 -2px #8fd6ad;
+  .session-tab-add {
+    display: grid;
+    place-items: center;
+    flex-shrink: 0;
+    width: 32px;
+    height: 31px;
+    border: 0;
+    color: var(--text-muted);
+    background: transparent;
+    cursor: pointer;
   }
 
-  .task-tabs > button > span {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+  .session-tab-add:hover {
+    color: var(--text-strong);
+    background: var(--surface-hover);
   }
 </style>

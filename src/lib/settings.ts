@@ -1,4 +1,5 @@
 export type ColorMode = "system" | "light" | "dark";
+export type Theme = "win11" | "winxp";
 export type UiFont = "system" | "segoe" | "yahei" | "inter";
 export type CodeFont = "cascadia" | "consolas" | "jetbrains";
 export type CloseBehavior = "ask" | "minimize" | "exit";
@@ -12,6 +13,7 @@ export interface AppSettings {
   maxConcurrentTasks: number;
   lastProject: string | null;
   colorMode: ColorMode;
+  theme: Theme;
   appFont: UiFont;
   textFont: UiFont;
   codeFont: CodeFont;
@@ -27,6 +29,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   maxConcurrentTasks: 3,
   lastProject: null,
   colorMode: "system",
+  theme: "win11",
   appFont: "system",
   textFont: "system",
   codeFont: "cascadia",

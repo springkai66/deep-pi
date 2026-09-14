@@ -1,15 +1,16 @@
 use std::{
     fs,
     io::{self, Write},
+    time::Instant,
 };
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use tauri::State;
 
 use crate::{
     app_paths::AppPaths,
-    provider::{list_provider_file, validate_provider_id},
+    provider::{list_provider_file, provider_agent, validate_provider_id},
 };
 
 const KEYRING_SERVICE: &str = "com.deeppi.desktop.pi.provider";
@@ -44,6 +45,23 @@ pub struct ProviderConnectionResult {
     provider_id: String,
     reachable: bool,
     status: u16,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelTestRequest {
+    provider_id: String,
+    model_id: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelTestResult {
+    model_id: String,
+    ok: bool,
+    status: Option<u16>,
+    latency_ms: Option<u64>,
+    error: Option<String>,
 }
 
 fn entry(provider_id: &str) -> Result<keyring::Entry, String> {
@@ -181,9 +199,14 @@ fn test_provider_connection_inner(
         .as_deref()
         .ok_or_else(|| "provider has no base URL".to_string())?;
     validate_connection_url(base_url)?;
+    // 探测 /models 端点（与拉取模型一致），而不是裸根地址：
+    // 裸根 GET 常见 404，无法区分“网络可达但配置错误”和“服务健康”。
+    let probe_url = crate::provider::provider_models_url(base_url, &provider.api)
+        .map(|url| url.to_string())
+        .unwrap_or_else(|_| base_url.to_string());
     let agent = crate::provider::provider_agent(&provider)?;
     let api_key = provider_api_key(&provider.id)?;
-    let mut request = agent.get(base_url).header("Accept", "application/json");
+    let mut request = agent.get(&probe_url).header("Accept", "application/json");
     for (name, value) in &provider.headers {
         request = request.header(name, value);
     }
@@ -199,11 +222,152 @@ fn test_provider_connection_inner(
     let response = request
         .call()
         .map_err(|error| format!("provider connection failed: {error}"))?;
+    let status = response.status().as_u16();
     Ok(ProviderConnectionResult {
         provider_id,
-        reachable: true,
-        status: response.status().as_u16(),
+        reachable: (200..300).contains(&status),
+        status,
     })
+}
+
+#[tauri::command]
+pub async fn test_model_connection(
+    app: tauri::AppHandle,
+    request: ModelTestRequest,
+) -> Result<ModelTestResult, String> {
+    use tauri::Manager;
+    tauri::async_runtime::spawn_blocking(move || test_model_connection_inner(app.state(), request))
+        .await
+        .map_err(|error| format!("model test worker failed: {error}"))?
+}
+
+fn model_probe_target(api: &str, base_url: &str, model_id: &str) -> Result<Vec<(String, Value)>, String> {
+    let base = base_url.trim_end_matches('/');
+    match api {
+        "openai-completions" => Ok(vec![(
+            format!("{base}/chat/completions"),
+            json!({
+                "model": model_id,
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 1,
+                "stream": false,
+            }),
+        )]),
+        // openai-responses 端点在部分兼容网关上不存在（404）；
+        // 依次尝试 /responses，再回退 /chat/completions。
+        "openai-responses" => Ok(vec![
+            (
+                format!("{base}/responses"),
+                json!({"model": model_id, "input": "ping", "max_output_tokens": 16}),
+            ),
+            (
+                format!("{base}/chat/completions"),
+                json!({
+                    "model": model_id,
+                    "messages": [{"role": "user", "content": "ping"}],
+                    "max_tokens": 1,
+                    "stream": false,
+                }),
+            ),
+        ]),
+        "anthropic-messages" => {
+            let url = if base.ends_with("/v1") { format!("{base}/messages") } else { format!("{base}/v1/messages") };
+            Ok(vec![(
+                url,
+                json!({
+                    "model": model_id,
+                    "max_tokens": 1,
+                    "messages": [{"role": "user", "content": "ping"}],
+                }),
+            )])
+        }
+        "google-generative-ai" => Ok(vec![(
+            format!("{base}/models/{model_id}:generateContent"),
+            json!({
+                "contents": [{"parts": [{"text": "ping"}]}],
+                "generationConfig": {"maxOutputTokens": 1},
+            }),
+        )]),
+        _ => Err(format!("unsupported provider API: {api}")),
+    }
+}
+
+fn test_model_connection_inner(
+    paths: State<'_, AppPaths>,
+    request: ModelTestRequest,
+) -> Result<ModelTestResult, String> {
+    let model_id = request.model_id.trim().to_string();
+    if model_id.is_empty() || model_id.len() > 256 || model_id.chars().any(char::is_control) {
+        return Err("model id is invalid".into());
+    }
+    let provider = list_provider_file(&paths.pi_models_file())?
+        .into_iter()
+        .find(|provider| provider.id == request.provider_id)
+        .ok_or_else(|| format!("Pi provider not found: {}", request.provider_id))?;
+    let base_url = provider
+        .base_url
+        .as_deref()
+        .ok_or_else(|| "provider has no base URL".to_string())?;
+    validate_connection_url(base_url)?;
+    let targets = model_probe_target(&provider.api, base_url, &model_id)?;
+    let agent = provider_agent(&provider)?;
+    let api_key = provider_api_key(&provider.id)?;
+    let mut result = ModelTestResult {
+        model_id,
+        ok: false,
+        status: None,
+        latency_ms: None,
+        error: None,
+    };
+    let mut last_error = String::new();
+    for (target_url, body) in targets {
+        let url = tauri::Url::parse(&target_url)
+            .map_err(|error| format!("model probe URL is invalid: {error}"))?;
+        let mut request = agent.post(url.as_str()).header("Accept", "application/json");
+        for (name, value) in &provider.headers {
+            request = request.header(name, value);
+        }
+        if let Some(api_key) = api_key.as_deref() {
+            request = match provider.api.as_str() {
+                "anthropic-messages" => request
+                    .header("x-api-key", api_key)
+                    .header("anthropic-version", "2023-06-01"),
+                "google-generative-ai" => request.header("x-goog-api-key", api_key),
+                _ => request.header("Authorization", &format!("Bearer {api_key}")),
+            };
+        }
+        let started = Instant::now();
+        let send = request.send_json(&body);
+        let latency = started.elapsed().as_millis() as u64;
+        result.latency_ms = Some(latency);
+        match send {
+            Ok(response) => {
+                let status = response.status().as_u16();
+                result.status = Some(status);
+                if (200..300).contains(&status) {
+                    result.ok = true;
+                    result.error = None;
+                    break;
+                }
+                // 404 说明该端点不存在，尝试下一个候选；其它错误（401/429/5xx）
+                // 说明端点存在但请求被拒，直接报告不再回退。
+                if status != 404 {
+                    result.error = Some(format!("HTTP {status}"));
+                    break;
+                }
+                last_error = format!("HTTP {status}");
+            }
+            Err(error) => {
+                last_error = format!("provider connection failed: {error}");
+                result.error = Some(last_error.clone());
+                break;
+            }
+        }
+    }
+    if !result.ok && result.error.is_none() {
+        result.error = Some(last_error);
+    }
+    Ok(result)
 }
 
 #[cfg(test)]

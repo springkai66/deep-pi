@@ -455,9 +455,18 @@ impl TaskStore {
         title: &str,
         project_path: &str,
     ) -> Result<TaskRecord, String> {
-        let title = validate_title(title)?;
+        // 标题留空时用 session id 前 8 位作为默认名；用户发送首轮问题后由 AI 自动命名。
+        let title = match title.trim() {
+            "" => "",
+            trimmed => validate_title(trimmed)?,
+        };
         let id = format!("task-{}", Uuid::new_v4());
         let session_id = Uuid::new_v4().to_string();
+        let title = if title.is_empty() {
+            format!("Session {}", &session_id[..8])
+        } else {
+            title.to_string()
+        };
         let timestamp = now_millis()?;
         self.connection
             .lock()

@@ -26,3 +26,4 @@ vite.config.ts.timestamp-*
 
 # pi goal state is local agent data, not part of the source distribution
 /.pi
+.dev-*.log

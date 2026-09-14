@@ -267,6 +267,8 @@ fn validate_command(command: &Value) -> Result<&str, String> {
             | "get_commands"
             | "set_model"
             | "set_thinking_level"
+            | "get_available_thinking_levels"
+            | "get_session_stats"
             | "clear_queue"
             | "abort"
             | "extension_ui_response"

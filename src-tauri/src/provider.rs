@@ -48,6 +48,9 @@ pub struct ConfiguredModel {
     pub max_tokens: u64,
     pub thinking_levels: Vec<String>,
     pub cost: Option<ModelCostConfig>,
+    /// 覆盖 Provider 的 API 类型；空值时继承 Provider 设置。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -291,6 +294,9 @@ fn model_to_json(model: &ConfiguredModel) -> Value {
         "maxTokens": model.max_tokens,
         "thinkingLevelMap": thinking_level_map,
     });
+    if let Some(api) = &model.api {
+        output["api"] = json!(api);
+    }
     if let Some(cost) = &model.cost {
         output["cost"] = json!({
             "input": cost.input,
@@ -364,6 +370,11 @@ fn model_from_json(value: &Value) -> Result<ConfiguredModel, String> {
             .unwrap_or(8_192),
         thinking_levels,
         cost,
+        api: object
+            .get("api")
+            .and_then(Value::as_str)
+            .filter(|api| !api.trim().is_empty())
+            .map(str::to_owned),
     };
     validate_model(&model)?;
     Ok(model)
@@ -536,7 +547,7 @@ fn delete_provider_file(path: &Path, id: &str) -> Result<(), String> {
     write_models_file(path, &root)
 }
 
-fn provider_models_url(base_url: &str, api: &str) -> Result<Url, String> {
+pub(crate) fn provider_models_url(base_url: &str, api: &str) -> Result<Url, String> {
     validate_base_url(Some(base_url))?;
     let mut url = Url::parse(base_url).map_err(|error| format!("base URL is invalid: {error}"))?;
     let base_path = url.path().trim_end_matches('/');
@@ -788,6 +799,7 @@ mod tests {
             max_tokens: 32_000,
             thinking_levels: vec!["off".into(), "low".into(), "high".into()],
             cost: None,
+            api: None,
         }
     }
 

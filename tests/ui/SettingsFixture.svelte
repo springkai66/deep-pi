@@ -46,7 +46,7 @@
     onEditorSaved={() => {}} onClose={() => { action = "返回工作区"; }}
     runtimes={[{ id: "pi", name: "Pi", currentVersion: "1.0.0", source: "managed", available: true }, { id: "dsh", name: "DSH", currentVersion: null, source: "managed", available: false }]}
     updates={[{ id: "pi", name: "Pi", currentVersion: "1.0.0", latestVersion: "1.1.0", updateAvailable: true, installable: true, canRollback: true, stale: false, error: null, note: null }]}
-    busyRuntime={null} runtimeOperation={null} isCheckingUpdates={false}
+    busyRuntime={null} runtimeOperation={null} runtimeProgress={null} isCheckingUpdates={false}
     appUpdate={{ status: "available", version: "2.0.0", notes: "Fixture release notes", error: null }}
     onCancelRuntime={() => { action = "取消组件操作"; }}
     onCheckUpdates={() => { action = "检查组件更新"; }}
@@ -59,6 +59,8 @@
   >
     {#snippet models()}<PiProviderSettings embedded invokeCommand={command} confirm={async () => true} onClose={() => {}} onError={(cause) => { error = String(cause); }} />{/snippet}
     {#snippet extensions()}<PiMarketplace embedded projectPath={null} invokeCommand={command} confirm={async () => true} onClose={() => {}} onError={(cause) => { error = String(cause); }} />{/snippet}
+    {#snippet mcp()}<p>MCP</p>{/snippet}
+    {#snippet skills()}<p>Skills</p>{/snippet}
   </PiSettings>
 </main>
 

@@ -1,6 +1,6 @@
 [package]
 name = "deeppi"
-version = "1.0.0"
+version = "1.2.0"
 description = "Desktop host for Pi Coding Agent and DeepSeek Harness"
 authors = ["DeepPi contributors"]
 edition = "2021"
@@ -40,6 +40,9 @@ tauri-plugin-process = "2"
 tempfile = "3.27.0"
 notify = "8.2.0"
 zip = { version = "4.6.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+[dev-dependencies]
+tauri = { version = "2", features = ["test"] }
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-updater = "2"

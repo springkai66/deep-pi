@@ -16,6 +16,7 @@
     FolderPlus,
     LayoutGrid,
     PanelLeft,
+    PanelRight,
     PanelTop,
     Plus,
     RotateCcw,
@@ -35,11 +36,13 @@
   import ChatPane from "$lib/ChatPane.svelte";
   import { hostCommandEnabled, hostShortcutDecision, shortcutLabel, shortcutAria, type HostCommand, type HostShortcutContext } from "$lib/shortcuts";
   import { createTaskModeSwitcher, type InteractionMode } from "$lib/task-mode";
+  import { SplitSquareHorizontal, SplitSquareVertical } from "@lucide/svelte";
   import AppDialog from "$lib/AppDialog.svelte";
   import { checkAppUpdate, installAppUpdate, type AppUpdateState, type Update } from "$lib/app-update";
   import type { DialogRequest, DialogValue } from "$lib/dialog";
   import type { Project } from "$lib/project";
   import PiMarketplace from "$lib/PiMarketplace.svelte";
+  import PiMcpSkillsSettings from "$lib/PiMcpSkillsSettings.svelte";
   import PiProviderSettings from "$lib/PiProviderSettings.svelte";
   import PiSettings from "$lib/PiSettings.svelte";
   import type { SettingsCategory } from "$lib/settings-navigation";
@@ -60,6 +63,7 @@
     changePaneCapacity,
     hasProjectConflict,
     openPane,
+    splitPane,
   } from "$lib/workspace";
 
   type LayoutMode = "single" | "split" | "grid";
@@ -83,7 +87,11 @@
   let isCheckingUpdates = $state(false);
   let busyRuntime = $state<string | null>(null);
   let runtimeOperation = $state<OperationState | null>(null);
-  const runtimeRunner = createOperationRunner(invoke, (state) => { runtimeOperation = state; });
+  let runtimeProgress = $state<{ phase: string; percent: number | null } | null>(null);
+  const runtimeRunner = createOperationRunner(invoke, (state) => {
+    runtimeOperation = state;
+    if (!state) runtimeProgress = null;
+  });
   let appUpdate = $state<AppUpdateState>({
     status: "idle",
     version: null,
@@ -136,12 +144,15 @@
   // eslint-disable-next-line no-unassigned-vars
   let workspace: HTMLElement;
   let dshWebview = $state.raw<Webview | null>(null);
-  let nextTaskNumber = 1;
   let sidebarVisible = $state(true);
   let gitVisible = $state(false);
   const showGit = $derived(gitVisible && activeAgent === "pi" && view === "workspace");
-  let sidebarMode = $state<"tasks" | "files">("tasks");
+  let filesVisible = $state(true);
+  const showFiles = $derived(activeAgent === "pi" && view === "workspace" && filesVisible);
   let fileSidebarVisited = $state(false);
+  $effect(() => {
+    if (showFiles) fileSidebarVisited = true;
+  });
   let fileSearchFocusToken = $state(0);
   let filesRefreshToken = $state(0);
   let gitWatchRefreshToken = $state(0);
@@ -223,16 +234,13 @@
   async function focusTaskSearch() {
     await showPi();
     sidebarVisible = true;
-    sidebarMode = "tasks";
     await tick();
     searchFocusToken++;
   }
 
   async function focusFileSearch() {
     await showPi();
-    sidebarVisible = true;
-    sidebarMode = "files";
-    fileSidebarVisited = true;
+    filesVisible = true;
     await tick();
     fileSearchFocusToken++;
   }
@@ -317,6 +325,7 @@
       { label: "切换到终端兼容模式", disabled: !activeTask || activeAgent !== "pi" || activeTask.interactionMode !== "rpc" || switchingTasks.has(activeTask.id),
         action: () => { if (activeTask) void switchTaskMode(activeTask, "tui"); } },
       { label: sidebarVisible ? "隐藏项目侧栏" : "显示项目侧栏", ...shortcutMenu("sidebar") },
+      { label: filesVisible ? "隐藏文件栏" : "显示文件栏", disabled: activeAgent !== "pi" || view !== "workspace", action: () => { filesVisible = !filesVisible; } },
       { label: gitVisible ? "隐藏 Git 变更栏" : "显示 Git 变更栏", disabled: activeAgent !== "pi" || view !== "workspace", action: () => { gitVisible = !gitVisible; } },
       { label: "Pi 工作区", action: () => void showPi() },
       { label: "DSH 工作区", action: () => void showDsh() },
@@ -330,6 +339,8 @@
       { label: "模型与凭据", action: () => openSettingsCategory("models") },
       { label: "运行时与更新", action: () => openSettingsCategory("runtime") },
       { label: "Pi 扩展", action: () => openSettingsCategory("extensions") },
+      { label: "MCP 服务", action: () => openSettingsCategory("mcp") },
+      { label: "Skills 技能", action: () => openSettingsCategory("skills") },
       { label: "高级与诊断", action: () => openSettingsCategory("advanced") },
     ] },
     { label: "帮助", items: [
@@ -366,6 +377,7 @@
     const root = document.documentElement;
     root.dataset.colorMode = next.colorMode;
     root.dataset.colorScheme = isLightColorMode(next.colorMode) ? "light" : "dark";
+    root.dataset.theme = next.theme;
     root.style.setProperty("--app-font", cssFontFamily(next.appFont));
     root.style.setProperty("--text-font", cssFontFamily(next.textFont));
     root.style.setProperty("--code-font", cssFontFamily(next.codeFont));
@@ -519,7 +531,6 @@
         tasks = storedTasks;
         projects = storedProjects;
         terminalTaskIds = storedTasks.filter((task) => task.agent === "pi" && task.runId).map((task) => task.id);
-        nextTaskNumber = storedTasks.length + 1;
         selectedProjectId =
           storedProjects.find((project) => project.path === storedSettings.lastProject)?.id ??
           storedProjects[0]?.id ??
@@ -596,6 +607,13 @@
         dialogs.cancelScope(`rpc:${task.id}:${task.runId}`);
       }
     });
+    const runtimeProgressListener = listen<{ operationId: string; phase: string; percent: number | null }>(
+      "runtime-progress",
+      ({ payload }) => {
+        if (runtimeOperation?.id !== payload.operationId) return;
+        runtimeProgress = { phase: payload.phase, percent: payload.percent ?? null };
+      },
+    );
     const observer = new ResizeObserver(() => void syncDshBounds());
     observer.observe(workspace);
 
@@ -612,6 +630,7 @@
       void dshStatusListener.then((unlisten) => unlisten());
       void statusListener.then((unlisten) => unlisten());
       void rpcExitListener.then((unlisten) => unlisten());
+      void runtimeProgressListener.then((unlisten) => unlisten());
       dialogs.dispose();
       void dshWebview?.close();
     };
@@ -796,6 +815,31 @@
     );
   }
 
+  /** 右键分割：把目标任务放进新窗格（向右/向下），布局自动升级到双列或四格。 */
+  function splitTask(task: Task, direction: "right" | "down") {
+    if (!terminalTaskIds.includes(task.id)) {
+      showError("该任务没有活动终端，请先重启任务");
+      return;
+    }
+    if (layout === "single") {
+      layout = "split";
+    } else if (layout === "split" && paneTaskIds.length >= 2) {
+      layout = "grid";
+    }
+    applyPaneSelection(
+      splitPane({
+        current: paneTaskIds,
+        active: activeTaskId,
+        requested: task.id,
+        available: terminalTaskIds.filter(
+          (id) => tasks.find((candidate) => candidate.id === id)?.projectId === task.projectId,
+        ),
+        capacity: paneCapacity,
+        direction,
+      }),
+    );
+  }
+
   function runtimeTitle(id: RuntimeComponent["id"]): string {
     const component = runtimes.find((runtime) => runtime.id === id);
     return component?.currentVersion
@@ -915,9 +959,8 @@
         return;
       }
       if (runningCount >= settings.maxConcurrentTasks) return;
-      const title = `Pi Task ${nextTaskNumber++}`;
       const task = await invoke<Task>(mode === "rpc" ? "start_rpc_task" : "start_pi_task", {
-        request: { projectId: project.id, title, rows: 32, cols: 100 },
+        request: { projectId: project.id, title: "", rows: 32, cols: 100 },
       });
       tasks.unshift(task);
       terminalTaskIds.push(task.id);
@@ -958,6 +1001,23 @@
     } catch (error) {
       showError(error);
     }
+  }
+
+  async function autoRenameTask(task: Task, title: string) {
+    if (!title || title === task.title) return;
+    try {
+      await invoke("rename_task", { taskId: task.id, title });
+      task.title = title;
+    } catch (error) {
+      showError(error);
+    }
+  }
+
+  async function closeTask(task: Task) {
+    if (!modeSwitcher.isBusy(task.id) && ["running", "waiting"].includes(task.status)) {
+      try { await stopTask(task); } catch { /* 停止失败时仍然关闭标签页 */ }
+    }
+    removeTerminal(task.id);
   }
 
   function requestTaskRestart(task: Task, mode: InteractionMode) {
@@ -1016,6 +1076,9 @@
     if (modeSwitcher.isBusy(task.id)) return;
     if (!(await confirmDialog("删除任务", `永久删除“${task.title}”的 DeepPi 任务记录吗？`))) return;
     try {
+      if (task.agent === "pi" && ["queued", "running", "waiting"].includes(task.status)) {
+        await stopTask(task);
+      }
       await invoke("delete_task", { taskId: task.id });
       tasks = tasks.filter((candidate) => candidate.id !== task.id);
       removeTerminal(task.id);
@@ -1037,7 +1100,7 @@
     {/if}
   </section>
 {/if}
-<div class:dsh-mode={activeAgent === "dsh"} class:sidebar-hidden={!showSidebar} class:git-visible={showGit} class="app-shell" inert={closingWindow || startupPending || !!startupFailure} aria-busy={closingWindow || startupPending}>
+<div class:dsh-mode={activeAgent === "dsh"} class:sidebar-hidden={!showSidebar} class:files-hidden={!showFiles} class:git-visible={showGit} class="app-shell" inert={closingWindow || startupPending || !!startupFailure} aria-busy={closingWindow || startupPending}>
   <header class="topbar">
     <div class="brand"><Bot size={18} strokeWidth={1.8} /><strong>DeepPi</strong></div>
 
@@ -1045,20 +1108,10 @@
 
     {#if activeAgent === "pi"}
       <div class="toolbar">
-        <button class:active={showGit} type="button" aria-label="切换 Git 变更栏" title="Git 变更"
-          aria-pressed={showGit} onclick={() => { if (!canLeaveSettings()) return; view = "workspace"; gitVisible = !gitVisible; }}><GitBranch size={16} /></button>
-        <button class:active={layout === "single"} type="button" aria-label="单任务布局" title="单任务布局" onclick={() => changeLayout("single")}>
-          <PanelTop size={16} />
-        </button>
-        <button class:active={layout === "split"} type="button" aria-label="双列布局" title="双列布局" onclick={() => changeLayout("split")}>
-          <PanelLeft size={16} />
-        </button>
-        <button class:active={layout === "grid"} type="button" aria-label="网格布局" title="网格布局" onclick={() => changeLayout("grid")}>
-          <LayoutGrid size={16} />
-        </button>
-        <button class="primary" type="button" aria-label="新建 Pi 任务" title="新建 Pi 任务" disabled={!canStart} onclick={() => void startTask()}>
-          <Plus size={17} />
-        </button>
+        <button class:active={showSidebar} type="button" aria-label="切换工作区侧栏" title={showSidebar ? "折叠工作区" : "展开工作区"}
+          aria-pressed={showSidebar} onclick={() => { if (!canLeaveSettings()) return; view = "workspace"; sidebarVisible = !sidebarVisible; }}><PanelLeft size={16} /></button>
+        <button class:active={showFiles} type="button" aria-label="切换文件栏" title={showFiles ? "折叠文件栏" : "展开文件栏"}
+          aria-pressed={showFiles} onclick={() => { if (!canLeaveSettings()) return; view = "workspace"; filesVisible = !filesVisible; }}><PanelRight size={16} /></button>
       </div>
     {/if}
   </header>
@@ -1069,23 +1122,6 @@
     <button type="button" class="rail-settings" class:active={view !== "workspace"} aria-label="设置" aria-keyshortcuts={shortcutAria("settings")} title={`设置 (${shortcutLabel("settings")})`} onclick={openSettings}><Settings2 size={21} /></button>
   </nav>
   <aside class="project-sidebar" class:panel-hidden={!showSidebar} aria-label="项目侧栏">
-    <div class="sidebar-tabs" role="tablist" aria-label="项目视图">
-      <button id="tasks-tab" type="button" role="tab" aria-selected={sidebarMode === "tasks"}
-        aria-controls="tasks-panel" onclick={() => { sidebarMode = "tasks"; }}>任务</button>
-      <button id="files-tab" type="button" role="tab" aria-selected={sidebarMode === "files"}
-        aria-controls="files-panel" onclick={() => { sidebarMode = "files"; fileSidebarVisited = true; }}>文件</button>
-    </div>
-    {#if sidebarMode === "files"}
-      <div class="file-project-selector">
-        <select aria-label="文件所属项目" value={selectedProjectId ?? ""}
-          onchange={(event) => { const project = projects.find((item) => item.id === event.currentTarget.value); if (project) selectProject(project); }}>
-          {#if !projects.length}<option value="">未选择项目</option>{/if}
-          {#each projects as project (project.id)}<option value={project.id}>{project.name}</option>{/each}
-        </select>
-        <button type="button" aria-label="添加项目目录" title="添加项目目录" onclick={addProject}><FolderPlus size={16} /></button>
-      </div>
-    {/if}
-    <div id="tasks-panel" role="tabpanel" aria-labelledby="tasks-tab" class="sidebar-panel" class:panel-hidden={sidebarMode !== "tasks"}>
     <TaskSidebar
       {projects}
       tasks={piTasks}
@@ -1101,17 +1137,8 @@
       onDelete={deleteTask}
       onAddSession={(project) => void startTask(project.id)}
       onRemoveProject={removeProject}
-      searchFocusToken={sidebarMode === "tasks" && showSidebar ? searchFocusToken : 0}
+      searchFocusToken={showSidebar ? searchFocusToken : 0}
     />
-    </div>
-    <div id="files-panel" role="tabpanel" aria-labelledby="files-tab" class="sidebar-panel" class:panel-hidden={sidebarMode !== "files"}>
-      {#if fileSidebarVisited}
-        <FileSidebar project={selectedProject} onOpen={openFile}
-          visible={sidebarMode === "files" && showSidebar} refreshToken={filesRefreshToken}
-          {watchError} onRetryWatch={() => { watchRetry++; }}
-          searchFocusToken={sidebarMode === "files" && showSidebar ? fileSearchFocusToken : 0} />
-      {/if}
-    </div>
   </aside>
 
   <main class="workspace" class:settings-view={view === "settings"} bind:this={workspace}>
@@ -1140,6 +1167,7 @@
         isCheckingUpdates={isCheckingUpdates}
         {busyRuntime}
         {runtimeOperation}
+        {runtimeProgress}
         onCancelRuntime={() => void cancelRuntime()}
         {appUpdate}
         onChangeSettings={updateSettings}
@@ -1158,6 +1186,12 @@
         {/snippet}
         {#snippet extensions()}
           <PiMarketplace embedded projectPath={selectedProject?.path ?? null} confirm={confirmDialog} onClose={closeSettings} onError={showError} onBusyChange={(busy) => { settingsPackageBusy = busy; }} />
+        {/snippet}
+        {#snippet mcp()}
+          <PiMcpSkillsSettings mode="mcp" confirm={confirmDialog} onError={showError} projectPath={selectedProject?.path ?? null} />
+        {/snippet}
+        {#snippet skills()}
+          <PiMcpSkillsSettings mode="skills" confirm={confirmDialog} onError={showError} projectPath={selectedProject?.path ?? null} />
         {/snippet}
       </PiSettings>
     {:else if !selectedProject}
@@ -1187,6 +1221,9 @@
         onRestart={restartTask}
         onRestore={restoreTask}
         onDelete={deleteTask}
+        onClose={closeTask}
+        onAdd={() => void startTask()}
+        onSplit={splitTask}
       />
     {/if}
       <div class="workspace-content" class:panel-hidden={activeAgent !== "pi" || view !== "workspace" || terminalTasks.length === 0 || !selectedProject}>
@@ -1201,6 +1238,8 @@
             {#if task.interactionMode === "rpc"}
               <ChatPane
                 taskId={task.id} runId={task.runId} title={task.title}
+                autoName={/^(Pi Task \d+|Session [0-9a-f]{8})$/.test(task.title)}
+                onAutoRename={(title) => void autoRenameTask(task, title)}
                 switching={switchingTasks.has(task.id)}
                 visible={activeAgent === "pi" && view === "workspace" && !inspectingFile && task.projectId === selectedProjectId && paneTaskIds.includes(task.id)}
                 active={task.id === activeTaskId}
@@ -1278,6 +1317,22 @@
       {/await}
     {/if}
   </main>
+  <aside class="file-panel" class:panel-hidden={!showFiles} aria-label="文件侧栏">
+    <div class="file-project-selector">
+      <select aria-label="文件所属项目" value={selectedProjectId ?? ""}
+        onchange={(event) => { const project = projects.find((item) => item.id === event.currentTarget.value); if (project) selectProject(project); }}>
+        {#if !projects.length}<option value="">未选择项目</option>{/if}
+        {#each projects as project (project.id)}<option value={project.id}>{project.name}</option>{/each}
+      </select>
+      <button type="button" aria-label="添加项目目录" title="添加项目目录" onclick={addProject}><FolderPlus size={16} /></button>
+    </div>
+    {#if fileSidebarVisited}
+      <FileSidebar project={selectedProject} onOpen={openFile}
+        visible={showFiles} refreshToken={filesRefreshToken}
+        {watchError} onRetryWatch={() => { watchRetry++; }}
+        searchFocusToken={showFiles ? fileSearchFocusToken : 0} />
+    {/if}
+  </aside>
   <GitSidebar projectId={selectedProjectId}
     visible={showGit} refreshToken={filesRefreshToken + gitWatchRefreshToken}
     selected={openedDiff?.projectId === selectedProjectId ? openedDiff : null} onOpen={openGitDiff}

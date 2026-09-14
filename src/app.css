@@ -35,6 +35,41 @@
   --accent-ink: #ffffff;
 }
 
+/* Windows XP（Luna）主题：亮色为经典蓝，暗色为 Royale 黑蓝 */
+:root[data-theme="winxp"][data-color-scheme="light"] {
+  color-scheme: light;
+  --page-bg: #ece9d8;
+  --surface: #f4f2e8;
+  --surface-alt: #efeddd;
+  --surface-raised: #d6d2c2;
+  --surface-hover: #dcd9c8;
+  --border: #aca899;
+  --border-strong: #716f64;
+  --text: #1e1e1e;
+  --text-strong: #000000;
+  --text-muted: #5a584e;
+  --text-subtle: #6d6b60;
+  --accent: #2a5bd7;
+  --accent-ink: #ffffff;
+}
+
+:root[data-theme="winxp"][data-color-scheme="dark"] {
+  color-scheme: dark;
+  --page-bg: #1d2433;
+  --surface: #232c3d;
+  --surface-alt: #202838;
+  --surface-raised: #2c3650;
+  --surface-hover: #33405c;
+  --border: #3a465f;
+  --border-strong: #4a5878;
+  --text: #d6dcec;
+  --text-strong: #f2f5fc;
+  --text-muted: #8b96b3;
+  --text-subtle: #7d88a5;
+  --accent: #5a8be8;
+  --accent-ink: #0d1220;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -106,13 +141,32 @@ select:focus-visible {
 }
 
 @media (min-width: 1101px) {
-  .app-shell.git-visible { grid-template-columns: 52px 260px minmax(0, 1fr) 300px; }
-  .app-shell.sidebar-hidden.git-visible { grid-template-columns: 52px minmax(0, 1fr) 300px; }
+  .app-shell { grid-template-columns: 52px 260px minmax(0, 1fr) 260px; }
+  .app-shell.files-hidden { grid-template-columns: 52px 260px minmax(0, 1fr); }
+  .app-shell.files-visible.git-visible { grid-template-columns: 52px 260px minmax(0, 1fr) 260px 300px; }
+  .app-shell.files-hidden.git-visible { grid-template-columns: 52px 260px minmax(0, 1fr) 300px; }
+  .app-shell.sidebar-hidden { grid-template-columns: 52px minmax(0, 1fr) 260px; }
+  .app-shell.sidebar-hidden.files-hidden { grid-template-columns: 52px minmax(0, 1fr); }
+  .app-shell.sidebar-hidden.files-visible.git-visible { grid-template-columns: 52px minmax(0, 1fr) 260px 300px; }
+  .app-shell.sidebar-hidden.files-hidden.git-visible { grid-template-columns: 52px minmax(0, 1fr) 300px; }
 }
 
-.app-shell.dsh-mode,
-.app-shell.sidebar-hidden {
+.app-shell.dsh-mode {
   grid-template-columns: 52px minmax(0, 1fr);
+}
+
+/* WinXP：蓝色强调按钮 + 经典凹凸边框感 */
+:root[data-theme="winxp"] .toolbar button.primary,
+:root[data-theme="winxp"] .start-button {
+  border-radius: 3px;
+  border: 1px solid #1c3fa0;
+}
+:root[data-theme="winxp"] .agent-switch button.selected {
+  background: linear-gradient(#7ba2e7, #2a5bd7);
+  color: #ffffff;
+}
+:root[data-theme="winxp"] .session-tab.active {
+  box-shadow: inset 0 -2px #2a5bd7;
 }
 
 .activity-rail {
@@ -152,14 +206,17 @@ select:focus-visible {
 .activity-rail .rail-settings { margin-top: auto; }
 
 .project-sidebar { display: flex; flex-direction: column; min-width: 0; min-height: 0; border-right: 1px solid var(--border); background: var(--surface-alt); }
-.sidebar-tabs { display: flex; flex-shrink: 0; gap: 4px; padding: 4px 10px 0; border-bottom: 1px solid var(--border); }
-.sidebar-tabs button { flex: 1; padding: 8px 4px; border: 0; border-bottom: 2px solid transparent; color: var(--text-muted); background: transparent; cursor: pointer; }
-.sidebar-tabs button[aria-selected="true"] { border-color: var(--accent); color: var(--text-strong); }
 .sidebar-panel { flex: 1; min-height: 0; overflow: hidden; }
 .sidebar-panel > .task-sidebar { height: 100%; border: 0; }
 .file-project-selector { display: flex; gap: 4px; padding: 8px 10px 0; }
 .file-project-selector select { flex: 1; min-width: 0; width: 100%; padding: 5px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); color: var(--text); }
 .file-project-selector button { display: grid; place-items: center; border: 0; background: transparent; color: var(--text-muted); cursor: pointer; }
+.file-panel { display: flex; flex-direction: column; min-width: 0; min-height: 0; border-left: 1px solid var(--border); background: var(--surface-alt); }
+.file-panel .sidebar-panel { flex: 1; min-height: 0; overflow: hidden; }
+.file-panel .sidebar-panel > .file-sidebar { height: 100%; border: 0; }
+@media (max-width: 1100px) {
+  .file-panel { position: fixed; top: 48px; bottom: 0; right: 0; width: min(260px, calc(100vw - 44px)); z-index: 5; box-shadow: -4px 0 16px #0002; }
+}
 .panel-hidden { display: none !important; }
 
 .topbar {
@@ -256,8 +313,8 @@ select:focus-visible {
   flex-direction: column;
   min-height: 0;
   overflow: auto;
-  border-right: 1px solid #303832;
-  background: #161a17;
+  border-right: 1px solid var(--border);
+  background: var(--surface-alt);
 }
 
 .projects-section {
@@ -297,7 +354,7 @@ select:focus-visible {
 .project-open:hover,
 .project-add:hover,
 .add-project-empty:hover {
-  background: #202521;
+  background: var(--surface-hover);
 }
 
 .add-project-empty {
@@ -413,7 +470,7 @@ select:focus-visible {
 }
 
 .task-row:hover {
-  background: #202521;
+  background: var(--surface-hover);
 }
 
 .session-status {
@@ -484,7 +541,7 @@ select:focus-visible {
   margin: 6px 8px;
   padding-right: 0;
   padding-left: 0;
-  border-top: 1px solid #2a312c;
+  border-top: 1px solid var(--border);
 }
 
 .sidebar-footer {
@@ -509,9 +566,9 @@ select:focus-visible {
 
 .sidebar-footer button:hover,
 .sidebar-footer button.active {
-  border-color: #465048;
-  color: #f4f7f5;
-  background: #252b27;
+  border-color: var(--border-strong);
+  color: var(--text-strong);
+  background: var(--surface-hover);
 }
 
 .context-menu {
@@ -725,15 +782,13 @@ select:focus-visible {
 :root[data-color-scheme="light"] .sidebar-footer button.active,
 :root[data-color-scheme="light"] .project-open:hover,
 :root[data-color-scheme="light"] .project-add:hover,
-:root[data-color-scheme="light"] .task-row:hover,
-:root[data-color-scheme="light"] .task-tabs button:hover {
+:root[data-color-scheme="light"] .task-row:hover {
   border-color: var(--border-strong) !important;
   color: var(--text-strong) !important;
   background: var(--surface-hover) !important;
 }
 
-:root[data-color-scheme="light"] .project-group.selected,
-:root[data-color-scheme="light"] .task-tabs button.active {
+:root[data-color-scheme="light"] .project-group.selected {
   background: var(--surface-raised) !important;
 }
 
@@ -742,11 +797,6 @@ select:focus-visible {
 :root[data-color-scheme="light"] .start-button {
   color: var(--accent-ink) !important;
   background: var(--accent) !important;
-}
-
-:root[data-color-scheme="light"] .task-tabs button {
-  border-color: var(--border) !important;
-  color: var(--text-muted) !important;
 }
 
 :root[data-color-scheme="light"] .context-menu,

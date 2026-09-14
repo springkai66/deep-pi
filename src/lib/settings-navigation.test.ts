@@ -2,9 +2,9 @@ import { describe, expect, it } from "vitest";
 import { SETTINGS_CATEGORIES, nextSettingsCategory, parseTaskLimit } from "./settings-navigation";
 
 describe("settings navigation", () => {
-  it("provides the six planned categories with stable unique identifiers", () => {
-    expect(SETTINGS_CATEGORIES.map((category) => category.id)).toEqual(["general", "appearance", "models", "runtime", "extensions", "advanced"]);
-    expect(new Set(SETTINGS_CATEGORIES.map((category) => category.id)).size).toBe(6);
+  it("provides the planned categories with stable unique identifiers", () => {
+    expect(SETTINGS_CATEGORIES.map((category) => category.id)).toEqual(["general", "appearance", "models", "runtime", "extensions", "mcp", "skills", "advanced"]);
+    expect(new Set(SETTINGS_CATEGORIES.map((category) => category.id)).size).toBe(8);
   });
   it("supports arrows and boundary keys without capturing unrelated keys", () => {
     expect(nextSettingsCategory("general", "ArrowUp")).toBe("advanced");

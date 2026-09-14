@@ -1,6 +1,7 @@
 use tauri::Manager;
 
 mod app_paths;
+mod agent_config;
 mod bridge;
 mod credentials;
 mod diagnostics;
@@ -187,6 +188,14 @@ pub fn run() {
                 dsh::stop_dsh,
                 package::list_pi_packages,
                 package::package_operation,
+                agent_config::list_mcp_servers,
+                agent_config::save_mcp_server,
+                agent_config::delete_mcp_server,
+                agent_config::list_skills,
+                agent_config::save_skill,
+                agent_config::delete_skill,
+                agent_config::get_pi_tool_permissions,
+                agent_config::set_pi_tool_permissions,
                 operation::cancel_operation,
                 provider::delete_pi_provider,
                 provider::list_pi_providers,
@@ -196,6 +205,7 @@ pub fn run() {
                 credentials::provider_credential_status,
                 credentials::save_provider_credential,
                 credentials::test_provider_connection,
+                credentials::test_model_connection,
                 market::pi_model_profile,
                 market::pi_package_metadata,
                 market::search_pi_models,

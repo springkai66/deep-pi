@@ -4,6 +4,10 @@
   import type { RuntimeComponent, RuntimeUpdate } from "./runtime";
   import { updateActionsVisible, updateSuppressed } from "./runtime";
   import type { OperationState } from "./operation";
+  export interface RuntimeProgress {
+    phase: string;
+    percent: number | null;
+  }
   export interface RuntimeSettingsProps {
     settings: AppSettings;
     runtimes: RuntimeComponent[];
@@ -11,6 +15,7 @@
     isCheckingUpdates: boolean;
     busyRuntime: string | null;
     runtimeOperation: OperationState | null;
+    runtimeProgress: RuntimeProgress | null;
     onCancelRuntime: () => void;
     appUpdate: AppUpdateState;
     onCheckUpdates: () => void;
@@ -25,7 +30,7 @@
 
 <script lang="ts">
   import { Download, RefreshCw, X } from "@lucide/svelte";
-  let { settings, runtimes, updates, isCheckingUpdates, busyRuntime, runtimeOperation, onCancelRuntime,
+  let { settings, runtimes, updates, isCheckingUpdates, busyRuntime, runtimeOperation, runtimeProgress, onCancelRuntime,
     appUpdate, onCheckUpdates, onCheckAppUpdate, onInstallAppUpdate, onUpdateRuntime, onRollbackRuntime,
     onSnoozeRuntime, onSkipRuntime }: RuntimeSettingsProps = $props();
   const sourceLabels = { managed: "托管", development: "开发目录", profile: "配置文件" };
@@ -93,6 +98,18 @@
       </div>
       {#if update?.error}<p role="alert">{update.error}</p>{/if}
       {#if update?.note && !update.error}<p class="muted" role="status">{update.note}</p>{/if}
+      {#if busyRuntime === runtime.id && runtimeProgress}
+        <div class="runtime-progress" role="status" aria-label="组件更新进度">
+          <div class="runtime-progress-bar" aria-hidden="true">
+            <div
+              class="runtime-progress-fill"
+              class:indeterminate={runtimeProgress.percent === null}
+              style={runtimeProgress.percent === null ? undefined : `width: ${runtimeProgress.percent}%`}
+            ></div>
+          </div>
+          <span class="runtime-progress-text">{runtimeProgress.phase}{runtimeProgress.percent !== null ? ` ${runtimeProgress.percent}%` : ""}</span>
+        </div>
+      {/if}
     {/each}
   {/if}
 </section>
@@ -100,4 +117,13 @@
 <style>
   .runtime-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px; min-width: 0; }
   .release-notes { white-space: pre-wrap; }
+  .runtime-progress { display: grid; gap: 4px; margin-top: 6px; }
+  .runtime-progress-bar { height: 4px; border-radius: 2px; background: var(--surface-hover); overflow: hidden; }
+  .runtime-progress-fill { height: 100%; border-radius: 2px; background: var(--accent); transition: width .3s ease; }
+  .runtime-progress-fill.indeterminate { width: 40%; animation: runtime-progress-slide 1.2s ease-in-out infinite; }
+  @keyframes runtime-progress-slide {
+    0% { margin-left: -40%; }
+    100% { margin-left: 100%; }
+  }
+  .runtime-progress-text { font-size: 11px; color: var(--text-muted); }
 </style>

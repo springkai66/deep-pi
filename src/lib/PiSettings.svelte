@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ArrowLeft, Monitor, Palette, Server, Download, PackageOpen, Wrench } from "@lucide/svelte";
+  import { ArrowLeft, Monitor, Palette, Server, Download, PackageOpen, Puzzle, Sparkles, Wrench } from "@lucide/svelte";
   import type { Snippet } from "svelte";
   import { CODE_FONT_OPTIONS, UI_FONT_OPTIONS, type AppSettings, type ExternalEditor } from "./settings";
   import { SETTINGS_CATEGORIES, nextSettingsCategory, parseTaskLimit, type SettingsCategory } from "./settings-navigation";
@@ -16,20 +16,26 @@
     onClose: () => void;
     models: Snippet;
     extensions: Snippet;
+    mcp: Snippet;
+    skills: Snippet;
     closeBlocked?: boolean;
     saving?: boolean;
     onDiagnosticsBusy: (busy: boolean) => void;
     confirmDiagnosticsClear: () => Promise<boolean>;
   }
-  let { category, onCategoryChange, onChangeSettings, onEditorSaved, onClose, models, extensions, closeBlocked = false, saving = false, onDiagnosticsBusy, confirmDiagnosticsClear, ...runtime }: Props = $props();
-  const icons = { general: Monitor, appearance: Palette, models: Server, runtime: Download, extensions: PackageOpen, advanced: Wrench };
+  let { category, onCategoryChange, onChangeSettings, onEditorSaved, onClose, models, extensions, mcp, skills, closeBlocked = false, saving = false, onDiagnosticsBusy, confirmDiagnosticsClear, ...runtime }: Props = $props();
+  const icons = { general: Monitor, appearance: Palette, models: Server, runtime: Download, extensions: PackageOpen, mcp: Puzzle, skills: Sparkles, advanced: Wrench };
   let modelsVisited = $state(false);
   let extensionsVisited = $state(false);
+  let mcpVisited = $state(false);
+  let skillsVisited = $state(false);
   let advancedVisited = $state(false);
   let taskLimitError = $state("");
   $effect(() => {
     if (category === "models") modelsVisited = true;
     if (category === "extensions") extensionsVisited = true;
+    if (category === "mcp") mcpVisited = true;
+    if (category === "skills") skillsVisited = true;
     if (category === "advanced") advancedVisited = true;
   });
   const title = $derived(SETTINGS_CATEGORIES.find((item) => item.id === category)?.label ?? "设置");
@@ -93,6 +99,11 @@
               <option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option>
             </select>
           </label>
+          <label class="setting-control"><strong>主题风格</strong>
+            <select value={runtime.settings.theme} aria-label="主题风格" onchange={(event) => updateSettings({ theme: event.currentTarget.value as AppSettings["theme"] })}>
+              <option value="win11">Windows 11</option><option value="winxp">Windows XP</option>
+            </select>
+          </label>
           {#each [{ key: "appFont", label: "应用字体" }, { key: "textFont", label: "设置文本字体" }] as field}
             <label class="setting-control"><strong>{field.label}</strong>
               <select value={runtime.settings[field.key as "appFont" | "textFont"]} aria-label={field.label}
@@ -111,6 +122,8 @@
       <div class="settings-panel embedded-panel" hidden={category !== "models"}>{#if modelsVisited}{@render models()}{/if}</div>
       <div class="settings-panel" hidden={category !== "runtime"}><RuntimeSettings {...runtime} /></div>
       <div class="settings-panel embedded-panel" hidden={category !== "extensions"}>{#if extensionsVisited}{@render extensions()}{/if}</div>
+      <div class="settings-panel embedded-panel" hidden={category !== "mcp"}>{#if mcpVisited}{@render mcp()}{/if}</div>
+      <div class="settings-panel embedded-panel" hidden={category !== "skills"}>{#if skillsVisited}{@render skills()}{/if}</div>
       <div class="settings-panel" hidden={category !== "advanced"}>
         <ExternalEditorSettings editor={runtime.settings.externalEditor} onSaved={onEditorSaved} />
         {#if advancedVisited}<DiagnosticsPanel onBusyChange={onDiagnosticsBusy} confirmClear={confirmDiagnosticsClear} />{/if}

@@ -4,6 +4,8 @@ export const SETTINGS_CATEGORIES = [
   { id: "models", label: "模型与凭据" },
   { id: "runtime", label: "运行时与更新" },
   { id: "extensions", label: "Pi 扩展" },
+  { id: "mcp", label: "MCP 服务" },
+  { id: "skills", label: "Skills 技能" },
   { id: "advanced", label: "高级与诊断" },
 ] as const;
 

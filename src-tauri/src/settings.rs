@@ -46,6 +46,17 @@ fn deserialize_pi_environment<'de, D: serde::Deserializer<'de>>(
     })
 }
 
+fn default_theme() -> String {
+    "win11".into()
+}
+
+fn deserialize_theme<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<String, D::Error> {
+    let value = String::deserialize(deserializer)?;
+    Ok(if value == "winxp" { value } else { default_theme() })
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
@@ -58,6 +69,11 @@ pub struct AppSettings {
     pub snoozed_updates: BTreeMap<String, u64>,
     #[serde(default = "default_color_mode")]
     pub color_mode: String,
+    #[serde(
+        default = "default_theme",
+        deserialize_with = "deserialize_theme"
+    )]
+    pub theme: String,
     #[serde(default = "default_app_font")]
     pub app_font: String,
     #[serde(default = "default_text_font")]
@@ -84,6 +100,7 @@ impl Default for AppSettings {
             skipped_updates: BTreeMap::new(),
             snoozed_updates: BTreeMap::new(),
             color_mode: default_color_mode(),
+            theme: default_theme(),
             app_font: default_app_font(),
             text_font: default_text_font(),
             code_font: default_code_font(),

@@ -3,6 +3,8 @@ use std::sync::{
     Arc, Mutex,
 };
 
+use serde::Serialize;
+
 #[derive(Clone, Default)]
 pub struct Cancellation(Arc<AtomicU8>);
 
@@ -27,6 +29,16 @@ impl Cancellation {
             .map(|_| ())
             .map_err(|_| "operation cancelled or already committing".into())
     }
+}
+
+/// 操作进度：phase 为人类可读的阶段说明，percent 为 0-100 可选百分比。
+/// 由长耗时操作（运行时安装等）通过 Tauri 事件推送给前端。
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationProgress {
+    pub operation_id: String,
+    pub phase: String,
+    pub percent: Option<u8>,
 }
 
 struct Active {

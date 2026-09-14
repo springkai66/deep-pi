@@ -22,6 +22,9 @@ struct DshProcess {
     /// 由系统结束 DSH 及其子进程，避免遗留持有端口的孤儿进程。
     tree: Option<crate::process_runner::ProcessTree>,
     url: Option<String>,
+    /// 0.1.5 起的浏览器会话 cookie（`dsh-auth-…=…`），由启动 URL 的
+    /// launch token 交换而来；Host API（session.list 等）必须携带。
+    cookie: Option<String>,
     generation: u64,
 }
 
@@ -189,7 +192,9 @@ fn start_dsh_inner(
     }
 
     let mut command = Command::new(paths.node_runtime()?);
+    // 0.1.5 起 HMR 服务要求 Node 以 --expose-internals 启动，否则 DSH 无法就绪。
     command
+        .arg("--expose-internals")
         .arg(cli)
         .args(["web", "--host", "127.0.0.1", "--port", "0", "--no-open"])
         .current_dir(&runtime)
@@ -236,6 +241,11 @@ fn start_dsh_inner(
     state.child = Some(child);
     state.tree = Some(tree);
     state.url = Some(url.clone());
+    // 0.1.5 起 Host API 需要 launch token 交换的签名 cookie；
+    // 交换失败不阻塞启动，Webview 仍可用完整 URL 自行完成 token 换 cookie。
+    state.cookie = dsh_api::exchange_browser_cookie(&dsh_api_base(&url).unwrap_or_else(|| url.clone()), &url)
+        .ok()
+        .flatten();
     drop(state);
 
     let _ = app.emit(
@@ -273,12 +283,14 @@ fn monitor_dsh(app: AppHandle, generation: u64, url: String) {
                     state.child = None;
                     state.tree = None;
                     state.url = None;
+                    state.cookie = None;
                     Some(Ok(Some(status.code())))
                 }
                 Err(error) => {
                     state.child = None;
                     state.tree = None;
                     state.url = None;
+                    state.cookie = None;
                     Some(Err(error.to_string()))
                 }
             }
@@ -300,10 +312,29 @@ fn monitor_dsh(app: AppHandle, generation: u64, url: String) {
             return;
         }
 
-        if let (Ok(sessions), Some(store)) = (
-            dsh_api::list_sessions(&dsh_api_base(&url).unwrap_or_else(|| url.clone())),
-            app.try_state::<TaskStore>(),
-        ) {
+        let api_base = dsh_api_base(&url).unwrap_or_else(|| url.clone());
+        let cookie = app
+            .try_state::<DshManager>()
+            .and_then(|manager| manager.process.lock().ok()?.cookie.clone());
+        let sessions = match dsh_api::list_sessions(&api_base, cookie.as_deref()) {
+            Ok(sessions) => Some(sessions),
+            // cookie 失效（如 DSH 内部状态重置）时重新交换一次。
+            Err(_) => {
+                let refreshed = dsh_api::exchange_browser_cookie(&api_base, &url).ok().flatten();
+                if let Some(cookie) = refreshed.as_ref() {
+                    if let Some(manager) = app.try_state::<DshManager>() {
+                        if let Ok(mut state) = manager.process.lock() {
+                            if state.generation == generation {
+                                state.cookie = Some(cookie.clone());
+                            }
+                        }
+                    }
+                }
+                refreshed
+                    .and_then(|cookie| dsh_api::list_sessions(&api_base, Some(&cookie)).ok())
+            }
+        };
+        if let (Some(sessions), Some(store)) = (sessions, app.try_state::<TaskStore>()) {
             if store.sync_dsh_sessions(&sessions).is_ok() {
                 if let Ok(tasks) = store.list() {
                     let dsh_tasks = tasks

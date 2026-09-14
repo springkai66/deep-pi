@@ -62,6 +62,52 @@ export function openPane({
   return { panes, active: requested };
 }
 
+export interface SplitPaneRequest extends PaneRequest {
+  /** 分割目标：右键菜单选中的任务。 */
+  requested: string;
+  /** 分割方向：right 在活动窗格右侧插入，down 在其下方插入。 */
+  direction: "right" | "down";
+}
+
+/**
+ * 右键分割：把当前窗格切成两半，新任务占一半。
+ * - right：布局进入双列（或四格），新窗格插到活动窗格之后（水平方向）。
+ * - down：同上，但新窗格语义上排在下方；grid 布局按行优先填充。
+ * 都没有空位时替换活动窗格旁的第一个非活动窗格。
+ */
+export function splitPane({
+  current,
+  active,
+  requested,
+  available,
+  capacity,
+  direction,
+}: SplitPaneRequest): PaneSelection {
+  if (!available.includes(requested)) {
+    return changePaneCapacity({ current, active, available, capacity });
+  }
+  const limit = boundedCapacity(capacity);
+  // 至少需要两个窗格才有分割意义；single 模式先升到 split。
+  const effectiveLimit = Math.max(2, limit);
+  let panes = validIds(current, available).slice(0, effectiveLimit);
+  const anchor = active !== null && panes.includes(active) ? panes.indexOf(active) : 0;
+  if (panes.includes(requested)) {
+    // 已经打开：把它挪到锚点旁边（分割语义）。
+    panes = panes.filter((id) => id !== requested);
+    panes.splice(direction === "down" ? Math.min(anchor + effectiveLimit, panes.length) : anchor + 1, 0, requested);
+    return { panes: panes.slice(0, effectiveLimit), active: requested };
+  }
+  if (panes.length < effectiveLimit) {
+    panes.splice(anchor + 1, 0, requested);
+    return { panes, active: requested };
+  }
+  // 满员：替换锚点后第一个非活动窗格。
+  const replaceAt = panes.findIndex((id, index) => index > anchor && id !== active);
+  const target = replaceAt === -1 ? (anchor + 1) % panes.length : replaceAt;
+  panes[target] = requested;
+  return { panes, active: requested };
+}
+
 export function changePaneCapacity({
   current,
   active,

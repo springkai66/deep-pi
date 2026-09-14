@@ -34,7 +34,7 @@ The managed runtimes (Node, Pi, DSH) are installed on demand from official distr
 
 - The installer is not Authenticode-signed yet; an open-source signing application is in progress.
 - Local Pi/DSH/Node/npm installations are not read; DeepPi only uses its own managed runtimes and configuration directory (Node is installed by the app from the official distribution and verified against SHA-256).
-- DSH is pinned to the verified `0.1.1-rc.2`: upstream 0.1.5-rc.1 changed local authentication, so upgrades are withheld until adapted (the UI explains why).
+- DSH runs the verified `0.1.5-rc.2`: the host adapts its launch-token auth and the `/api/<ns>/<method>` RPC envelope; upstream updates are still gated behind compatibility verification.
 - Host shortcuts do not work while the DSH child view has focus (see [KEYBOARD_SHORTCUTS.md](./KEYBOARD_SHORTCUTS.md)).
 - **Content** search in the file sidebar depends on `rg.exe` (ripgrep) being available on the system `PATH`: DeepPi neither bundles nor auto-installs it, and shows a "ripgrep not found" message in that mode when it is missing (file-name search is unaffected; see [TROUBLESHOOTING.md](./TROUBLESHOOTING.md)).
 - The DeepPi self-update pipeline is configured, but v1.0.0 is the first release; real cross-version self-update and rollback will be validated when the next version ships.

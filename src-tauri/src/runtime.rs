@@ -25,10 +25,10 @@ use crate::{
 
 const MIN_DSHMARKET_DSH_VERSION: &str = "0.1.1-rc.2";
 
-/// v1.0 兼容上限：DSH 仍处于 RC，契约会变。0.1.5-rc.1 起启动 URL 带进程 token，
-/// 且 Host API 需要由浏览器交换得到的签名 cookie，宿主的会话同步与就绪探测尚未适配，
-/// 因此只安装已验证的 0.1.1-rc.2；完成适配后可抬高此常量。
-const VERIFIED_DSH_VERSION: &str = "0.1.1-rc.2";
+/// v1.1 兼容基线：0.1.5-rc.2。启动 URL 带 launch token，Host API 需要先
+/// 用 token 交换签名 cookie（`dsh-auth-…`），且 RPC 端点改为
+/// `POST /api/<namespace>/<method>` 信封（`{args:{…}}`）；宿主已适配。
+const VERIFIED_DSH_VERSION: &str = "0.1.5-rc.2";
 
 /// DeepPi 托管的 Node 版本。Pi、DSH、dshmarket 均由它执行；
 /// 不使用电脑上安装的 Node/npm。版本变更需与兼容矩阵一起验证。
@@ -672,6 +672,7 @@ fn download_node_archive(
     url: &str,
     destination: &Path,
     cancellation: &Cancellation,
+    on_progress: Option<&dyn Fn(u8)>,
 ) -> Result<String, String> {
     cancellation.check()?;
     let response = agent
@@ -682,11 +683,20 @@ fn download_node_archive(
     if !(200..300).contains(&status) {
         return Err(format!("下载返回 HTTP {status}"));
     }
+    // Node 官方发行包带 Content-Length，可据此计算百分比。
+    let total = response
+        .headers()
+        .get("content-length")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|total| *total > 0);
     let mut reader = response.into_body().into_reader();
     let mut file =
         fs::File::create(destination).map_err(|error| format!("无法创建下载文件：{error}"))?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; 128 * 1024];
+    let mut downloaded: u64 = 0;
+    let mut last_reported: u8 = 0;
     loop {
         cancellation.check()?;
         let read = reader
@@ -698,6 +708,17 @@ fn download_node_archive(
         hasher.update(&buffer[..read]);
         file.write_all(&buffer[..read])
             .map_err(|error| format!("下载写入失败：{error}"))?;
+        if let Some(on_progress) = on_progress {
+            downloaded += read as u64;
+            if let Some(total) = total {
+                let percent = ((downloaded.min(total) * 100) / total) as u8;
+                // 每 5% 上报一次，避免事件风暴。
+                if percent >= last_reported + 5 || percent == 100 {
+                    last_reported = percent;
+                    on_progress(percent);
+                }
+            }
+        }
     }
     file.sync_all()
         .map_err(|error| format!("下载落盘失败：{error}"))?;
@@ -770,6 +791,7 @@ fn install_node(
     paths: &AppPaths,
     version: &str,
     cancellation: &Cancellation,
+    progress: &dyn RuntimeProgressSink,
 ) -> Result<RuntimeOperationResult, String> {
     if version != MANAGED_NODE_VERSION {
         return Err(format!(
@@ -801,12 +823,15 @@ fn install_node(
         )?;
         let expected = parse_sha256(&shasums, &archive_name)
             .ok_or_else(|| format!("官方校验文件缺少 {archive_name}"))?;
+        progress.report("下载 Node 官方发行包", Some(0));
         let digest = download_node_archive(
             &agent,
             &format!("{NODE_DIST_BASE}/v{version}/{archive_name}"),
             &archive_path,
             cancellation,
+            Some(&|percent| progress.report("下载 Node 官方发行包", Some(percent))),
         )?;
+        progress.report("校验 SHA-256", None);
         if digest != expected {
             return Err("Node 归档的 SHA-256 校验失败".into());
         }
@@ -930,6 +955,7 @@ pub async fn install_runtime(
     let operation = app
         .state::<OperationManager>()
         .begin(&request.operation_id)?;
+    let progress = InstallProgressReporter::new(app.clone(), &request.operation_id);
     tauri::async_runtime::spawn_blocking(move || {
         install_runtime_inner(
             app.state(),
@@ -939,12 +965,62 @@ pub async fn install_runtime(
             app.state(),
             request,
             &operation.token,
+            &progress,
         )
     })
     .await
     .map_err(|error| format!("runtime install worker failed: {error}"))?
 }
 
+/// 运行时安装进度上报：通过 `runtime-progress` 事件推送给前端。
+/// 阶段为人类可读文案；百分比在可计算的阶段给出（下载/解压）。
+pub struct InstallProgressReporter {
+    app: AppHandle,
+    operation_id: String,
+}
+
+impl InstallProgressReporter {
+    fn new(app: AppHandle, operation_id: &str) -> Self {
+        Self {
+            app,
+            operation_id: operation_id.to_owned(),
+        }
+    }
+
+    pub fn report(&self, phase: &str, percent: Option<u8>) {
+        use tauri::Emitter;
+        let _ = self.app.emit(
+            "runtime-progress",
+            crate::operation::OperationProgress {
+                operation_id: self.operation_id.clone(),
+                phase: phase.to_owned(),
+                percent: percent.map(|value| value.clamp(0, 100)),
+            },
+        );
+    }
+}
+
+/// 进度上报的最小接口，便于测试注入空实现。
+pub trait RuntimeProgressSink: Send + Sync {
+    fn report(&self, phase: &str, percent: Option<u8>);
+}
+
+impl RuntimeProgressSink for InstallProgressReporter {
+    fn report(&self, phase: &str, percent: Option<u8>) {
+        Self::report(self, phase, percent)
+    }
+}
+
+/// 测试专用的空进度上报。
+#[cfg(test)]
+struct NullProgressSink;
+
+#[cfg(test)]
+impl RuntimeProgressSink for NullProgressSink {
+    fn report(&self, _phase: &str, _percent: Option<u8>) {}
+}
+
+#[allow(clippy::too_many_arguments)]
 fn install_runtime_inner(
     lock: State<'_, RuntimeOperationLock>,
     paths: State<'_, AppPaths>,
@@ -953,6 +1029,7 @@ fn install_runtime_inner(
     pty_manager: State<'_, crate::pty::PtyManager>,
     request: RuntimeInstallRequest,
     cancellation: &Cancellation,
+    progress: &dyn RuntimeProgressSink,
 ) -> Result<RuntimeOperationResult, String> {
     let _guard = lock.acquire()?;
     cancellation.check()?;
@@ -963,10 +1040,11 @@ fn install_runtime_inner(
     if !valid_package_version(&request.version) {
         return Err("runtime version is invalid".into());
     }
+    progress.report(&format!("准备安装 {}", request.version), None);
     ensure_runtime_idle(&request.component_id, &store, &dsh_manager, &pty_manager)?;
     // Node 是自包含的基础运行时：从官方发行包下载，不从 npm 安装。
     if request.component_id == "node" {
-        let result = install_node(&paths, &request.version, cancellation)?;
+        let result = install_node(&paths, &request.version, cancellation, progress)?;
         log::info!(
             "event=runtime_install component={} version={} status=active",
             request.component_id,
@@ -976,6 +1054,7 @@ fn install_runtime_inner(
     }
     let package = runtime_package(&request.component_id)
         .ok_or_else(|| "runtime component is not supported".to_string())?;
+    progress.report("查询官方 registry", None);
     let proxy = configured_update_proxy()?;
     let registry_latest = latest_package_version(package, proxy.as_deref())?;
     cancellation.check()?;
@@ -1183,7 +1262,7 @@ fn check_runtime_updates_inner(
                             VERIFIED_DSH_VERSION.to_owned(),
                             (registry_latest != VERIFIED_DSH_VERSION).then(|| {
                                 format!(
-                                    "上游已有 {registry_latest}；该版本改变了本地认证方式，尚未通过兼容验证，暂时固定 {VERIFIED_DSH_VERSION}"
+                                    "上游已有 {registry_latest}；该版本尚未通过 DeepPi 兼容验证，暂时固定 {VERIFIED_DSH_VERSION}"
                                 )
                             }),
                         )
@@ -1295,7 +1374,9 @@ mod tests {
         .unwrap();
         let cancellation = crate::operation::Cancellation::default();
         // 自包含流程：先装内置 Node（官方发行包），再用托管 npm 装 Pi。
-        super::install_node(&paths, super::MANAGED_NODE_VERSION, &cancellation).unwrap();
+        // 测试里不需要真实进度上报，用空实现占位。
+        let progress = super::NullProgressSink;
+        super::install_node(&paths, super::MANAGED_NODE_VERSION, &cancellation, &progress).unwrap();
         assert!(paths.node_runtime().unwrap().is_file());
         assert!(paths.npm_runtime().unwrap().is_file());
 

@@ -4,7 +4,7 @@
 
 - 基线版本：Pi 0.84.4（DeepPi 托管运行时，`@earendil-works/pi-coding-agent`）；已验证向上兼容 **Pi 0.85.1**（见“流式增量”一节）
 - 官方文档：随包分发 `docs/rpc.md`（Pi 0.84.4），本文只声明该版本上验证过的子集
-- DSH 基线：0.1.1-rc.2（dshmarket 最低要求），DSH 使用原生 Web UI，不经过本协议
+- DSH 基线：0.1.5-rc.2（dshmarket 最低要求 0.1.1-rc.2），DSH 使用原生 Web UI，不经过本协议
 
 ## 传输与分帧
 
