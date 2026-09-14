@@ -321,19 +321,24 @@ fn configured_update_proxy() -> Result<Option<String>, String> {
     Ok(None)
 }
 
-/// npm 官方 registry 与国内镜像（npmmirror，元数据与包文件与官方同步）。
-/// 官方源不可达时自动回落镜像，避免安装卡在“查询官方 registry”。
-const REGISTRY_OFFICIAL: &str = "https://registry.npmjs.org";
-const REGISTRY_MIRROR: &str = "https://registry.npmmirror.com";
+/// 按顺序尝试的 npm registry。npmmirror（阿里 CDN）国内最快、最稳，作为主源；
+/// 官方源与腾讯镜像作为备用。镜像与官方同步，仅新版本发布后的短时间内可能滞后。
+const REGISTRY_CANDIDATES: [&str; 3] = [
+    "https://registry.npmmirror.com",
+    "https://registry.npmjs.org",
+    "https://mirrors.cloud.tencent.com/npm/",
+];
 
 /// Node 发行包镜像（npmmirror 托管同一份文件，SHA-256 校验仍然生效）。
 const NODE_DIST_MIRROR: &str = "https://npmmirror.com/mirrors/node";
 
-fn registry_alternate(registry: &str) -> &'static str {
-    if registry == REGISTRY_OFFICIAL {
-        REGISTRY_MIRROR
+fn registry_label(registry: &str) -> &'static str {
+    if registry.starts_with("https://registry.npmmirror.com") {
+        "npmmirror"
+    } else if registry.starts_with("https://registry.npmjs.org") {
+        "官方源"
     } else {
-        REGISTRY_OFFICIAL
+        "腾讯镜像"
     }
 }
 
@@ -344,7 +349,7 @@ fn fetch_latest_from_registry(
 ) -> Result<String, String> {
     let encoded = package.replace('/', "%2f");
     let mut config = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(10)))
+        .timeout_global(Some(Duration::from_secs(8)))
         .http_status_as_error(false);
     if let Some(proxy) = proxy {
         let proxy =
@@ -378,17 +383,17 @@ fn fetch_latest_from_registry(
     Ok(version.to_owned())
 }
 
-/// 查询包的最新版本：先试官方 registry，失败时回落 npmmirror 镜像。
-/// 返回 `(版本, 实际使用的 registry)`，安装时优先走同一来源。
+/// 查询包的最新版本：按候选源顺序尝试（npmmirror → 官方 → 腾讯），
+/// 首个响应的源胜出。返回 `(版本, 实际使用的 registry)`，安装时优先走同一来源。
 fn latest_package_version(
     package: &str,
     proxy: Option<&str>,
 ) -> Result<(String, &'static str), String> {
     let mut errors = Vec::new();
-    for registry in [REGISTRY_OFFICIAL, REGISTRY_MIRROR] {
+    for registry in REGISTRY_CANDIDATES {
         match fetch_latest_from_registry(registry, package, proxy) {
             Ok(version) => return Ok((version, registry)),
-            Err(error) => errors.push(format!("{registry}: {error}")),
+            Err(error) => errors.push(format!("{}: {error}", registry_label(registry))),
         }
     }
     Err(errors.join("；"))
@@ -544,14 +549,15 @@ fn ensure_runtime_idle(
 }
 
 /// 只用托管 Node 自带的 npm；不回落到电脑上全局安装的 npm。
-/// `registry` 为空时使用 npm 默认源；安装失败时由 [`npm_install_with_fallback`]
-/// 自动切换到另一个源重试。
+/// `registry` 为空时使用 npm 默认源。安装期间由 [`npm_install_with_fallback`]
+/// 提供心跳进度与失败后的换源重试。
 fn npm_install_with_registry(
     paths: &AppPaths,
     prefix: &Path,
     spec: &str,
     registry: Option<&str>,
     cancellation: &Cancellation,
+    progress: Option<&dyn RuntimeProgressSink>,
 ) -> Result<(), String> {
     let prefix = prefix.to_string_lossy().into_owned();
     let proxy = configured_update_proxy()?;
@@ -570,8 +576,10 @@ fn npm_install_with_registry(
             "--no-audit",
             "--no-fund",
             "--package-lock=false",
+            // 单请求 30s 上限：死连接最多拖 30s 就报错，慢传输也能完成；
+            // 失败后由上层自动换下一个源。
             "--fetch-timeout=30000",
-            "--fetch-retries=2",
+            "--fetch-retries=1",
         ])
         .arg("--cache")
         .arg(&npm_cache);
@@ -591,13 +599,45 @@ fn npm_install_with_registry(
     if let Some(proxy) = proxy {
         command.env("HTTP_PROXY", &proxy).env("HTTPS_PROXY", &proxy);
     }
-    let output = process_runner::run_cancellable(
-        &mut command,
-        // 安装预算取安全网而非预期时长：DSH 依赖树很大（慢网下可超过 10 分钟），
-        // 但仍可由“取消”立即中断。
-        Duration::from_secs(1800),
-        Some(cancellation),
-    )?;
+    // 心跳：大依赖树下载可能超过 1 分钟，界面阶段文本不刷新会让用户以为卡死。
+    // 每 10s 上报一次已用时长；安装结束或取消后立即停止。
+    let stop_heartbeat = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let output = std::thread::scope(|scope| {
+        if let Some(progress) = progress {
+            let stop = stop_heartbeat.clone();
+            let label = registry
+                .map(registry_label)
+                .unwrap_or("npm 默认源")
+                .to_owned();
+            scope.spawn(move || {
+                let started = std::time::Instant::now();
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_secs(10));
+                    if stop.load(std::sync::atomic::Ordering::Relaxed)
+                        || cancellation.check().is_err()
+                    {
+                        break;
+                    }
+                    progress.report(
+                        &format!(
+                            "正在从 {label} 下载依赖（已 {}s，可随时取消）",
+                            started.elapsed().as_secs()
+                        ),
+                        None,
+                    );
+                }
+            });
+        }
+        let output = process_runner::run_cancellable(
+            &mut command,
+            // 安装预算取安全网而非预期时长：DSH 依赖树很大（慢网下可超过 10 分钟），
+            // 但仍可由“取消”立即中断。
+            Duration::from_secs(1800),
+            Some(cancellation),
+        );
+        stop_heartbeat.store(true, std::sync::atomic::Ordering::Relaxed);
+        output
+    })?;
     if output.status.success() {
         return Ok(());
     }
@@ -605,29 +645,50 @@ fn npm_install_with_registry(
     Err(format!("runtime installation failed: {details}"))
 }
 
-/// 安装 npm 包：优先使用指定 registry，失败后自动换另一个源重试一次。
+/// 安装 npm 包：按候选源顺序尝试（优先 `preferred`，通常是版本查询时
+/// 实际响应的源），每个源失败后自动换下一个；全部失败才报错。
 /// 官方 registry 在部分网络下不可达或极慢，这是“一直卡在查询/下载”的根因；
-/// npmmirror 与官方同步，切换后重装通常能立即成功。
+/// npmmirror（阿里 CDN）与官方同步，国内网络下快且稳。
 fn npm_install_with_fallback(
     paths: &AppPaths,
     prefix: &Path,
     spec: &str,
-    preferred: Option<&str>,
+    preferred: Option<&'static str>,
     cancellation: &Cancellation,
+    progress: Option<&dyn RuntimeProgressSink>,
 ) -> Result<(), String> {
-    let (first, second) = match preferred {
-        Some(registry) => (Some(registry), Some(registry_alternate(registry))),
-        None => (None, Some(REGISTRY_MIRROR)),
-    };
-    match npm_install_with_registry(paths, prefix, spec, first, cancellation) {
-        Ok(()) => Ok(()),
-        Err(first_error) => {
-            log::warn!("event=npm_install status=fallback reason=\"{first_error}\"");
-            // 失败的 staging 目录由调用方清理；这里只负责重试。
-            npm_install_with_registry(paths, prefix, spec, second, cancellation)
-                .map_err(|second_error| format!("{first_error}；备用源也失败：{second_error}"))
+    let mut candidates: Vec<&'static str> = REGISTRY_CANDIDATES.to_vec();
+    if let Some(preferred) = preferred {
+        candidates.retain(|&registry| registry != preferred);
+        candidates.insert(0, preferred);
+    }
+    let mut errors: Vec<String> = Vec::new();
+    for (index, registry) in candidates.iter().enumerate() {
+        if index > 0 {
+            // 被用户取消时不再换源重试。
+            cancellation.check()?;
+            let previous = registry_label(candidates[index - 1]);
+            if let Some(progress) = progress {
+                progress.report(
+                    &format!("{previous} 失败，改用 {} 重试", registry_label(registry)),
+                    None,
+                );
+            }
+            log::warn!(
+                "event=npm_install status=fallback registry={} reason=\"{}\"",
+                registry,
+                errors
+                    .last()
+                    .map_or_else(String::new, |error| error.clone())
+            );
+        }
+        match npm_install_with_registry(paths, prefix, spec, Some(registry), cancellation, progress)
+        {
+            Ok(()) => return Ok(()),
+            Err(error) => errors.push(format!("{}: {error}", registry_label(registry))),
         }
     }
+    Err(errors.join("；"))
 }
 
 fn dshmarket_backup_root(paths: &AppPaths) -> PathBuf {
@@ -658,6 +719,7 @@ fn install_dshmarket(
     paths: &AppPaths,
     version: &str,
     cancellation: &Cancellation,
+    progress: &dyn RuntimeProgressSink,
 ) -> Result<RuntimeOperationResult, String> {
     let profile = paths.dsh_profile();
     if !profile.is_dir() {
@@ -677,8 +739,9 @@ fn install_dshmarket(
         paths,
         &staging,
         &spec,
-        Some(REGISTRY_OFFICIAL),
+        Some(REGISTRY_CANDIDATES[0]),
         cancellation,
+        Some(progress),
     ) {
         let _ = fs::remove_dir_all(&staging);
         return Err(error);
@@ -708,8 +771,9 @@ fn install_dshmarket(
         paths,
         &profile,
         &spec,
-        Some(REGISTRY_OFFICIAL),
+        Some(REGISTRY_CANDIDATES[0]),
         cancellation,
+        Some(progress),
     )
     .and_then(|()| {
         let installed = fs::read_to_string(paths.dshmarket_manifest())
@@ -1152,7 +1216,7 @@ fn install_runtime_inner(
     }
     let package = runtime_package(&request.component_id)
         .ok_or_else(|| "runtime component is not supported".to_string())?;
-    progress.report("查询官方 registry", None);
+    progress.report("查询 registry 最新版本", None);
     let proxy = configured_update_proxy()?;
     let (registry_latest, registry_used) = latest_package_version(package, proxy.as_deref())?;
     cancellation.check()?;
@@ -1164,10 +1228,10 @@ fn install_runtime_inner(
         ));
     }
     if registry_latest != request.version && request.component_id != "dsh" {
-        return Err("只能安装刚从官方 registry 验证的最新版本".into());
+        return Err("只能安装刚从 registry 验证的最新版本".into());
     }
     if request.component_id == "dshmarket" {
-        let result = install_dshmarket(&paths, &request.version, cancellation)?;
+        let result = install_dshmarket(&paths, &request.version, cancellation, progress)?;
         log::info!(
             "event=runtime_install component={} version={} status=active",
             request.component_id,
@@ -1184,9 +1248,14 @@ fn install_runtime_inner(
     fs::create_dir_all(&staging)
         .map_err(|error| format!("failed to create runtime staging directory: {error}"))?;
     let spec = format!("{package}@{}", request.version);
-    if let Err(error) =
-        npm_install_with_fallback(&paths, &staging, &spec, Some(registry_used), cancellation)
-    {
+    if let Err(error) = npm_install_with_fallback(
+        &paths,
+        &staging,
+        &spec,
+        Some(registry_used),
+        cancellation,
+        Some(progress),
+    ) {
         let _ = fs::remove_dir_all(&staging);
         return Err(error);
     }
@@ -1500,6 +1569,7 @@ mod tests {
             &format!("@earendil-works/pi-coding-agent@{version}"),
             Some(registry_used),
             &cancellation,
+            Some(&progress),
         )
         .unwrap();
         let verified = super::verify_runtime(&paths, "pi", &staging, &cancellation).unwrap();
@@ -1516,6 +1586,7 @@ mod tests {
             &format!("@earendil-works/pi-coding-agent@{version}"),
             Some(registry_used),
             &cancellation,
+            Some(&progress),
         )
         .unwrap();
         crate::runtime_pointer::activate(&runtime, &second, |candidate| {
