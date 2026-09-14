@@ -1147,7 +1147,13 @@
         {#if isDshStarting}
           <span>正在启动 DSH</span>
         {:else if dshHostError}
-          <span>{dshHostError}</span>
+          <p class="dsh-error" role="alert">
+            <strong>DSH 启动失败</strong>
+            <span>{dshHostError}</span>
+            {#if /plugin tree failed to load|does not provide an export/.test(dshHostError)}
+              <small>提示：某个 DSH 插件与当前 DSH 版本不兼容。请在 DSH 的插件市场里禁用或卸载刚安装的插件后重启。</small>
+            {/if}
+          </p>
           <button type="button" class="start-button" onclick={showDsh} disabled={isDshStarting}>
             <RotateCcw size={16} />重启 DSH
           </button>

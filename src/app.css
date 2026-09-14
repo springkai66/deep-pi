@@ -659,6 +659,23 @@ select:focus-visible {
   color: #778078;
 }
 
+.dsh-error {
+  display: grid;
+  gap: 6px;
+  max-width: min(720px, 80vw);
+  margin: 0;
+  padding: 12px 14px;
+  border: 1px solid #74423e;
+  border-radius: 6px;
+  color: #ffd2ce;
+  background: #3b201e;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.dsh-error strong { font-size: 13px; }
+.dsh-error small { color: #e3aaa4; line-height: 1.5; }
+
 .empty-state {
   grid-row: 1 / -1;
   display: grid;

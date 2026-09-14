@@ -36,16 +36,6 @@
     xhigh: "超高",
     max: "最大",
   };
-  const PI_TOOLS = [
-    { id: "read", label: "读文件" },
-    { id: "bash", label: "命令执行" },
-    { id: "powershell", label: "PowerShell" },
-    { id: "edit", label: "编辑文件" },
-    { id: "write", label: "写文件" },
-    { id: "grep", label: "内容搜索" },
-    { id: "find", label: "文件查找" },
-    { id: "ls", label: "列目录" },
-  ];
 
   interface Props {
     taskId: string;
@@ -80,8 +70,6 @@
   let thinkingLevel = $state("");
   let changingThinking = $state(false);
   let autoNamed = $state(false);
-  let toolPermissions = $state<string[]>([]);
-  let changingPermissions = $state(false);
   let sessionStats = $state<SessionStats | null>(null);
   let statsGeneration = 0;
 
@@ -393,24 +381,6 @@
     onAutoRename(next);
   });
 
-  const enabledTools = $derived(new Set(toolPermissions));
-  $effect(() => {
-    void invoke<string[]>("get_pi_tool_permissions").then((tools) => { toolPermissions = tools; }).catch(() => { toolPermissions = []; });
-  });
-
-  async function toggleTool(toolId: string, enabled: boolean) {
-    if (changingPermissions) return;
-    const next = enabled ? [...toolPermissions, toolId] : toolPermissions.filter((tool) => tool !== toolId);
-    changingPermissions = true;
-    try {
-      await invoke("set_pi_tool_permissions", { tools: next });
-      toolPermissions = next;
-    } catch (cause) {
-      commandError(cause);
-    } finally {
-      changingPermissions = false;
-    }
-  }
 
   async function changeModel(value: string) {
     const model = models.find((model) => `${model.provider}/${model.id}` === value);
@@ -668,18 +638,6 @@
           {/each}
         </select>
       {/if}
-      <details class="perm-picker">
-        <summary title="模型权限（Pi 内置工具）" aria-label="模型权限">权限 {toolPermissions.length}/{PI_TOOLS.length}</summary>
-        <div class="perm-panel" role="group" aria-label="Pi 内置工具开关">
-          {#each PI_TOOLS as tool (tool.id)}
-            <label class="perm-option">
-              <input type="checkbox" checked={enabledTools.has(tool.id)} disabled={changingPermissions}
-                onchange={(event) => void toggleTool(tool.id, event.currentTarget.checked)} />
-              <span>{tool.id}</span><small>{tool.label}</small>
-            </label>
-          {/each}
-        </div>
-      </details>
       <select aria-label="运行时消息处理方式" bind:value={streamingBehavior}>
         <option value="followUp">排队跟进</option><option value="steer">优先引导</option>
       </select>
@@ -730,16 +688,6 @@
   textarea { display: block; width: 100%; min-height: 72px; max-height: 240px; resize: vertical; padding: 12px; border: 0; background: transparent; color: var(--text); font: 13px/1.5 var(--text-font); }
   .composer-actions { display: flex; align-items: center; gap: 8px; padding: 6px 8px; }
   select { min-width: 0; max-width: 130px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface-alt); padding: 4px; color: var(--text-muted); font-size: 11px; }
-  .perm-picker { position: relative; }
-  .perm-picker summary { display: inline-flex; align-items: center; min-height: 24px; padding: 2px 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface-alt); color: var(--text-muted); font-size: 11px; cursor: pointer; list-style: none; }
-  .perm-picker summary::-webkit-details-marker { display: none; }
-  .perm-picker[open] summary { border-color: var(--accent); color: var(--text); }
-  .perm-panel { position: absolute; bottom: calc(100% + 6px); left: 0; z-index: 12; display: grid; gap: 2px; min-width: 190px; max-height: 260px; overflow: auto; padding: 8px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface-raised); box-shadow: 0 6px 20px #0005; }
-  .perm-option { display: grid; grid-template-columns: 14px auto 1fr; align-items: center; gap: 6px; padding: 3px 4px; border-radius: 3px; color: var(--text); font-size: 11px; cursor: pointer; }
-  .perm-option:hover { background: var(--surface-hover); }
-  .perm-option input[type="checkbox"] { width: 13px; height: 13px; accent-color: var(--accent); cursor: pointer; }
-  .perm-option span { font-family: var(--code-font); }
-  .perm-option small { color: var(--text-muted); text-align: right; }
   .connection-status { flex: 1; font-size: 11px; color: var(--text-muted); }
   .send-button { display: grid; place-items: center; width: 30px; height: 30px; flex-shrink: 0; border: 0; border-radius: 4px; background: var(--surface-hover); color: var(--text); }
   .primary-send { background: var(--accent); color: var(--accent-ink); }

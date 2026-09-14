@@ -17,8 +17,6 @@ const MAX_SKILL_CONTENT_BYTES: usize = 64 * 1024;
 const MAX_SKILL_DESCRIPTION_LENGTH: usize = 512;
 const MAX_MCP_SERVERS: usize = 64;
 const MAX_MCP_CONFIG_BYTES: usize = 8 * 1024;
-const MAX_TOOL_ENTRIES: usize = 32;
-const MAX_TOOL_NAME_LENGTH: usize = 32;
 const MAX_SKILLS: usize = 200;
 const MAX_PROJECT_PATH_LENGTH: usize = 1_000;
 
@@ -109,12 +107,6 @@ pub struct SaveSkillRequest {
     pub scope: Option<ConfigScope>,
     #[serde(default)]
     pub project_path: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SetToolPermissionsRequest {
-    pub tools: Vec<String>,
 }
 
 pub fn validate_entry_name(name: &str) -> Result<(), String> {
@@ -379,50 +371,6 @@ pub fn delete_skill(
         return Ok(());
     }
     fs::remove_dir_all(&dir).map_err(|error| format!("failed to delete skill directory: {error}"))
-}
-
-#[tauri::command]
-pub fn get_pi_tool_permissions(paths: State<'_, AppPaths>) -> Result<Vec<String>, String> {
-    let value = read_json_file(&paths.pi_home.join("settings.json"))?;
-    match value.get("defaultTools").and_then(Value::as_array) {
-        Some(tools) => Ok(tools
-            .iter()
-            .filter_map(|tool| tool.as_str().map(str::to_string))
-            .collect()),
-        // Pi 在 defaultTools 缺省时使用标准默认工具集（read/bash/edit/write）。
-        None => Ok(["read", "bash", "edit", "write"]
-            .into_iter()
-            .map(str::to_string)
-            .collect()),
-    }
-}
-
-#[tauri::command]
-pub fn set_pi_tool_permissions(
-    paths: State<'_, AppPaths>,
-    request: SetToolPermissionsRequest,
-) -> Result<(), String> {
-    if request.tools.len() > MAX_TOOL_ENTRIES {
-        return Err("工具数量超过上限".into());
-    }
-    let mut tools = Vec::with_capacity(request.tools.len());
-    for tool in &request.tools {
-        let trimmed = tool.trim();
-        if trimmed.is_empty() || trimmed.len() > MAX_TOOL_NAME_LENGTH {
-            return Err("工具名称无效".into());
-        }
-        if !trimmed
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
-        {
-            return Err("工具名称只能包含字母、数字、下划线和短横线".into());
-        }
-        tools.push(trimmed.to_string());
-    }
-    let path = paths.pi_home.join("settings.json");
-    let mut value = read_json_file(&path)?;
-    value["defaultTools"] = Value::Array(tools.into_iter().map(Value::String).collect());
-    write_json_file(&path, &value)
 }
 
 #[cfg(test)]

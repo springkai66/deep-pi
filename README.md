@@ -9,7 +9,7 @@ Windows 桌面宿主，把 Pi Coding Agent 和 DeepSeek Harness (DSH) 集成到�
 从 [GitHub Releases](https://github.com/springkai66/deep-pi/releases) 下载最新的 `DeepPi_<版本>_x64-setup.exe`（NSIS 安装包），双击安装。
 
 - 系统要求：Windows 10/11 x64。WebView2 由安装包自动下载安装。
-- v1.0.0 安装包尚未做 Authenticode 代码签名，首次运行可能出现 SmartScreen 提示：选择「更多信息」→「仍要运行」。请先核对下载来源。
+- 安装包尚未做 Authenticode 代码签名，首次运行可能出现 SmartScreen 提示：选择「更多信息」→「仍要运行」。请先核对下载来源。
 - 卸载：在「设置 → 应用」中卸载，或运行安装目录里的卸载程序。
 
 ## 首次使用
@@ -37,7 +37,7 @@ Windows 桌面宿主，把 Pi Coding Agent 和 DeepSeek Harness (DSH) 集成到�
 - DSH 运行在已验证的 `0.1.5-rc.2`：宿主已适配其 launch-token 认证与 `/api/<ns>/<method>` RPC 协议；上游更新仍需通过兼容验证后才会提供。
 - DSH 子界面获得焦点时，宿主快捷键不生效（见 [KEYBOARD_SHORTCUTS.md](./KEYBOARD_SHORTCUTS.md)）。
 - 文件侧栏的**内容**搜索依赖系统 `PATH` 上的 `rg.exe`（ripgrep）：应用不自带也不自动安装，未安装时该模式会提示「未找到 ripgrep」，文件名搜索不受影响（见 [TROUBLESHOOTING.md](./TROUBLESHOOTING.md)）。
-- DeepPi 自身的自动更新管道已配置，但 v1.0.0 是首个版本，跨版本自更新与回滚的真实验证将在下一个版本发布时进行。
+- DeepPi 自身的自动更新管道已配置，但当前是首个版本（v1.2.0），跨版本自更新与回滚的真实链路验证将在下一个版本发布时进行。
 - 8 小时长稳、超大规模仓库与部分原生交互验收尚未完成（见 [NATIVE_ACCEPTANCE.md](./NATIVE_ACCEPTANCE.md)）。
 
 ## 开发

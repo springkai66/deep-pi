@@ -214,6 +214,11 @@ fn start_dsh_inner(
         .take()
         .ok_or_else(|| "failed to capture DSH errors".to_string())?;
     let (sender, receiver) = mpsc::sync_channel(1);
+    // DSH 启动失败（尤其是插件树加载失败）时错误写在 stderr；
+    // 启动阶段收集 stderr 末尾几行，就绪后转为后台丢弃。
+    let (stderr_sender, stderr_receiver) = mpsc::sync_channel(1);
+    let ready = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let ready_for_stderr = ready.clone();
 
     thread::spawn(move || {
         let mut sender = Some(sender);
@@ -225,16 +230,39 @@ fn start_dsh_inner(
             }
         }
     });
-    thread::spawn(move || for _ in BufReader::new(stderr).lines() {});
+    thread::spawn(move || {
+        let mut collected: Vec<String> = Vec::new();
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            if ready_for_stderr.load(std::sync::atomic::Ordering::Relaxed) {
+                continue;
+            }
+            // 保留最后 6 行用于失败诊断。
+            if collected.len() >= 6 {
+                collected.remove(0);
+            }
+            collected.push(line);
+        }
+        let _ = stderr_sender.send(collected);
+    });
 
     let url = match receiver.recv_timeout(Duration::from_secs(30)) {
         Ok(url) => url,
         Err(error) => {
+            ready.store(true, std::sync::atomic::Ordering::Relaxed);
             let _ = child.kill();
             let _ = child.wait();
-            return Err(format!("DSH did not become ready: {error}"));
+            let detail = stderr_receiver
+                .try_recv()
+                .ok()
+                .map(|lines| lines.join("; "))
+                .filter(|text| !text.trim().is_empty());
+            return Err(match detail {
+                Some(detail) => format!("DSH 启动失败（{error}）：{detail}"),
+                None => format!("DSH did not become ready: {error}"),
+            });
         }
     };
+    ready.store(true, std::sync::atomic::Ordering::Relaxed);
 
     state.generation = state.generation.wrapping_add(1);
     let generation = state.generation;

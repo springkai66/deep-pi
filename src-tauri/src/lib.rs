@@ -194,8 +194,6 @@ pub fn run() {
                 agent_config::list_skills,
                 agent_config::save_skill,
                 agent_config::delete_skill,
-                agent_config::get_pi_tool_permissions,
-                agent_config::set_pi_tool_permissions,
                 operation::cancel_operation,
                 provider::delete_pi_provider,
                 provider::list_pi_providers,

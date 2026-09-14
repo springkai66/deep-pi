@@ -822,16 +822,18 @@
               {/each}
             </div>
           {/if}
-          <div class="form-grid cost-grid">
-            <label>输入价格（$/M）<input inputmode="decimal" value={costValue(editingModel, "input")}
-              oninput={(event) => setCostField(editingModel, "input", event.currentTarget.value)} /></label>
-            <label>输出价格（$/M）<input inputmode="decimal" value={costValue(editingModel, "output")}
-              oninput={(event) => setCostField(editingModel, "output", event.currentTarget.value)} /></label>
-            <label>缓存读（$/M）<input inputmode="decimal" value={costValue(editingModel, "cacheRead")}
-              oninput={(event) => setCostField(editingModel, "cacheRead", event.currentTarget.value)} /></label>
-            <label>缓存写（$/M）<input inputmode="decimal" value={costValue(editingModel, "cacheWrite")}
-              oninput={(event) => setCostField(editingModel, "cacheWrite", event.currentTarget.value)} /></label>
-          </div>
+          {#if editingModel.cost}
+            <div class="form-grid cost-grid">
+              <label>输入价格（$/M）<input inputmode="decimal" value={costValue(editingModel, "input")}
+                oninput={(event) => setCostField(editingModel, "input", event.currentTarget.value)} /></label>
+              <label>输出价格（$/M）<input inputmode="decimal" value={costValue(editingModel, "output")}
+                oninput={(event) => setCostField(editingModel, "output", event.currentTarget.value)} /></label>
+              <label>缓存读（$/M）<input inputmode="decimal" value={costValue(editingModel, "cacheRead")}
+                oninput={(event) => setCostField(editingModel, "cacheRead", event.currentTarget.value)} /></label>
+              <label>缓存写（$/M）<input inputmode="decimal" value={costValue(editingModel, "cacheWrite")}
+                oninput={(event) => setCostField(editingModel, "cacheWrite", event.currentTarget.value)} /></label>
+            </div>
+          {/if}
           {#if modelTest[editingModel.id]}
             <p class="status" class:ok={modelTest[editingModel.id].ok} role="status">{modelTest[editingModel.id].text}</p>
           {/if}
