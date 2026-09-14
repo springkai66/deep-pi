@@ -1,4 +1,4 @@
-# DeepPi v1.2.0
+# DeepPi v1.0.0
 
 DeepPi 的首个发布版本：在同一个 Windows 桌面应用中使用 Pi Coding Agent 与 DeepSeek Harness。
 
@@ -18,7 +18,7 @@ DeepPi 的首个发布版本：在同一个 Windows 桌面应用中使用 Pi Cod
 
 ## 安装
 
-1. 从 Releases 下载 `DeepPi_1.2.0_x64-setup.exe`。
+1. 从 Releases 下载 `DeepPi_1.0.0_x64-setup.exe`。
 2. 运行安装包。安装包会自动安装 WebView2。
 3. 首次运行如出现 SmartScreen 提示，选择「更多信息」→「仍要运行」。
 
