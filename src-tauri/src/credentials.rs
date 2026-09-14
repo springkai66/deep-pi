@@ -241,7 +241,11 @@ pub async fn test_model_connection(
         .map_err(|error| format!("model test worker failed: {error}"))?
 }
 
-fn model_probe_target(api: &str, base_url: &str, model_id: &str) -> Result<Vec<(String, Value)>, String> {
+fn model_probe_target(
+    api: &str,
+    base_url: &str,
+    model_id: &str,
+) -> Result<Vec<(String, Value)>, String> {
     let base = base_url.trim_end_matches('/');
     match api {
         "openai-completions" => Ok(vec![(
@@ -271,7 +275,11 @@ fn model_probe_target(api: &str, base_url: &str, model_id: &str) -> Result<Vec<(
             ),
         ]),
         "anthropic-messages" => {
-            let url = if base.ends_with("/v1") { format!("{base}/messages") } else { format!("{base}/v1/messages") };
+            let url = if base.ends_with("/v1") {
+                format!("{base}/messages")
+            } else {
+                format!("{base}/v1/messages")
+            };
             Ok(vec![(
                 url,
                 json!({
@@ -323,7 +331,9 @@ fn test_model_connection_inner(
     for (target_url, body) in targets {
         let url = tauri::Url::parse(&target_url)
             .map_err(|error| format!("model probe URL is invalid: {error}"))?;
-        let mut request = agent.post(url.as_str()).header("Accept", "application/json");
+        let mut request = agent
+            .post(url.as_str())
+            .header("Accept", "application/json");
         for (name, value) in &provider.headers {
             request = request.header(name, value);
         }

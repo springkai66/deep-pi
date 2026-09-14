@@ -54,7 +54,11 @@ fn deserialize_theme<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<String, D::Error> {
     let value = String::deserialize(deserializer)?;
-    Ok(if value == "winxp" { value } else { default_theme() })
+    Ok(if value == "winxp" {
+        value
+    } else {
+        default_theme()
+    })
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -69,10 +73,7 @@ pub struct AppSettings {
     pub snoozed_updates: BTreeMap<String, u64>,
     #[serde(default = "default_color_mode")]
     pub color_mode: String,
-    #[serde(
-        default = "default_theme",
-        deserialize_with = "deserialize_theme"
-    )]
+    #[serde(default = "default_theme", deserialize_with = "deserialize_theme")]
     pub theme: String,
     #[serde(default = "default_app_font")]
     pub app_font: String,

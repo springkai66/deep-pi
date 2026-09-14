@@ -243,9 +243,10 @@ fn start_dsh_inner(
     state.url = Some(url.clone());
     // 0.1.5 起 Host API 需要 launch token 交换的签名 cookie；
     // 交换失败不阻塞启动，Webview 仍可用完整 URL 自行完成 token 换 cookie。
-    state.cookie = dsh_api::exchange_browser_cookie(&dsh_api_base(&url).unwrap_or_else(|| url.clone()), &url)
-        .ok()
-        .flatten();
+    state.cookie =
+        dsh_api::exchange_browser_cookie(&dsh_api_base(&url).unwrap_or_else(|| url.clone()), &url)
+            .ok()
+            .flatten();
     drop(state);
 
     let _ = app.emit(
@@ -320,7 +321,9 @@ fn monitor_dsh(app: AppHandle, generation: u64, url: String) {
             Ok(sessions) => Some(sessions),
             // cookie 失效（如 DSH 内部状态重置）时重新交换一次。
             Err(_) => {
-                let refreshed = dsh_api::exchange_browser_cookie(&api_base, &url).ok().flatten();
+                let refreshed = dsh_api::exchange_browser_cookie(&api_base, &url)
+                    .ok()
+                    .flatten();
                 if let Some(cookie) = refreshed.as_ref() {
                     if let Some(manager) = app.try_state::<DshManager>() {
                         if let Ok(mut state) = manager.process.lock() {
@@ -330,8 +333,7 @@ fn monitor_dsh(app: AppHandle, generation: u64, url: String) {
                         }
                     }
                 }
-                refreshed
-                    .and_then(|cookie| dsh_api::list_sessions(&api_base, Some(&cookie)).ok())
+                refreshed.and_then(|cookie| dsh_api::list_sessions(&api_base, Some(&cookie)).ok())
             }
         };
         if let (Some(sessions), Some(store)) = (sessions, app.try_state::<TaskStore>()) {

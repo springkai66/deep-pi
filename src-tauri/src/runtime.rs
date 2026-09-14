@@ -1376,7 +1376,13 @@ mod tests {
         // 自包含流程：先装内置 Node（官方发行包），再用托管 npm 装 Pi。
         // 测试里不需要真实进度上报，用空实现占位。
         let progress = super::NullProgressSink;
-        super::install_node(&paths, super::MANAGED_NODE_VERSION, &cancellation, &progress).unwrap();
+        super::install_node(
+            &paths,
+            super::MANAGED_NODE_VERSION,
+            &cancellation,
+            &progress,
+        )
+        .unwrap();
         assert!(paths.node_runtime().unwrap().is_file());
         assert!(paths.npm_runtime().unwrap().is_file());
 

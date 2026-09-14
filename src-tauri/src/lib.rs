@@ -1,7 +1,7 @@
 use tauri::Manager;
 
-mod app_paths;
 mod agent_config;
+mod app_paths;
 mod bridge;
 mod credentials;
 mod diagnostics;

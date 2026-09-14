@@ -92,7 +92,10 @@ struct SessionListArgs {
 #[derive(Serialize)]
 struct SessionListRequestArgs {}
 
-pub fn list_sessions(base_url: &str, cookie: Option<&str>) -> Result<Vec<DshSessionSummary>, String> {
+pub fn list_sessions(
+    base_url: &str,
+    cookie: Option<&str>,
+) -> Result<Vec<DshSessionSummary>, String> {
     if !base_url.starts_with("http://127.0.0.1:") {
         return Err("DSH API URL is not loopback".into());
     }
@@ -108,8 +111,7 @@ pub fn list_sessions(base_url: &str, cookie: Option<&str>) -> Result<Vec<DshSess
         },
     };
     let agent = dsh_agent();
-    let mut request = agent
-        .post(format!("{base_url}/api/session/list"));
+    let mut request = agent.post(format!("{base_url}/api/session/list"));
     if let Some(cookie) = cookie {
         request = request.header("Cookie", cookie);
     }

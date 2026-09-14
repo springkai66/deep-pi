@@ -47,7 +47,11 @@ fn validate_project_path(path: &str) -> Result<PathBuf, String> {
         .map_err(|error| format!("failed to resolve project directory: {error}"))
 }
 
-fn scope_pi_dir(paths: &AppPaths, scope: ConfigScope, project_path: Option<&str>) -> Result<PathBuf, String> {
+fn scope_pi_dir(
+    paths: &AppPaths,
+    scope: ConfigScope,
+    project_path: Option<&str>,
+) -> Result<PathBuf, String> {
     match scope {
         ConfigScope::Global => Ok(paths.pi_home.clone()),
         ConfigScope::Project => {
@@ -157,7 +161,11 @@ fn write_json_file(path: &Path, value: &Value) -> Result<(), String> {
         .map_err(|error| format!("failed to commit Pi config: {error}"))
 }
 
-fn mcp_file(paths: &AppPaths, scope: ConfigScope, project_path: Option<&str>) -> Result<PathBuf, String> {
+fn mcp_file(
+    paths: &AppPaths,
+    scope: ConfigScope,
+    project_path: Option<&str>,
+) -> Result<PathBuf, String> {
     Ok(scope_pi_dir(paths, scope, project_path)?.join("mcp.json"))
 }
 
@@ -184,7 +192,10 @@ pub fn list_mcp_servers(
 }
 
 #[tauri::command]
-pub fn save_mcp_server(paths: State<'_, AppPaths>, request: SaveMcpServerRequest) -> Result<(), String> {
+pub fn save_mcp_server(
+    paths: State<'_, AppPaths>,
+    request: SaveMcpServerRequest,
+) -> Result<(), String> {
     let name = request.name.trim();
     validate_entry_name(name)?;
     if !request.config.is_object() {
@@ -197,7 +208,11 @@ pub fn save_mcp_server(paths: State<'_, AppPaths>, request: SaveMcpServerRequest
     {
         return Err("MCP 配置过大".into());
     }
-    let path = mcp_file(&paths, request.scope.unwrap_or(ConfigScope::Global), request.project_path.as_deref())?;
+    let path = mcp_file(
+        &paths,
+        request.scope.unwrap_or(ConfigScope::Global),
+        request.project_path.as_deref(),
+    )?;
     let mut value = read_json_file(&path)?;
     let mut servers = value
         .get("mcpServers")
@@ -213,10 +228,17 @@ pub fn save_mcp_server(paths: State<'_, AppPaths>, request: SaveMcpServerRequest
 }
 
 #[tauri::command]
-pub fn delete_mcp_server(paths: State<'_, AppPaths>, request: DeleteByNameRequest) -> Result<(), String> {
+pub fn delete_mcp_server(
+    paths: State<'_, AppPaths>,
+    request: DeleteByNameRequest,
+) -> Result<(), String> {
     let name = request.name.trim();
     validate_entry_name(name)?;
-    let path = mcp_file(&paths, request.scope.unwrap_or(ConfigScope::Global), request.project_path.as_deref())?;
+    let path = mcp_file(
+        &paths,
+        request.scope.unwrap_or(ConfigScope::Global),
+        request.project_path.as_deref(),
+    )?;
     let mut value = read_json_file(&path)?;
     let Some(servers) = value.get("mcpServers").and_then(Value::as_object).cloned() else {
         return Ok(());
@@ -227,11 +249,20 @@ pub fn delete_mcp_server(paths: State<'_, AppPaths>, request: DeleteByNameReques
     write_json_file(&path, &value)
 }
 
-fn skills_dir(paths: &AppPaths, scope: ConfigScope, project_path: Option<&str>) -> Result<PathBuf, String> {
+fn skills_dir(
+    paths: &AppPaths,
+    scope: ConfigScope,
+    project_path: Option<&str>,
+) -> Result<PathBuf, String> {
     Ok(scope_pi_dir(paths, scope, project_path)?.join("skills"))
 }
 
-fn skill_dir(paths: &AppPaths, scope: ConfigScope, project_path: Option<&str>, name: &str) -> Result<PathBuf, String> {
+fn skill_dir(
+    paths: &AppPaths,
+    scope: ConfigScope,
+    project_path: Option<&str>,
+    name: &str,
+) -> Result<PathBuf, String> {
     validate_entry_name(name)?;
     Ok(skills_dir(paths, scope, project_path)?.join(name.trim()))
 }
@@ -309,12 +340,21 @@ pub fn save_skill(paths: State<'_, AppPaths>, request: SaveSkillRequest) -> Resu
     if request.content.is_empty() || request.content.len() > MAX_SKILL_CONTENT_BYTES {
         return Err("Skill 内容必须包含 1 到 65536 字节".into());
     }
-    let dir = skill_dir(&paths, request.scope.unwrap_or(ConfigScope::Global), request.project_path.as_deref(), name)?;
-    fs::create_dir_all(&dir).map_err(|error| format!("failed to create skill directory: {error}"))?;
+    let dir = skill_dir(
+        &paths,
+        request.scope.unwrap_or(ConfigScope::Global),
+        request.project_path.as_deref(),
+        name,
+    )?;
+    fs::create_dir_all(&dir)
+        .map_err(|error| format!("failed to create skill directory: {error}"))?;
     let content = if request.content.trim_start().starts_with("---") {
         request.content
     } else {
-        format!("---\nname: {name}\ndescription: {description}\n---\n\n{}", request.content.trim_start())
+        format!(
+            "---\nname: {name}\ndescription: {description}\n---\n\n{}",
+            request.content.trim_start()
+        )
     };
     let mut file = AtomicWriteFile::open(dir.join("SKILL.md"))
         .map_err(|error| format!("failed to open SKILL.md: {error}"))?;
@@ -325,13 +365,20 @@ pub fn save_skill(paths: State<'_, AppPaths>, request: SaveSkillRequest) -> Resu
 }
 
 #[tauri::command]
-pub fn delete_skill(paths: State<'_, AppPaths>, request: DeleteByNameRequest) -> Result<(), String> {
-    let dir = skill_dir(&paths, request.scope.unwrap_or(ConfigScope::Global), request.project_path.as_deref(), &request.name)?;
+pub fn delete_skill(
+    paths: State<'_, AppPaths>,
+    request: DeleteByNameRequest,
+) -> Result<(), String> {
+    let dir = skill_dir(
+        &paths,
+        request.scope.unwrap_or(ConfigScope::Global),
+        request.project_path.as_deref(),
+        &request.name,
+    )?;
     if !dir.is_dir() {
         return Ok(());
     }
-    fs::remove_dir_all(&dir)
-        .map_err(|error| format!("failed to delete skill directory: {error}"))
+    fs::remove_dir_all(&dir).map_err(|error| format!("failed to delete skill directory: {error}"))
 }
 
 #[tauri::command]
