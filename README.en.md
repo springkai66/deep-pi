@@ -37,7 +37,7 @@ The managed runtimes (Node, Pi, DSH) are installed on demand from official distr
 - DSH runs the verified `0.1.5-rc.2`: the host adapts its launch-token auth and the `/api/<ns>/<method>` RPC envelope; upstream updates are still gated behind compatibility verification.
 - Host shortcuts do not work while the DSH child view has focus (see [KEYBOARD_SHORTCUTS.md](./KEYBOARD_SHORTCUTS.md)).
 - **Content** search in the file sidebar depends on `rg.exe` (ripgrep) being available on the system `PATH`: DeepPi neither bundles nor auto-installs it, and shows a "ripgrep not found" message in that mode when it is missing (file-name search is unaffected; see [TROUBLESHOOTING.md](./TROUBLESHOOTING.md)).
-- The DeepPi self-update pipeline is configured, but v1.0.0 is the first release; real cross-version self-update and rollback will be validated when the next version ships.
+- The DeepPi self-update pipeline is configured, but the pipeline currently ships v1.0.1; real cross-version self-update and rollback are being validated with the 1.0.1 release.
 - The 8-hour soak, very large repositories and parts of the native interaction acceptance are still open (see [NATIVE_ACCEPTANCE.md](./NATIVE_ACCEPTANCE.md)).
 
 ## Development

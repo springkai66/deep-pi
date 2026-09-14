@@ -1,3 +1,25 @@
+# DeepPi v1.0.1
+
+修复与改进版本：运行时不再写入 C 盘 AppData。
+
+## 变更
+
+- **运行时安装位置**：托管运行时（Node / Pi / DSH / dshmarket）改为安装在 DeepPi 安装目录下的 `runtimes` 子文件夹，跟随安装盘符，不再写入 `%LOCALAPPDATA%`。把 DeepPi 装在非 C 盘时，运行时也全部留在同一块盘上。
+- **npm 缓存位置**：应用内安装/升级 Pi、DSH、dshmarket 时，npm 下载缓存显式指向应用自己的 cache 目录，不再写入 C 盘用户目录。
+- **错误提示**：DeepPi 被安装在受保护目录（如 Program Files）导致运行时目录无法创建时，给出可操作的报错说明。
+
+## 升级说明
+
+- 从 1.0.0 升级的用户：旧版安装在 `%LOCALAPPDATA%\com.deeppi.desktop\runtimes` 的运行时不会被自动迁移。升级后请到「设置 → 运行时与更新」重新安装 Node → Pi → DSH（确认框会说明将要下载的版本），确认可用后可手动删除旧目录。
+
+## 安装
+
+1. 从 Releases 下载 `DeepPi_1.0.1_x64-setup.exe`，安装时自选安装目录（建议非 C 盘）。
+2. 运行安装包。安装包会自动安装 WebView2。
+3. 首次运行如出现 SmartScreen 提示，选择「更多信息」→「仍要运行」。
+
+---
+
 # DeepPi v1.0.0
 
 DeepPi 的首个发布版本：在同一个 Windows 桌面应用中使用 Pi Coding Agent 与 DeepSeek Harness。
