@@ -56,6 +56,11 @@
     onRollbackRuntime={() => { action = "回滚组件"; }}
     onSnoozeRuntime={() => { action = "稍后"; }}
     onSkipRuntime={() => { action = "跳过"; }}
+    onRestartPi={() => { action = "重启 Pi 任务"; }}
+    onRestartDsh={() => { action = "重启 DSH"; }}
+    restartBusy={null}
+    runningPiCount={1}
+    dshRunning={true}
   >
     {#snippet models()}<PiProviderSettings embedded invokeCommand={command} confirm={async () => true} onClose={() => {}} onError={(cause) => { error = String(cause); }} />{/snippet}
     {#snippet extensions()}<PiMarketplace embedded projectPath={null} invokeCommand={command} confirm={async () => true} onClose={() => {}} onError={(cause) => { error = String(cause); }} />{/snippet}

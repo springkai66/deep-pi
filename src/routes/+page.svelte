@@ -86,6 +86,7 @@
   let updates = $state<RuntimeUpdate[]>([]);
   let isCheckingUpdates = $state(false);
   let busyRuntime = $state<string | null>(null);
+  let restartBusy = $state<string | null>(null);
   let runtimeOperation = $state<OperationState | null>(null);
   let runtimeProgress = $state<{ phase: string; percent: number | null } | null>(null);
   const runtimeRunner = createOperationRunner(invoke, (state) => {
@@ -208,6 +209,8 @@
   let dshVisibility = Promise.resolve();
   const showSidebar = $derived(activeAgent === "pi" && view === "workspace" && sidebarVisible);
   const activeTask = $derived(tasks.find((task) => task.id === activeTaskId));
+  const runningPiCount = $derived(tasks.filter((task) => task.agent === "pi" && ["running", "waiting"].includes(task.status)).length);
+  const dshRunning = $derived(dshWebview !== null && !dshHostError);
   let terminalModule = $state.raw<Promise<typeof import("$lib/TerminalPane.svelte")> | null>(null);
   function loadTerminalModule() {
     terminalModule = import("$lib/TerminalPane.svelte");
@@ -1045,6 +1048,41 @@
     }
   }
 
+  async function restartAllPiTasks() {
+    if (restartBusy || busyRuntime) return;
+    const candidates = tasks.filter((task) => task.agent === "pi" && ["running", "waiting"].includes(task.status));
+    if (candidates.length === 0) return;
+    const confirmed = await confirmDialog(
+      "重启 Pi 任务",
+      `重启 ${candidates.length} 个运行中的 Pi 任务吗？会话内容保留，正在切换中的任务将被跳过。`,
+      "重启",
+    );
+    if (!confirmed) return;
+    restartBusy = "pi";
+    try {
+      for (const task of candidates) {
+        if (modeSwitcher.isBusy(task.id)) continue;
+        await restartTask(task);
+      }
+    } finally {
+      restartBusy = null;
+    }
+  }
+
+  async function restartDsh() {
+    if (restartBusy || busyRuntime || isDshStarting) return;
+    restartBusy = "dsh";
+    try {
+      await dshWebview?.close();
+      dshWebview = null;
+      await invoke("stop_dsh");
+    } catch (error) {
+      showError(error);
+    }
+    restartBusy = null;
+    await showDsh();
+  }
+
   async function switchTaskMode(task: Task, mode: InteractionMode) {
     try {
       const restarted = await modeSwitcher.switch(task, mode);
@@ -1185,6 +1223,11 @@
         onRollbackRuntime={(update) => void rollbackRuntime(update)}
         onSnoozeRuntime={(update) => snoozeRuntime(update)}
         onSkipRuntime={(update) => skipRuntime(update)}
+        onRestartPi={() => void restartAllPiTasks()}
+        onRestartDsh={() => void restartDsh()}
+        {restartBusy}
+        {runningPiCount}
+        {dshRunning}
         onClose={closeSettings}
       >
         {#snippet models()}

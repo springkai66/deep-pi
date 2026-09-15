@@ -25,14 +25,19 @@
     onRollbackRuntime: (update: RuntimeUpdate) => void;
     onSnoozeRuntime: (update: RuntimeUpdate) => void;
     onSkipRuntime: (update: RuntimeUpdate) => void;
+    onRestartPi: () => void;
+    onRestartDsh: () => void;
+    restartBusy: string | null;
+    runningPiCount: number;
+    dshRunning: boolean;
   }
 </script>
 
 <script lang="ts">
-  import { Download, RefreshCw, X } from "@lucide/svelte";
+  import { Download, RefreshCw, RotateCcw, X } from "@lucide/svelte";
   let { settings, runtimes, updates, isCheckingUpdates, busyRuntime, runtimeOperation, runtimeProgress, onCancelRuntime,
     appUpdate, onCheckUpdates, onCheckAppUpdate, onInstallAppUpdate, onUpdateRuntime, onRollbackRuntime,
-    onSnoozeRuntime, onSkipRuntime }: RuntimeSettingsProps = $props();
+    onSnoozeRuntime, onSkipRuntime, onRestartPi, onRestartDsh, restartBusy, runningPiCount, dshRunning }: RuntimeSettingsProps = $props();
   const sourceLabels = { managed: "托管", development: "开发目录", profile: "配置文件" };
 </script>
 
@@ -55,6 +60,31 @@
   </div>
   {#if appUpdate.notes}<p class="release-notes">{appUpdate.notes}</p>{/if}
   {#if appUpdate.error}<p role="alert">{appUpdate.error}</p>{/if}
+</section>
+
+<section class="settings-group" aria-labelledby="service-restart-heading">
+  <div class="settings-group-header">
+    <h3 id="service-restart-heading">运行服务</h3>
+  </div>
+  <div class="setting-control">
+    <span class="setting-copy"><strong>Pi Coding Agent</strong><small>{runningPiCount > 0 ? `${runningPiCount} 个任务运行中` : "没有运行中的任务"}</small></span>
+    <div class="runtime-actions">
+      {#if restartBusy === "pi"}<span role="status" class="muted">正在逐个重启任务…</span>{/if}
+      <button type="button" class="quiet-button" disabled={restartBusy !== null || busyRuntime !== null || runningPiCount === 0} onclick={onRestartPi}>
+        <RotateCcw size={14} />重启全部任务
+      </button>
+    </div>
+  </div>
+  <div class="setting-control">
+    <span class="setting-copy"><strong>DSH</strong><small>{dshRunning ? "运行中" : "未运行"}</small></span>
+    <div class="runtime-actions">
+      {#if restartBusy === "dsh"}<span role="status" class="muted">正在重启…</span>{/if}
+      <button type="button" class="quiet-button" disabled={restartBusy !== null || busyRuntime !== null} onclick={onRestartDsh}>
+        <RotateCcw size={14} />{dshRunning ? "重启" : "启动"}
+      </button>
+    </div>
+  </div>
+  <p class="muted" role="status">重启 Pi 会逐个重启所有运行中的任务（会话内容保留）；重启 DSH 会停止并重新拉起 DSH 服务与界面。</p>
 </section>
 
 <section class="settings-group" aria-labelledby="runtime-settings-heading">
