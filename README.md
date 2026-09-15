@@ -37,7 +37,7 @@ Windows 桌面宿主，把 Pi Coding Agent 和 DeepSeek Harness (DSH) 集成到�
 - DSH 运行在已验证的 `0.1.5-rc.2`：宿主已适配其 launch-token 认证与 `/api/<ns>/<method>` RPC 协议；上游更新仍需通过兼容验证后才会提供。
 - DSH 子界面获得焦点时，宿主快捷键不生效（见 [KEYBOARD_SHORTCUTS.md](./KEYBOARD_SHORTCUTS.md)）。
 - 文件侧栏的**内容**搜索依赖系统 `PATH` 上的 `rg.exe`（ripgrep）：应用不自带也不自动安装，未安装时该模式会提示「未找到 ripgrep」，文件名搜索不受影响（见 [TROUBLESHOOTING.md](./TROUBLESHOOTING.md)）。
-- DeepPi 自身的自动更新管道已配置，但当前发布到 v1.0.1；跨版本自更新与回滚的真实链路验证随 1.0.1 发布进行。
+- DeepPi 自身的自动更新管道已配置，但当前发布到 v1.0.2；跨版本自更新与回滚的真实链路验证随 1.0.2 发布进行。
 - 8 小时长稳、超大规模仓库与部分原生交互验收尚未完成（见 [NATIVE_ACCEPTANCE.md](./NATIVE_ACCEPTANCE.md)）。
 
 ## 开发
