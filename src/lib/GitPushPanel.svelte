@@ -45,7 +45,7 @@
         <select id="git-push-target" value={state.selected} disabled={blocked || state.busy}
           onchange={(event) => controller.selectTarget(Number(event.currentTarget.value))}>
           <option value={-1}>选择目的地</option>
-          {#each state.targets.targets as target, index}
+          {#each state.targets.targets as target, index (`${target.remote}·${target.destination}`)}
             <option value={index}>{target.remote} · {target.destination}</option>
           {/each}
         </select>

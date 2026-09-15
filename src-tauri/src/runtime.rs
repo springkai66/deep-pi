@@ -25,6 +25,15 @@ use crate::{
 
 const MIN_DSHMARKET_DSH_VERSION: &str = "0.1.1-rc.2";
 
+/// 运行环境组件标识。前后端以这些字符串作为契约（`runtime_status` 的 `id`、
+/// Tauri 命令的 `component_id`，以及前端 `update.id` 判断），因此集中定义：
+/// 新增组件时不会因为漏改某一处 `match` 而静默走错分支。
+const COMPONENT_DEEPPI: &str = "deeppi";
+const COMPONENT_NODE: &str = "node";
+const COMPONENT_PI: &str = "pi";
+const COMPONENT_DSH: &str = "dsh";
+const COMPONENT_DSHMARKET: &str = "dshmarket";
+
 /// v1.1 兼容基线：0.1.5-rc.2。启动 URL 带 launch token，Host API 需要先
 /// 用 token 交换签名 cookie（`dsh-auth-…`），且 RPC 端点改为
 /// `POST /api/<namespace>/<method>` 信封（`{args:{…}}`）；宿主已适配。
@@ -140,35 +149,35 @@ pub(crate) fn runtime_status_for_paths(paths: &AppPaths) -> Result<Vec<RuntimeCo
 
     Ok(vec![
         RuntimeComponent {
-            id: "deeppi",
+            id: COMPONENT_DEEPPI,
             name: "DeepPi",
             available: true,
             current_version: Some(env!("CARGO_PKG_VERSION").to_owned()),
             source: "managed",
         },
         RuntimeComponent {
-            id: "node",
+            id: COMPONENT_NODE,
             name: "Node.js",
             available: node_version.is_some(),
             current_version: node_version,
             source: "managed",
         },
         RuntimeComponent {
-            id: "pi",
+            id: COMPONENT_PI,
             name: "Pi Coding Agent",
             available: pi_version.is_some(),
             current_version: pi_version,
             source: "managed",
         },
         RuntimeComponent {
-            id: "dsh",
+            id: COMPONENT_DSH,
             name: "DeepSeek Harness",
             available: dsh_version.is_some(),
             current_version: dsh_version,
             source: dsh_source,
         },
         RuntimeComponent {
-            id: "dshmarket",
+            id: COMPONENT_DSHMARKET,
             name: "DSH Plugin Market",
             available: market_version.is_some(),
             current_version: market_version,
@@ -284,9 +293,9 @@ pub fn clear_runtime_update_cache(cache: State<'_, UpdateCache>) {
 
 fn runtime_package(id: &str) -> Option<&'static str> {
     match id {
-        "pi" => Some("@earendil-works/pi-coding-agent"),
-        "dsh" => Some("@deepseek-ai/dsh"),
-        "dshmarket" => Some("dshmarket"),
+        COMPONENT_PI => Some("@earendil-works/pi-coding-agent"),
+        COMPONENT_DSH => Some("@deepseek-ai/dsh"),
+        COMPONENT_DSHMARKET => Some(DSHMARKET_PACKAGE_NAME),
         _ => None,
     }
 }
@@ -452,7 +461,7 @@ fn dshmarket_is_compatible(paths: &AppPaths) -> bool {
     runtime_status_for_paths(paths)
         .unwrap_or_default()
         .into_iter()
-        .find(|component| component.id == "dsh")
+        .find(|component| component.id == COMPONENT_DSH)
         .and_then(|component| component.current_version)
         .is_some_and(|version| {
             compare_versions(&version, MIN_DSHMARKET_DSH_VERSION) != Ordering::Less
@@ -460,19 +469,20 @@ fn dshmarket_is_compatible(paths: &AppPaths) -> bool {
 }
 
 fn component_installable(paths: &AppPaths, component: &str) -> bool {
-    runtime_installable(component) && (component != "dshmarket" || dshmarket_is_compatible(paths))
+    runtime_installable(component)
+        && (component != COMPONENT_DSHMARKET || dshmarket_is_compatible(paths))
 }
 
 fn runtime_root(paths: &AppPaths, component: &str) -> Result<PathBuf, String> {
     match component {
-        "node" | "pi" | "dsh" => Ok(paths.runtimes.join(component)),
+        COMPONENT_NODE | COMPONENT_PI | COMPONENT_DSH => Ok(paths.runtimes.join(component)),
         _ => Err("only Node, Pi and DSH runtimes can be replaced".into()),
     }
 }
 
 fn runtime_cli_path(root: &Path, component: &str) -> Option<PathBuf> {
     match component {
-        "pi" => Some(
+        COMPONENT_PI => Some(
             root.join("node_modules")
                 .join("@earendil-works")
                 .join("pi-coding-agent")
@@ -480,7 +490,7 @@ fn runtime_cli_path(root: &Path, component: &str) -> Option<PathBuf> {
                 .join("bundle")
                 .join("cli.js"),
         ),
-        "dsh" => Some(
+        COMPONENT_DSH => Some(
             root.join("node_modules")
                 .join("@deepseek-ai")
                 .join("dsh")
@@ -492,11 +502,14 @@ fn runtime_cli_path(root: &Path, component: &str) -> Option<PathBuf> {
 }
 
 fn runtime_installable(component: &str) -> bool {
-    matches!(component, "node" | "pi" | "dsh" | "dshmarket")
+    matches!(
+        component,
+        COMPONENT_NODE | COMPONENT_PI | COMPONENT_DSH | COMPONENT_DSHMARKET
+    )
 }
 
 fn runtime_backup_exists(paths: &AppPaths, component: &str) -> bool {
-    if component == "dshmarket" {
+    if component == COMPONENT_DSHMARKET {
         return latest_dshmarket_backup(paths).is_some();
     }
     let Ok(root) = runtime_root(paths, component) else {
@@ -536,13 +549,13 @@ fn ensure_runtime_idle(
                     )
             }))
     };
-    if component == "pi" && pi_busy()? {
+    if component == COMPONENT_PI && pi_busy()? {
         return Err("请先停止所有 Pi Session，再切换 Pi runtime".into());
     }
-    if component == "node" && (pi_busy()? || dsh_manager.is_running()?) {
+    if component == COMPONENT_NODE && (pi_busy()? || dsh_manager.is_running()?) {
         return Err("请先停止所有 Pi 任务并关闭 DSH，再修复 Node 运行时".into());
     }
-    if matches!(component, "dsh" | "dshmarket") && dsh_manager.is_running()? {
+    if matches!(component, COMPONENT_DSH | COMPONENT_DSHMARKET) && dsh_manager.is_running()? {
         return Err("请先关闭 DSH，再切换 DSH runtime".into());
     }
     Ok(())
@@ -715,6 +728,79 @@ fn latest_dshmarket_backup(paths: &AppPaths) -> Option<PathBuf> {
         .map(|entry| entry.path())
 }
 
+const DSHMARKET_PACKAGE_NAME: &str = "dshmarket";
+
+/// 使 DSH profile 的 bundle 层列表与 dshmarket 的实际安装状态一致。
+///
+/// DSH 只加载 `package.json` 里 `dsh.profile.bundles` 列出的 bundle（`dsh
+/// plugin add` 通过 pnpm 安装后按同样规则把包名追加进该列表）。DeepPi 用
+/// 托管 npm 直接安装 dshmarket 到 profile，绕过了这一步：包体进了
+/// `node_modules`，但 bundle 列表没有它，DSH 永远不会加载插件，设置里就
+/// 看不到“插件市场”。此函数对齐 [`dsh plugin` 的 reconcile 语义]：以安装
+/// 状态为准 —— node_modules 里有 dshmarket 就加入列表，没有就移除残留项。
+///
+/// 只处理能解析且 `dsh.profile.bundles` 是字符串数组的 manifest；其余形状
+/// 原样不动并报错（由调用方决定是否降级为警告）。
+///
+/// 返回 manifest 是否被修改。
+pub(crate) fn reconcile_dshmarket_bundle(profile: &Path) -> Result<bool, String> {
+    let manifest = profile.join("package.json");
+    let Ok(content) = fs::read_to_string(&manifest) else {
+        return Ok(false);
+    };
+    let installed = profile
+        .join("node_modules")
+        .join(DSHMARKET_PACKAGE_NAME)
+        .join("package.json")
+        .is_file();
+    let mut manifest_json: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|error| format!("dsh profile manifest is not valid JSON: {error}"))?;
+    let Some(bundles) = manifest_json
+        .get("dsh")
+        .and_then(|dsh| dsh.get("profile"))
+        .and_then(|profile| profile.get("bundles"))
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Ok(false);
+    };
+    // 注意：这里不能用“manifest 文本里是否出现包名”作为快速路径。
+    // package.json 的 `dependencies` 中可以合法地列出 dshmarket 而 `bundles`
+    // 里没有它 —— 这正是 `dsh plugin add` 安装后、reconcile 前的状态，也是
+    // 本函数最需要修的情况；文本匹配会把这种状态误判为“已一致”。
+    let Some(mut names) = bundles
+        .iter()
+        .map(|entry| entry.as_str().map(ToOwned::to_owned))
+        .collect::<Option<Vec<String>>>()
+    else {
+        return Ok(false);
+    };
+    match (
+        installed,
+        names.iter().position(|name| name == DSHMARKET_PACKAGE_NAME),
+    ) {
+        (true, None) => names.push(DSHMARKET_PACKAGE_NAME.to_owned()),
+        (false, Some(position)) => {
+            names.remove(position);
+        }
+        _ => return Ok(false),
+    }
+    manifest_json["dsh"]["profile"]["bundles"] = serde_json::Value::Array(
+        names
+            .into_iter()
+            .map(serde_json::Value::String)
+            .collect::<Vec<_>>(),
+    );
+    let serialized = serde_json::to_vec_pretty(&manifest_json)
+        .map_err(|error| format!("failed to serialize dsh profile manifest: {error}"))?;
+    let mut file = AtomicWriteFile::open(&manifest)
+        .map_err(|error| format!("failed to open dsh profile manifest: {error}"))?;
+    file.write_all(&serialized)
+        .map_err(|error| format!("failed to write dsh profile manifest: {error}"))?;
+    file.commit()
+        .map_err(|error| format!("failed to commit dsh profile manifest: {error}"))?;
+    Ok(true)
+}
+
 fn install_dshmarket(
     paths: &AppPaths,
     version: &str,
@@ -775,6 +861,7 @@ fn install_dshmarket(
         cancellation,
         Some(progress),
     )
+    .and_then(|()| reconcile_dshmarket_bundle(&profile).map(|_| ()))
     .and_then(|()| {
         let installed = fs::read_to_string(paths.dshmarket_manifest())
             .ok()
@@ -1038,7 +1125,7 @@ fn verify_runtime(
             .ok_or("runtime package manifest has no valid version")?;
     let mut command = Command::new(paths.node_runtime()?);
     command.arg(cli).arg("--version");
-    if component == "pi" {
+    if component == COMPONENT_PI {
         command.env("PI_CODING_AGENT_DIR", &paths.pi_home);
     } else {
         command.env("DSH_HOME", &paths.dsh_home);
@@ -1205,7 +1292,7 @@ fn install_runtime_inner(
     progress.report(&format!("准备安装 {}", request.version), None);
     ensure_runtime_idle(&request.component_id, &store, &dsh_manager, &pty_manager)?;
     // Node 是自包含的基础运行时：从官方发行包下载，不从 npm 安装。
-    if request.component_id == "node" {
+    if request.component_id == COMPONENT_NODE {
         let result = install_node(&paths, &request.version, cancellation, progress)?;
         log::info!(
             "event=runtime_install component={} version={} status=active",
@@ -1221,16 +1308,16 @@ fn install_runtime_inner(
     let (registry_latest, registry_used) = latest_package_version(package, proxy.as_deref())?;
     cancellation.check()?;
     // DSH 固定兼容版本：即使通过 IPC 直接请求，也不能安装未验证的上游版本。
-    if request.component_id == "dsh" && request.version != VERIFIED_DSH_VERSION {
+    if request.component_id == COMPONENT_DSH && request.version != VERIFIED_DSH_VERSION {
         let requested = &request.version;
         return Err(format!(
             "DSH {requested} 尚未通过 DeepPi 兼容验证，请安装 {VERIFIED_DSH_VERSION}"
         ));
     }
-    if registry_latest != request.version && request.component_id != "dsh" {
+    if registry_latest != request.version && request.component_id != COMPONENT_DSH {
         return Err("只能安装刚从 registry 验证的最新版本".into());
     }
-    if request.component_id == "dshmarket" {
+    if request.component_id == COMPONENT_DSHMARKET {
         let result = install_dshmarket(&paths, &request.version, cancellation, progress)?;
         log::info!(
             "event=runtime_install component={} version={} status=active",
@@ -1329,7 +1416,7 @@ fn rollback_runtime_inner(
         return Err("该组件没有可回滚的独立运行时".into());
     }
     ensure_runtime_idle(&request.component_id, &store, &dsh_manager, &pty_manager)?;
-    if request.component_id == "dshmarket" {
+    if request.component_id == COMPONENT_DSHMARKET {
         let backup = latest_dshmarket_backup(&paths)
             .ok_or_else(|| "没有可用的 dshmarket 回滚版本".to_string())?;
         let package = paths.dshmarket_package();
@@ -1364,7 +1451,7 @@ fn rollback_runtime_inner(
     let root = runtime_root(&paths, &request.component_id)?;
     let version =
         crate::runtime_pointer::rollback(&root, latest_runtime_backup(&root), |target| {
-            let version = if request.component_id == "node" {
+            let version = if request.component_id == COMPONENT_NODE {
                 verify_node(target, MANAGED_NODE_VERSION)?
             } else {
                 verify_runtime(&paths, &request.component_id, target, cancellation)?
@@ -1406,7 +1493,7 @@ fn check_runtime_updates_inner(
         .map(|component| {
             let Some(package) = runtime_package(component.id) else {
                 // Node 是内置固定版本：缺失或版本不符时提供“安装/修复”入口。
-                let is_node = component.id == "node";
+                let is_node = component.id == COMPONENT_NODE;
                 return RuntimeUpdate {
                     id: component.id.to_owned(),
                     name: component.name.to_owned(),
@@ -1427,7 +1514,7 @@ fn check_runtime_updates_inner(
             {
                 Ok(registry_latest) => {
                     // DSH 固定在已验证版本：上游有更新时只提示，不提供安装。
-                    let (latest_version, note) = if component.id == "dsh" {
+                    let (latest_version, note) = if component.id == COMPONENT_DSH {
                         (
                             VERIFIED_DSH_VERSION.to_owned(),
                             (registry_latest != VERIFIED_DSH_VERSION).then(|| {
@@ -1444,7 +1531,7 @@ fn check_runtime_updates_inner(
                         name: component.name.to_owned(),
                         // DSH 固定版本：版本不一致（含高于兼容上限）时都提供安装入口，
                         // 让误装未验证版本的用户能回到已验证版本。
-                        update_available: if component.id == "dsh" {
+                        update_available: if component.id == COMPONENT_DSH {
                             component.current_version.as_deref() != Some(latest_version.as_str())
                         } else {
                             component
@@ -1503,6 +1590,8 @@ fn check_runtime_updates_inner(
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
+
     use super::{
         extract_version, package_version_from_json, parse_sha256, runtime_cli_path,
         runtime_installable, valid_package_version, version_is_newer,
@@ -1649,5 +1738,134 @@ mod tests {
             package_version_from_json(r#"{"name":"dshmarket","version":"1.40.0"}"#),
             Some("1.40.0".into())
         );
+    }
+
+    fn profile_fixture(root: &Path, installed: bool, bundles: &str) -> PathBuf {
+        let profile = root.join("profiles").join("web");
+        std::fs::create_dir_all(profile.join("node_modules")).unwrap();
+        let manifest = profile.join("package.json");
+        std::fs::write(
+            &manifest,
+            format!(
+                r#"{{"name":"dsh-profile-web","private":true,"dependencies":{{}},"dsh":{{"profile":{{"bundles":{bundles},"patchReload":"live"}}}}}}"#
+            ),
+        )
+        .unwrap();
+        if installed {
+            let package = profile
+                .join("node_modules")
+                .join("dshmarket")
+                .join("package.json");
+            std::fs::create_dir_all(package.parent().unwrap()).unwrap();
+            std::fs::write(
+                package,
+                r#"{"name":"dshmarket","version":"1.46.1","dsh":{"bundle":{"patch":"./cordis.patch.yml"}}}"#,
+            )
+            .unwrap();
+        }
+        profile
+    }
+
+    fn read_bundles(profile: &Path) -> Vec<String> {
+        let manifest = serde_json::from_str::<serde_json::Value>(
+            &std::fs::read_to_string(profile.join("package.json")).unwrap(),
+        )
+        .unwrap();
+        manifest["dsh"]["profile"]["bundles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(serde_json::Value::as_str)
+            .map(Option::unwrap)
+            .map(ToOwned::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn reconciles_dshmarket_listed_as_a_dependency_but_missing_from_bundles() {
+        let root = std::env::temp_dir().join(format!("deeppi-reconcile-{}", uuid::Uuid::new_v4()));
+        let profile = profile_fixture(
+            &root,
+            true,
+            r#"["@deepseek-ai/dsh-base","@deepseek-ai/dsh-web-app"]"#,
+        );
+        // `dsh plugin add` 写依赖但尚未 reconcile 的状态：包名已在 dependencies 里、
+        // bundles 里没有。任何基于“manifest 文本是否出现包名”的快速路径都会把
+        // 这种状态误判为已一致，从而漏掉最需要修复的情况。
+        let manifest = profile.join("package.json");
+        std::fs::write(
+            &manifest,
+            r#"{"name":"dsh-profile-web","private":true,"dependencies":{"dshmarket":"^1.46.1"},"dsh":{"profile":{"bundles":["@deepseek-ai/dsh-base","@deepseek-ai/dsh-web-app"]}}}"#,
+        )
+        .unwrap();
+        assert!(super::reconcile_dshmarket_bundle(&profile).unwrap());
+        assert_eq!(read_bundles(&profile).last().unwrap(), "dshmarket");
+        // 依赖声明原样保留。
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&manifest).unwrap()).unwrap();
+        assert_eq!(value["dependencies"]["dshmarket"], "^1.46.1");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reconciles_installed_dshmarket_into_the_bundle_stack() {
+        let root = std::env::temp_dir().join(format!("deeppi-reconcile-{}", uuid::Uuid::new_v4()));
+        let profile = profile_fixture(
+            &root,
+            true,
+            r#"["@deepseek-ai/dsh-base","@deepseek-ai/dsh-web-app"]"#,
+        );
+        assert!(super::reconcile_dshmarket_bundle(&profile).unwrap());
+        assert_eq!(
+            read_bundles(&profile),
+            vec![
+                "@deepseek-ai/dsh-base".to_owned(),
+                "@deepseek-ai/dsh-web-app".to_owned(),
+                "dshmarket".to_owned()
+            ]
+        );
+        // 已一致时不再改写。
+        assert!(!super::reconcile_dshmarket_bundle(&profile).unwrap());
+        assert_eq!(read_bundles(&profile).last().unwrap(), "dshmarket");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reconciles_removed_dshmarket_out_of_the_bundle_stack() {
+        let root = std::env::temp_dir().join(format!("deeppi-reconcile-{}", uuid::Uuid::new_v4()));
+        let profile = profile_fixture(
+            &root,
+            false,
+            r#"["@deepseek-ai/dsh-base","dshmarket","@deepseek-ai/dsh-web-app"]"#,
+        );
+        // node_modules 里没有 dshmarket 却在列表里：启动会因解析失败报错，应移除。
+        assert!(super::reconcile_dshmarket_bundle(&profile).unwrap());
+        assert_eq!(
+            read_bundles(&profile),
+            vec![
+                "@deepseek-ai/dsh-base".to_owned(),
+                "@deepseek-ai/dsh-web-app".to_owned()
+            ]
+        );
+        assert!(!super::reconcile_dshmarket_bundle(&profile).unwrap());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn leaves_manifests_without_a_bundle_stack_untouched() {
+        let root = std::env::temp_dir().join(format!("deeppi-reconcile-{}", uuid::Uuid::new_v4()));
+        let profile = profile_fixture(&root, true, r#"[]"#);
+        let manifest = profile.join("package.json");
+        // 缺少 dsh.profile.bundles（或形状异常）时不改写，避免覆盖未知结构。
+        std::fs::write(&manifest, r#"{"name":"dsh-profile-web","private":true}"#).unwrap();
+        assert!(!super::reconcile_dshmarket_bundle(&profile).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&manifest).unwrap(),
+            r#"{"name":"dsh-profile-web","private":true}"#
+        );
+        // 非数组同样不动。
+        std::fs::write(&manifest, r#"{"dsh":{"profile":{"bundles":"dshmarket"}}}"#).unwrap();
+        assert!(!super::reconcile_dshmarket_bundle(&profile).unwrap());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

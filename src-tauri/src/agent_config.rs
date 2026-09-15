@@ -123,6 +123,19 @@ pub fn validate_entry_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// 在阻塞线程池中执行文件系统工作，避免占用 Tauri 主线程（WebView 事件循环）。
+/// 与 `runtime.rs` / `dsh.rs` 的既有做法一致：技能目录遍历与递归删除在慢速磁盘上
+/// 可达数十毫秒到数秒，留在主线程会直接表现为界面卡顿。
+async fn run_blocking<T, F>(work: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|error| format!("agent config worker failed: {error}"))?
+}
+
 fn read_json_file(path: &Path) -> Result<Value, String> {
     let content = match fs::read_to_string(path) {
         Ok(content) => content,
@@ -162,83 +175,94 @@ fn mcp_file(
 }
 
 #[tauri::command]
-pub fn list_mcp_servers(
+pub async fn list_mcp_servers(
     paths: State<'_, AppPaths>,
     scope: ConfigScope,
     project_path: Option<String>,
 ) -> Result<Vec<McpServerEntry>, String> {
-    let value = read_json_file(&mcp_file(&paths, scope, project_path.as_deref())?)?;
-    let Some(servers) = value.get("mcpServers").and_then(Value::as_object) else {
-        return Ok(Vec::new());
-    };
-    if servers.len() > MAX_MCP_SERVERS {
-        return Err("MCP 服务数量超过上限".into());
-    }
-    Ok(servers
-        .iter()
-        .map(|(name, config)| McpServerEntry {
-            name: name.clone(),
-            config: config.clone(),
-        })
-        .collect())
+    let paths = paths.inner().clone();
+    run_blocking(move || {
+        let value = read_json_file(&mcp_file(&paths, scope, project_path.as_deref())?)?;
+        let Some(servers) = value.get("mcpServers").and_then(Value::as_object) else {
+            return Ok(Vec::new());
+        };
+        if servers.len() > MAX_MCP_SERVERS {
+            return Err("MCP 服务数量超过上限".into());
+        }
+        Ok(servers
+            .iter()
+            .map(|(name, config)| McpServerEntry {
+                name: name.clone(),
+                config: config.clone(),
+            })
+            .collect())
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn save_mcp_server(
+pub async fn save_mcp_server(
     paths: State<'_, AppPaths>,
     request: SaveMcpServerRequest,
 ) -> Result<(), String> {
-    let name = request.name.trim();
-    validate_entry_name(name)?;
-    if !request.config.is_object() {
-        return Err("MCP 配置必须是 JSON 对象".into());
-    }
-    if serde_json::to_vec(&request.config)
-        .map_err(|error| error.to_string())?
-        .len()
-        > MAX_MCP_CONFIG_BYTES
-    {
-        return Err("MCP 配置过大".into());
-    }
-    let path = mcp_file(
-        &paths,
-        request.scope.unwrap_or(ConfigScope::Global),
-        request.project_path.as_deref(),
-    )?;
-    let mut value = read_json_file(&path)?;
-    let mut servers = value
-        .get("mcpServers")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
-    if !servers.contains_key(name) && servers.len() >= MAX_MCP_SERVERS {
-        return Err("MCP 服务数量超过上限".into());
-    }
-    servers.insert(name.to_string(), request.config);
-    value["mcpServers"] = Value::Object(servers);
-    write_json_file(&path, &value)
+    let paths = paths.inner().clone();
+    run_blocking(move || {
+        let name = request.name.trim();
+        validate_entry_name(name)?;
+        if !request.config.is_object() {
+            return Err("MCP 配置必须是 JSON 对象".into());
+        }
+        if serde_json::to_vec(&request.config)
+            .map_err(|error| error.to_string())?
+            .len()
+            > MAX_MCP_CONFIG_BYTES
+        {
+            return Err("MCP 配置过大".into());
+        }
+        let path = mcp_file(
+            &paths,
+            request.scope.unwrap_or(ConfigScope::Global),
+            request.project_path.as_deref(),
+        )?;
+        let mut value = read_json_file(&path)?;
+        let mut servers = value
+            .get("mcpServers")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        if !servers.contains_key(name) && servers.len() >= MAX_MCP_SERVERS {
+            return Err("MCP 服务数量超过上限".into());
+        }
+        servers.insert(name.to_string(), request.config);
+        value["mcpServers"] = Value::Object(servers);
+        write_json_file(&path, &value)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn delete_mcp_server(
+pub async fn delete_mcp_server(
     paths: State<'_, AppPaths>,
     request: DeleteByNameRequest,
 ) -> Result<(), String> {
-    let name = request.name.trim();
-    validate_entry_name(name)?;
-    let path = mcp_file(
-        &paths,
-        request.scope.unwrap_or(ConfigScope::Global),
-        request.project_path.as_deref(),
-    )?;
-    let mut value = read_json_file(&path)?;
-    let Some(servers) = value.get("mcpServers").and_then(Value::as_object).cloned() else {
-        return Ok(());
-    };
-    let mut servers = servers;
-    servers.remove(name);
-    value["mcpServers"] = Value::Object(servers);
-    write_json_file(&path, &value)
+    let paths = paths.inner().clone();
+    run_blocking(move || {
+        let name = request.name.trim();
+        validate_entry_name(name)?;
+        let path = mcp_file(
+            &paths,
+            request.scope.unwrap_or(ConfigScope::Global),
+            request.project_path.as_deref(),
+        )?;
+        let mut value = read_json_file(&path)?;
+        let Some(mut servers) = value.get("mcpServers").and_then(Value::as_object).cloned() else {
+            return Ok(());
+        };
+        servers.remove(name);
+        value["mcpServers"] = Value::Object(servers);
+        write_json_file(&path, &value)
+    })
+    .await
 }
 
 fn skills_dir(
@@ -285,92 +309,108 @@ pub fn parse_skill_description(content: &str) -> String {
 }
 
 #[tauri::command]
-pub fn list_skills(
+pub async fn list_skills(
     paths: State<'_, AppPaths>,
     scope: ConfigScope,
     project_path: Option<String>,
 ) -> Result<Vec<SkillEntry>, String> {
-    let entries = match fs::read_dir(skills_dir(&paths, scope, project_path.as_deref())?) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(format!("failed to read skills directory: {error}")),
-    };
-    let mut result = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
+    let paths = paths.inner().clone();
+    run_blocking(move || {
+        let entries = match fs::read_dir(skills_dir(&paths, scope, project_path.as_deref())?) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(format!("failed to read skills directory: {error}")),
+        };
+        let mut result = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let skill_file = path.join("SKILL.md");
+            if !skill_file.is_file() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            let content = fs::read_to_string(&skill_file).unwrap_or_default();
+            let description = parse_skill_description(&content);
+            result.push(SkillEntry {
+                name,
+                description,
+                path: skill_file.to_string_lossy().to_string(),
+            });
+            if result.len() >= MAX_SKILLS {
+                break;
+            }
         }
-        let skill_file = path.join("SKILL.md");
-        if !skill_file.is_file() {
-            continue;
+        result.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(result)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn save_skill(
+    paths: State<'_, AppPaths>,
+    request: SaveSkillRequest,
+) -> Result<(), String> {
+    let paths = paths.inner().clone();
+    run_blocking(move || {
+        let name = request.name.trim();
+        validate_entry_name(name)?;
+        let description = request.description.trim();
+        if description.is_empty() || description.len() > MAX_SKILL_DESCRIPTION_LENGTH {
+            return Err("Skill 描述必须包含 1 到 512 个字符".into());
         }
-        let name = entry.file_name().to_string_lossy().to_string();
-        let content = fs::read_to_string(&skill_file).unwrap_or_default();
-        let description = parse_skill_description(&content);
-        result.push(SkillEntry {
+        if request.content.is_empty() || request.content.len() > MAX_SKILL_CONTENT_BYTES {
+            return Err("Skill 内容必须包含 1 到 65536 字节".into());
+        }
+        let dir = skill_dir(
+            &paths,
+            request.scope.unwrap_or(ConfigScope::Global),
+            request.project_path.as_deref(),
             name,
-            description,
-            path: skill_file.to_string_lossy().to_string(),
-        });
-        if result.len() >= MAX_SKILLS {
-            break;
-        }
-    }
-    result.sort_by(|left, right| left.name.cmp(&right.name));
-    Ok(result)
+        )?;
+        fs::create_dir_all(&dir)
+            .map_err(|error| format!("failed to create skill directory: {error}"))?;
+        let content = if request.content.trim_start().starts_with("---") {
+            request.content
+        } else {
+            format!(
+                "---\nname: {name}\ndescription: {description}\n---\n\n{}",
+                request.content.trim_start()
+            )
+        };
+        let mut file = AtomicWriteFile::open(dir.join("SKILL.md"))
+            .map_err(|error| format!("failed to open SKILL.md: {error}"))?;
+        file.write_all(content.as_bytes())
+            .map_err(|error| format!("failed to write SKILL.md: {error}"))?;
+        file.commit()
+            .map_err(|error| format!("failed to commit SKILL.md: {error}"))
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn save_skill(paths: State<'_, AppPaths>, request: SaveSkillRequest) -> Result<(), String> {
-    let name = request.name.trim();
-    validate_entry_name(name)?;
-    let description = request.description.trim();
-    if description.is_empty() || description.len() > MAX_SKILL_DESCRIPTION_LENGTH {
-        return Err("Skill 描述必须包含 1 到 512 个字符".into());
-    }
-    if request.content.is_empty() || request.content.len() > MAX_SKILL_CONTENT_BYTES {
-        return Err("Skill 内容必须包含 1 到 65536 字节".into());
-    }
-    let dir = skill_dir(
-        &paths,
-        request.scope.unwrap_or(ConfigScope::Global),
-        request.project_path.as_deref(),
-        name,
-    )?;
-    fs::create_dir_all(&dir)
-        .map_err(|error| format!("failed to create skill directory: {error}"))?;
-    let content = if request.content.trim_start().starts_with("---") {
-        request.content
-    } else {
-        format!(
-            "---\nname: {name}\ndescription: {description}\n---\n\n{}",
-            request.content.trim_start()
-        )
-    };
-    let mut file = AtomicWriteFile::open(dir.join("SKILL.md"))
-        .map_err(|error| format!("failed to open SKILL.md: {error}"))?;
-    file.write_all(content.as_bytes())
-        .map_err(|error| format!("failed to write SKILL.md: {error}"))?;
-    file.commit()
-        .map_err(|error| format!("failed to commit SKILL.md: {error}"))
-}
-
-#[tauri::command]
-pub fn delete_skill(
+pub async fn delete_skill(
     paths: State<'_, AppPaths>,
     request: DeleteByNameRequest,
 ) -> Result<(), String> {
-    let dir = skill_dir(
-        &paths,
-        request.scope.unwrap_or(ConfigScope::Global),
-        request.project_path.as_deref(),
-        &request.name,
-    )?;
-    if !dir.is_dir() {
-        return Ok(());
-    }
-    fs::remove_dir_all(&dir).map_err(|error| format!("failed to delete skill directory: {error}"))
+    let paths = paths.inner().clone();
+    run_blocking(move || {
+        let dir = skill_dir(
+            &paths,
+            request.scope.unwrap_or(ConfigScope::Global),
+            request.project_path.as_deref(),
+            &request.name,
+        )?;
+        if !dir.is_dir() {
+            return Ok(());
+        }
+        fs::remove_dir_all(&dir)
+            .map_err(|error| format!("failed to delete skill directory: {error}"))
+    })
+    .await
 }
 
 #[cfg(test)]

@@ -132,13 +132,13 @@
           {#if runtime.runtimes.length === 0}<p class="muted" role="status">尚未读取运行环境</p>
           {:else}
             <dl class="environment">
-              {#each runtime.runtimes as component}
+              {#each runtime.runtimes as component (component.id)}
                 <div><dt>{component.name}</dt><dd>{component.currentVersion ?? "未安装"} · {component.available ? "可用" : "不可用"} · {component.source}</dd></div>
               {/each}
             </dl>
           {/if}
           {#if runtime.appUpdate.error}<p role="alert">{runtime.appUpdate.error}</p>{/if}
-          {#each runtime.updates.filter((update) => update.error) as update}<p role="alert">{update.name}: {update.error}</p>{/each}
+          {#each runtime.updates.filter((update) => update.error) as update (update.id)}<p role="alert">{update.name}: {update.error}</p>{/each}
         </section>
       </div>
     </div>

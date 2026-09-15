@@ -191,6 +191,19 @@ fn start_dsh_inner(
         return Err("managed DSH runtime is not installed".into());
     }
 
+    // 自愈：dshmarket 装进 profile 却没进 bundle 层列表（旧版安装路径遗留），
+    // 或列表残留已卸载的包导致启动失败 —— 启动前按安装状态对齐一次。
+    // 失败不阻断启动：降级为警告，DSH 仍按现状启动。
+    match crate::runtime::reconcile_dshmarket_bundle(&paths.dsh_profile()) {
+        Ok(true) => log::info!(
+            "event=dsh_profile_reconcile component=dshmarket profile=web status=updated"
+        ),
+        Ok(false) => {}
+        Err(error) => log::warn!(
+            "event=dsh_profile_reconcile component=dshmarket profile=web status=skipped reason=\"{error}\""
+        ),
+    }
+
     let mut command = Command::new(paths.node_runtime()?);
     // 0.1.5 起 HMR 服务要求 Node 以 --expose-internals 启动，否则 DSH 无法就绪。
     command

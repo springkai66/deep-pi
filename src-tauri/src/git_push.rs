@@ -1,6 +1,5 @@
 use crate::{
-    git_repository::{with_repository, GitRepository},
-    project_files::GuardedPath,
+    git_operation::run_git_command, git_repository::GitRepository, project_files::GuardedPath,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -10,7 +9,6 @@ use std::{
     process::Command,
     time::Duration,
 };
-use tauri::Manager;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -472,24 +470,10 @@ pub async fn project_git_verify_remote(
     if webview.label() != "main" {
         return Err("远程核对需要主窗口".into());
     }
-    let root = app
-        .state::<crate::task::TaskStore>()
-        .project_path(&project_id)?;
-    let operation = app
-        .state::<crate::git_operation::GitOperations>()
-        .begin(&operation_id)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        let running = operation;
-        with_repository(
-            &app,
-            Path::new(&root),
-            false,
-            running.budget.clone(),
-            |repo| verify_remote(repo, &expected),
-        )
+    run_git_command(app, project_id, operation_id, false, move |repo| {
+        verify_remote(repo, &expected)
     })
     .await
-    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -502,24 +486,7 @@ pub async fn project_git_push_targets(
     if webview.label() != "main" {
         return Err("推送配置需要主窗口".into());
     }
-    let root = app
-        .state::<crate::task::TaskStore>()
-        .project_path(&project_id)?;
-    let operation = app
-        .state::<crate::git_operation::GitOperations>()
-        .begin(&operation_id)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        let running = operation;
-        with_repository(
-            &app,
-            Path::new(&root),
-            false,
-            running.budget.clone(),
-            list_targets,
-        )
-    })
-    .await
-    .map_err(|error| error.to_string())?
+    run_git_command(app, project_id, operation_id, false, list_targets).await
 }
 
 #[tauri::command]
@@ -533,28 +500,22 @@ pub async fn project_git_push(
     if webview.label() != "main" {
         return Err("Git 推送需要主窗口".into());
     }
-    let root = app
-        .state::<crate::task::TaskStore>()
-        .project_path(&project_id)?;
-    let operation = app
-        .state::<crate::git_operation::GitOperations>()
-        .begin(&operation_id)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        let running = operation;
-        with_repository(&app, Path::new(&root), false, running.budget.clone(), |repo| {
-            let branch = expected.target_ref.strip_prefix("refs/heads/").ok_or("Invalid push target")?;
-            if prepare_push(repo, &expected.remote, &expected.destination, branch)? != expected {
-                return Err("推送配置或源提交已变化，请重新加载".into());
-            }
-            let confirmed = app.dialog().message(format!(
-                "工作树：{}\n远程：{}\n目的地：{}\n目标：{}\n源提交：{}\n\n推送会传输此提交及其可达历史，不限于项目子目录。\n仅更新上述分支，不强推、不附带标签、不递归推送子模块、不运行客户端 hooks。\n使用系统现有凭据；本入口不交互登录、不签署推送证书。",
-                repo.worktree.path.display(), expected.remote, expected.destination, expected.target_ref, expected.source_oid,
-            )).title("确认推送")
-                .buttons(MessageDialogButtons::OkCancelCustom("推送".into(), "取消".into())).blocking_show();
-            if !confirmed { return Ok(None); }
-            push_snapshot(repo, &expected).map(Some)
-        })
-    }).await.map_err(|error| error.to_string())?
+    // 确认弹窗在阻塞线程内仍需 AppHandle，因此保留一份再移交。
+    let dialog_app = app.clone();
+    run_git_command(app, project_id, operation_id, false, move |repo| {
+        let branch = expected.target_ref.strip_prefix("refs/heads/").ok_or("Invalid push target")?;
+        if prepare_push(repo, &expected.remote, &expected.destination, branch)? != expected {
+            return Err("推送配置或源提交已变化，请重新加载".into());
+        }
+        let confirmed = dialog_app.dialog().message(format!(
+            "工作树：{}\n远程：{}\n目的地：{}\n目标：{}\n源提交：{}\n\n推送会传输此提交及其可达历史，不限于项目子目录。\n仅更新上述分支，不强推、不附带标签、不递归推送子模块、不运行客户端 hooks。\n使用系统现有凭据；本入口不交互登录、不签署推送证书。",
+            repo.worktree.path.display(), expected.remote, expected.destination, expected.target_ref, expected.source_oid,
+        )).title("确认推送")
+            .buttons(MessageDialogButtons::OkCancelCustom("推送".into(), "取消".into())).blocking_show();
+        if !confirmed { return Ok(None); }
+        push_snapshot(repo, &expected).map(Some)
+    })
+    .await
 }
 
 #[cfg(all(test, windows))]

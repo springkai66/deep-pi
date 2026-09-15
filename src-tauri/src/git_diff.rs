@@ -1,11 +1,11 @@
 use crate::{
-    git_repository::{with_repository, GitRepository},
+    git_operation::run_git_command,
+    git_repository::GitRepository,
     git_status::{read_status, EntryKind},
     project_files::GuardedPath,
 };
 use serde::{Deserialize, Serialize};
 use std::{fs, path::Path};
-use tauri::Manager;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -202,24 +202,10 @@ pub async fn project_git_diff(
     if webview.label() != "main" {
         return Err("Git 差异读取需要主窗口".into());
     }
-    let root = app
-        .state::<crate::task::TaskStore>()
-        .project_path(&project_id)?;
-    let operation = app
-        .state::<crate::git_operation::GitOperations>()
-        .begin(&operation_id)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        let running = operation;
-        with_repository(
-            &app,
-            Path::new(&root),
-            false,
-            running.budget.clone(),
-            |repo| read_diff(repo, request),
-        )
+    run_git_command(app, project_id, operation_id, false, move |repo| {
+        read_diff(repo, request)
     })
     .await
-    .map_err(|error| error.to_string())?
 }
 
 #[cfg(all(test, windows))]

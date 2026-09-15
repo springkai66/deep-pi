@@ -206,19 +206,8 @@ fn test_provider_connection_inner(
         .unwrap_or_else(|_| base_url.to_string());
     let agent = crate::provider::provider_agent(&provider)?;
     let api_key = provider_api_key(&provider.id)?;
-    let mut request = agent.get(&probe_url).header("Accept", "application/json");
-    for (name, value) in &provider.headers {
-        request = request.header(name, value);
-    }
-    if let Some(api_key) = api_key.as_deref() {
-        request = match provider.api.as_str() {
-            "anthropic-messages" => request
-                .header("x-api-key", api_key)
-                .header("anthropic-version", "2023-06-01"),
-            "google-generative-ai" => request.header("x-goog-api-key", api_key),
-            _ => request.header("Authorization", &format!("Bearer {api_key}")),
-        };
-    }
+    let request = agent.get(&probe_url).header("Accept", "application/json");
+    let request = crate::provider::apply_provider_auth(request, &provider, api_key.as_deref());
     let response = request
         .call()
         .map_err(|error| format!("provider connection failed: {error}"))?;
@@ -331,21 +320,10 @@ fn test_model_connection_inner(
     for (target_url, body) in targets {
         let url = tauri::Url::parse(&target_url)
             .map_err(|error| format!("model probe URL is invalid: {error}"))?;
-        let mut request = agent
+        let request = agent
             .post(url.as_str())
             .header("Accept", "application/json");
-        for (name, value) in &provider.headers {
-            request = request.header(name, value);
-        }
-        if let Some(api_key) = api_key.as_deref() {
-            request = match provider.api.as_str() {
-                "anthropic-messages" => request
-                    .header("x-api-key", api_key)
-                    .header("anthropic-version", "2023-06-01"),
-                "google-generative-ai" => request.header("x-goog-api-key", api_key),
-                _ => request.header("Authorization", &format!("Bearer {api_key}")),
-            };
-        }
+        let request = crate::provider::apply_provider_auth(request, &provider, api_key.as_deref());
         let started = Instant::now();
         let send = request.send_json(&body);
         let latency = started.elapsed().as_millis() as u64;

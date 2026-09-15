@@ -1,19 +1,16 @@
 use crate::{
-    git_index::IndexTransaction,
-    git_repository::{with_repository, GitRepository},
+    git_index::IndexTransaction, git_operation::run_git_command, git_repository::GitRepository,
     project_files::GuardedPath,
 };
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
     io::{BufRead, BufReader, Read, Write},
-    path::Path,
     process::{Command, Stdio},
     sync::mpsc,
     thread,
     time::{Duration, Instant},
 };
-use tauri::Manager;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -500,24 +497,7 @@ pub async fn project_git_prepare_commit(
     if webview.label() != "main" {
         return Err("准备提交需要主窗口".into());
     }
-    let root = app
-        .state::<crate::task::TaskStore>()
-        .project_path(&project_id)?;
-    let operation = app
-        .state::<crate::git_operation::GitOperations>()
-        .begin(&operation_id)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        let running = operation;
-        with_repository(
-            &app,
-            Path::new(&root),
-            false,
-            running.budget.clone(),
-            prepare_commit,
-        )
-    })
-    .await
-    .map_err(|error| error.to_string())?
+    run_git_command(app, project_id, operation_id, false, prepare_commit).await
 }
 
 #[tauri::command]
@@ -533,29 +513,27 @@ pub async fn project_git_commit(
         return Err("Git 提交需要主窗口".into());
     }
     validate_message(&message)?;
-    let root = app
-        .state::<crate::task::TaskStore>()
-        .project_path(&project_id)?;
-    let operation = app
-        .state::<crate::git_operation::GitOperations>()
-        .begin(&operation_id)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        let running = operation;
-        with_repository(&app, Path::new(&root), false, running.budget.clone(), |repo| {
-            if prepare_commit(repo)? != expected { return Err("提交范围已变化，请重新准备".into()); }
-            let mut scope = expected.paths.iter().take(12).cloned().collect::<Vec<_>>().join("\n");
-            if expected.paths.len() > 12 { scope.push_str(&format!("\n…共 {} 个路径，完整范围已在应用中列出", expected.paths.len())); }
-            let summary: String = message.chars().take(600).collect();
-            let confirmed = app.dialog().message(format!(
-                "工作树：{}\n目标：{}\n作者：{}\n签名：{}\n暂存树：{}\n\n{}\n\n提交说明摘要：\n{}\n\n本次不运行 Git hooks，也不会推送。",
-                repo.worktree.path.display(), expected.reference, expected.author,
-                if expected.sign { "启用" } else { "关闭" }, expected.tree, scope, summary,
-            )).title("确认提交暂存变更")
-                .buttons(MessageDialogButtons::OkCancelCustom("提交".into(), "取消".into())).blocking_show();
-            if !confirmed { return Ok(None); }
-            commit_staged(repo, &expected, &message).map(Some)
-        })
-    }).await.map_err(|error| error.to_string())?
+    // 确认弹窗在阻塞线程内仍需 AppHandle，因此保留一份再移交。
+    let dialog_app = app.clone();
+    run_git_command(app, project_id, operation_id, false, move |repo| {
+        if prepare_commit(repo)? != expected {
+            return Err("提交范围已变化，请重新准备".into());
+        }
+        let mut scope = expected.paths.iter().take(12).cloned().collect::<Vec<_>>().join("\n");
+        if expected.paths.len() > 12 {
+            scope.push_str(&format!("\n…共 {} 个路径，完整范围已在应用中列出", expected.paths.len()));
+        }
+        let summary: String = message.chars().take(600).collect();
+        let confirmed = dialog_app.dialog().message(format!(
+            "工作树：{}\n目标：{}\n作者：{}\n签名：{}\n暂存树：{}\n\n{}\n\n提交说明摘要：\n{}\n\n本次不运行 Git hooks，也不会推送。",
+            repo.worktree.path.display(), expected.reference, expected.author,
+            if expected.sign { "启用" } else { "关闭" }, expected.tree, scope, summary,
+        )).title("确认提交暂存变更")
+            .buttons(MessageDialogButtons::OkCancelCustom("提交".into(), "取消".into())).blocking_show();
+        if !confirmed { return Ok(None); }
+        commit_staged(repo, &expected, &message).map(Some)
+    })
+    .await
 }
 
 #[cfg(all(test, windows))]

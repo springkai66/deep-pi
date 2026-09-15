@@ -1,6 +1,7 @@
 use crate::{
+    git_operation::run_git_command_with_budget,
     git_push::{check_destination, isolated_command, verify_remote, PushConfig, PushPreview},
-    git_repository::{with_repository, GitRepository},
+    git_repository::GitRepository,
     project_files::GuardedPath,
 };
 use serde::Serialize;
@@ -12,7 +13,6 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use tauri::Manager;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -369,27 +369,28 @@ pub async fn project_git_sync_tracking(
     if webview.label() != "main" {
         return Err("同步远程跟踪引用需要主窗口".into());
     }
-    let root = app
-        .state::<crate::task::TaskStore>()
-        .project_path(&project_id)?;
-    let operation = app
-        .state::<crate::git_operation::GitOperations>()
-        .begin_with_budget(&operation_id, Duration::from_secs(180))?;
-    tauri::async_runtime::spawn_blocking(move || {
-        let running = operation;
-        with_repository(&app, Path::new(&root), false, running.budget.clone(), |repo| {
+    // 确认弹窗在阻塞线程内仍需 AppHandle，因此保留一份再移交。
+    let dialog_app = app.clone();
+    run_git_command_with_budget(
+        app,
+        project_id,
+        operation_id,
+        false,
+        Duration::from_secs(180),
+        move |repo| {
             let preview = prepare(repo, &expected)?;
             let refs = preview.references.iter().map(|value| format!("{}: {}", value.reference,
                 value.old_oid.as_deref().unwrap_or("(new)"))).collect::<Vec<_>>().join("\n");
-            let confirmed = app.dialog().message(format!(
+            let confirmed = dialog_app.dialog().message(format!(
                 "工作树：{}\n远程：{}\n目的地：{}\n目标分支：{}\n查询提交：{}\n\n本地跟踪引用：\n{}\n\n下载此提交的可达对象，并将以上引用更新到查询提交，包括远程回退。\n不合并、不变基本地分支，不修改工作区、索引、标签或上游设置；不运行客户端 hooks。\n远程查询未返回目标时不删除本地引用。使用现有凭据，不交互登录。",
                 repo.worktree.path.display(), expected.remote, expected.destination, expected.target_ref, preview.oid, refs,
             )).title("确认同步远程跟踪引用")
                 .buttons(MessageDialogButtons::OkCancelCustom("同步".into(), "取消".into())).blocking_show();
             if !confirmed { return Ok(None); }
             synchronize(repo, &expected, &preview).map(Some)
-        })
-    }).await.map_err(|error| error.to_string())?
+        },
+    )
+    .await
 }
 
 #[cfg(all(test, windows))]

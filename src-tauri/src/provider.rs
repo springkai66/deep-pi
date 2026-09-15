@@ -671,6 +671,34 @@ pub fn parse_provider_models(
     Ok(models)
 }
 
+/// Anthropic 的 Messages API 需要一个显式的版本头；缺失时上游会拒绝请求。
+const ANTHROPIC_VERSION: &str = "2023-06-01";
+
+/// 为请求附加 provider 自定义头与凭据头。
+///
+/// “测试连接”与实际调用（模型列表、模型探测）必须走同一套鉴权逻辑：
+/// 两者分叉会让用户看到假阳性（测试通过但真实调用 401，或反之）。
+/// 因此这里集中实现，任何协议细节（如 Anthropic 版本头）只改一处。
+pub(crate) fn apply_provider_auth<B>(
+    mut request: ureq::RequestBuilder<B>,
+    provider: &ProviderRecord,
+    api_key: Option<&str>,
+) -> ureq::RequestBuilder<B> {
+    for (name, value) in &provider.headers {
+        request = request.header(name, value);
+    }
+    if let Some(api_key) = api_key {
+        request = match provider.api.as_str() {
+            "anthropic-messages" => request
+                .header("x-api-key", api_key)
+                .header("anthropic-version", ANTHROPIC_VERSION),
+            "google-generative-ai" => request.header("x-goog-api-key", api_key),
+            _ => request.header("Authorization", &format!("Bearer {api_key}")),
+        };
+    }
+    request
+}
+
 pub(crate) fn provider_agent(provider: &ProviderRecord) -> Result<ureq::Agent, String> {
     let mut config = ureq::Agent::config_builder()
         .timeout_global(Some(PROVIDER_REQUEST_TIMEOUT))
@@ -691,19 +719,8 @@ fn fetch_provider_models(provider: &ProviderRecord) -> Result<Vec<ProviderModelS
     let url = provider_models_url(base_url, &provider.api)?;
     let api_key = provider_api_key(&provider.id)?;
     let agent = provider_agent(provider)?;
-    let mut request = agent.get(url.as_str()).header("Accept", "application/json");
-    for (name, value) in &provider.headers {
-        request = request.header(name, value);
-    }
-    if let Some(api_key) = api_key.as_deref() {
-        request = match provider.api.as_str() {
-            "anthropic-messages" => request
-                .header("x-api-key", api_key)
-                .header("anthropic-version", "2023-06-01"),
-            "google-generative-ai" => request.header("x-goog-api-key", api_key),
-            _ => request.header("Authorization", &format!("Bearer {api_key}")),
-        };
-    }
+    let request = agent.get(url.as_str()).header("Accept", "application/json");
+    let request = apply_provider_auth(request, provider, api_key.as_deref());
     let mut response = request
         .call()
         .map_err(|error| format!("provider model request failed: {error}"))?;

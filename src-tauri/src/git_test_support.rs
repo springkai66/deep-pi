@@ -50,10 +50,12 @@ impl TestRepo {
     }
 
     pub fn git(&self, args: &[&str]) {
-        // 整套测试并行时 runner 可能短暂拥塞；这里只关心 fixture 命令是否成功，
-        // 放宽到 60 秒避免把机器负载当成测试失败。
-        let output =
-            crate::process_runner::run(&mut self.command(args), Duration::from_secs(60)).unwrap();
+        // 整套测试并行运行时（CI/本机可能同时跑几十个 git 子进程），安全软件的
+        // 进程拦截会让单条 fixture 命令明显变慢；预算放宽到 180 秒，避免把机器
+        // 负载当成产品缺陷。超时不再 panic（那样只看到空消息），而是给出可诊断
+        // 的上下文。
+        let output = crate::process_runner::run(&mut self.command(args), Duration::from_secs(180))
+            .unwrap_or_else(|error| panic!("Git {args:?} did not complete: {error}"));
         assert!(output.status.success(), "Git {args:?}: {}", output.text());
     }
 }

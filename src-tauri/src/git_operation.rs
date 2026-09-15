@@ -170,6 +170,98 @@ pub fn cancel_git_read(
     manager.cancel(&operation_id)
 }
 
+/// 在主窗口持有项目路径与操作预算的前提下，于阻塞线程池中执行一次 Git 读取。
+///
+/// 七个 Git 命令此前各自重复同一段“解析项目路径 → 登记操作 ID → 转入阻塞线程 →
+/// 打开仓库并执行”的样板；其中 `request_trust` 已出现分化（仅状态读取为 `true`），
+/// 靠人工保持一致性。集中到一处后，信任策略成为显式参数，新增命令不会再漏掉
+/// 主窗口校验、操作 ID 登记或超时预算。
+///
+/// 调用方负责在主线程完成 `webview.label() != "main"` 检查与请求参数校验；
+/// 此处只做与所有 Git 入口共享的公共准备。
+pub(crate) async fn run_git_command<T, F>(
+    app: tauri::AppHandle,
+    project_id: String,
+    operation_id: String,
+    request_trust: bool,
+    operation: F,
+) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(&crate::git_repository::GitRepository) -> Result<T, String> + Send + 'static,
+{
+    prepare_and_run(
+        app,
+        project_id,
+        operation_id,
+        request_trust,
+        None,
+        operation,
+    )
+    .await
+}
+
+/// 同 [`run_git_command`]，但覆盖默认的读取预算。
+///
+/// 远程跟踪引用的同步需要下载可达对象，远超普通仓库读取；调用方必须显式
+/// 声明更长的预算，而不是默默沿用默认值导致正常同步被判超时。
+pub(crate) async fn run_git_command_with_budget<T, F>(
+    app: tauri::AppHandle,
+    project_id: String,
+    operation_id: String,
+    request_trust: bool,
+    budget: std::time::Duration,
+    operation: F,
+) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(&crate::git_repository::GitRepository) -> Result<T, String> + Send + 'static,
+{
+    prepare_and_run(
+        app,
+        project_id,
+        operation_id,
+        request_trust,
+        Some(budget),
+        operation,
+    )
+    .await
+}
+
+async fn prepare_and_run<T, F>(
+    app: tauri::AppHandle,
+    project_id: String,
+    operation_id: String,
+    request_trust: bool,
+    budget: Option<std::time::Duration>,
+    operation: F,
+) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(&crate::git_repository::GitRepository) -> Result<T, String> + Send + 'static,
+{
+    use tauri::Manager;
+    let root = app
+        .state::<crate::task::TaskStore>()
+        .project_path(&project_id)?;
+    let manager = app.state::<GitOperations>();
+    let running = match budget {
+        Some(budget) => manager.begin_with_budget(&operation_id, budget)?,
+        None => manager.begin(&operation_id)?,
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::git_repository::with_repository(
+            &app,
+            std::path::Path::new(&root),
+            request_trust,
+            running.budget.clone(),
+            operation,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

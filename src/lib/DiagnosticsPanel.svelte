@@ -46,7 +46,7 @@
     <label class="setting-control"><strong>运行批次</strong>
       <select bind:value={run} aria-label="筛选诊断运行批次">
         <option value="">全部</option>
-        {#each runs as id}<option value={String(id)}>#{id}</option>{/each}
+        {#each runs as id (id)}<option value={String(id)}>#{id}</option>{/each}
       </select>
     </label>
     {#if diagnosticState.report.droppedEvents > 0}<p class="muted">较早的 {diagnosticState.report.droppedEvents} 条记录已被容量限制移除</p>{/if}

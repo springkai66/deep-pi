@@ -1,12 +1,15 @@
 use crate::git_status::{read_status_for_index, EntryKind, GitEntry, GitStatus};
-use crate::{git_operation::GitBudget, git_repository::GitRepository, project_files::GuardedPath};
+use crate::{
+    git_operation::{run_git_command, GitBudget},
+    git_repository::GitRepository,
+    project_files::GuardedPath,
+};
 use serde::Deserialize;
 use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
 };
-use tauri::Manager;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 
 const MAX_INDEX_BYTES: u64 = 32 * 1024 * 1024;
@@ -258,30 +261,45 @@ pub async fn project_git_change_index(
     if webview.label() != "main" {
         return Err("Git 写入需要主窗口".into());
     }
-    let root = app
-        .state::<crate::task::TaskStore>()
-        .project_path(&project_id)?;
-    let operation = app
-        .state::<crate::git_operation::GitOperations>()
-        .begin(&operation_id)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        let running = operation;
-        crate::git_repository::with_repository(&app, Path::new(&root), false, running.budget.clone(), |repo| {
-            let paths = selected_paths(repo, &request, &read_status_for_index(repo)?)?;
-            let (title, detail) = match request.action {
-                IndexAction::Stage => ("暂存所选文件", "将执行时的工作区内容加入暂存区，不修改工作区文件。"),
-                IndexAction::Unstage => ("取消所选文件暂存", "将所选索引路径恢复到当前提交，保留工作区文件。"),
-                IndexAction::Resolve => ("标记冲突已解决", "以执行时的工作区内容替换冲突索引；缺失文件按删除处理。请先确认冲突已解决。"),
-            };
-            let confirmed = app.dialog().message(format!(
+    // 确认弹窗在阻塞线程内仍需 AppHandle，因此保留一份再移交。
+    let dialog_app = app.clone();
+    run_git_command(app, project_id, operation_id, false, move |repo| {
+        let paths = selected_paths(repo, &request, &read_status_for_index(repo)?)?;
+        let (title, detail) = match request.action {
+            IndexAction::Stage => (
+                "暂存所选文件",
+                "将执行时的工作区内容加入暂存区，不修改工作区文件。",
+            ),
+            IndexAction::Unstage => (
+                "取消所选文件暂存",
+                "将所选索引路径恢复到当前提交，保留工作区文件。",
+            ),
+            IndexAction::Resolve => (
+                "标记冲突已解决",
+                "以执行时的工作区内容替换冲突索引；缺失文件按删除处理。请先确认冲突已解决。",
+            ),
+        };
+        let confirmed = dialog_app
+            .dialog()
+            .message(format!(
                 "{}\n\n工作树：{}\n\n{}\n\nGit 会使用已信任的仓库配置和文件过滤器。",
-                detail, repo.worktree.path.display(), paths.join("\n"),
-            )).title(title).buttons(MessageDialogButtons::OkCancelCustom(title.into(), "取消".into())).blocking_show();
-            if !confirmed { return Ok(false); }
-            change_index(repo, &request)?;
-            Ok(true)
-        })
-    }).await.map_err(|error| error.to_string())?
+                detail,
+                repo.worktree.path.display(),
+                paths.join("\n"),
+            ))
+            .title(title)
+            .buttons(MessageDialogButtons::OkCancelCustom(
+                title.into(),
+                "取消".into(),
+            ))
+            .blocking_show();
+        if !confirmed {
+            return Ok(false);
+        }
+        change_index(repo, &request)?;
+        Ok(true)
+    })
+    .await
 }
 
 #[cfg(all(test, windows))]

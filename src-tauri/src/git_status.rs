@@ -1,8 +1,6 @@
 pub use crate::git_repository::GitStatusGate;
-use crate::git_repository::{with_repository, GitRepository};
+use crate::{git_operation::run_git_command, git_repository::GitRepository};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
-use tauri::Manager;
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -194,24 +192,7 @@ pub async fn project_git_status(
     if webview.label() != "main" {
         return Err("Git 状态读取需要主窗口".into());
     }
-    let root = app
-        .state::<crate::task::TaskStore>()
-        .project_path(&project_id)?;
-    let operation = app
-        .state::<crate::git_operation::GitOperations>()
-        .begin(&operation_id)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        let running = operation;
-        with_repository(
-            &app,
-            Path::new(&root),
-            request_trust,
-            running.budget.clone(),
-            read_status,
-        )
-    })
-    .await
-    .map_err(|error| error.to_string())?
+    run_git_command(app, project_id, operation_id, request_trust, read_status).await
 }
 
 #[cfg(test)]
