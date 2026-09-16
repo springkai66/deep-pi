@@ -711,6 +711,224 @@ pub(crate) fn provider_agent(provider: &ProviderRecord) -> Result<ureq::Agent, S
     Ok(config.build().new_agent())
 }
 
+const CHAT_MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
+
+/// 一次「用已配置 Provider 调聊天补全」的失败分类。
+///
+/// 这里只携带分类与细节文本，不带 `@msg:` 码：调用方（提示词增强、站点翻译）
+/// 各自把这些分类映射成自己的用户可见消息码与文案。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ChatCallError {
+    /// 没有任何带模型的 Pi Provider。
+    ProviderUnconfigured,
+    /// Provider 缺少 base URL。
+    BaseUrlMissing,
+    /// 请求发送失败（网络、代理、超时…）。
+    Request(String),
+    /// 上游返回非 2xx 状态码。
+    Http(u16),
+    /// 响应体读取失败。
+    ResponseRead(String),
+    /// 响应体不是可识别的聊天补全结构；细节是句子片段（如 `is not valid JSON: …`）。
+    ResponseInvalid(String),
+    /// 本地准备阶段失败：models.json、凭据、URL、代理配置。
+    Local(String),
+}
+
+impl ChatCallError {
+    /// 细节文本：用于日志与 `{error}` 占位符。
+    pub(crate) fn detail(&self) -> String {
+        match self {
+            Self::ProviderUnconfigured => "no Pi provider with models is configured".into(),
+            Self::BaseUrlMissing => "provider has no base URL".into(),
+            Self::Request(error)
+            | Self::ResponseRead(error)
+            | Self::ResponseInvalid(error)
+            | Self::Local(error) => error.clone(),
+            Self::Http(status) => format!("HTTP {status}"),
+        }
+    }
+}
+
+/// 带自定义超时的 provider agent；除超时外与 [`provider_agent`] 的策略一致。
+fn chat_agent(provider: &ProviderRecord, timeout: Duration) -> Result<ureq::Agent, String> {
+    let mut config = ureq::Agent::config_builder()
+        .timeout_global(Some(timeout))
+        .http_status_as_error(false);
+    if let Some(proxy) = provider.proxy.as_deref() {
+        let proxy =
+            ureq::Proxy::new(proxy).map_err(|error| format!("proxy is invalid: {error}"))?;
+        config = config.proxy(Some(proxy));
+    }
+    Ok(config.build().new_agent())
+}
+
+/// 按 Provider API 类型构造聊天补全 URL。
+pub(crate) fn chat_url(base_url: &str, api: &str) -> Result<String, String> {
+    let base = base_url.trim().trim_end_matches('/');
+    let path = if api == "anthropic-messages" {
+        if base.ends_with("/v1") {
+            format!("{base}/messages")
+        } else {
+            format!("{base}/v1/messages")
+        }
+    } else if api == "openai-responses" {
+        format!("{base}/responses")
+    } else {
+        format!("{base}/chat/completions")
+    };
+    // 仅用于校验 URL 形状；实际请求使用字符串。
+    ureq::http::Uri::try_from(path.as_str())
+        .map_err(|error| format!("base URL is invalid: {error}"))?;
+    Ok(path)
+}
+
+/// 按 Provider API 类型构造聊天补全请求体。
+///
+/// `system`/`user` 由调用方给（提示词增强、站点翻译的提示词不同）；
+/// 协议差异（`system`、`instructions`、`max_tokens` 字段名）只在这里处理。
+pub(crate) fn chat_request_body(
+    api: &str,
+    model_id: &str,
+    system: &str,
+    user: &str,
+    max_output_tokens: u64,
+) -> Value {
+    if api == "anthropic-messages" {
+        json!({
+            "model": model_id,
+            "system": system,
+            "messages": [{"role": "user", "content": user}],
+            "max_tokens": max_output_tokens,
+        })
+    } else if api == "openai-responses" {
+        json!({
+            "model": model_id,
+            "instructions": system,
+            "input": user,
+            "max_output_tokens": max_output_tokens,
+        })
+    } else {
+        json!({
+            "model": model_id,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "max_tokens": max_output_tokens,
+            "temperature": 0.4,
+        })
+    }
+}
+
+/// 从聊天补全响应体中取出模型文本（兼容 OpenAI/Anthropic 两种结构）。
+///
+/// 失败时返回**句子片段**（如 `is not valid JSON: …`），由调用方拼进自己的
+/// 用户可见文案：既有调用方保持原文案，新调用方复用同一段解析逻辑。
+pub(crate) fn parse_chat_response(body: &str) -> Result<String, String> {
+    let value: Value =
+        serde_json::from_str(body).map_err(|error| format!("is not valid JSON: {error}"))?;
+    if let Some(text) = value
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("message"))
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+    {
+        return Ok(text);
+    }
+    if let Some(text) = value.get("output_text").and_then(Value::as_str) {
+        return Ok(text.to_owned());
+    }
+    if let Some(text) = value
+        .get("output")
+        .and_then(Value::as_array)
+        .and_then(|items| {
+            items.iter().find_map(|item| {
+                item.get("content")
+                    .and_then(Value::as_array)
+                    .and_then(|content| {
+                        content
+                            .iter()
+                            .find_map(|part| part.get("text").and_then(Value::as_str))
+                    })
+            })
+        })
+        .map(str::to_owned)
+    {
+        return Ok(text);
+    }
+    if let Some(text) = value
+        .get("content")
+        .and_then(Value::as_array)
+        .and_then(|items| {
+            items
+                .iter()
+                .find_map(|item| item.get("text").and_then(Value::as_str))
+        })
+        .map(str::to_owned)
+    {
+        return Ok(text);
+    }
+    Err("has no message text".into())
+}
+
+/// 用 Pi 模型配置里第一个带模型的 Provider 调一次聊天补全，返回模型输出文本。
+///
+/// 这是提示词增强与站点翻译共用的唯一调用通路：Provider 选择、凭据读取、
+/// 鉴权头、URL 与请求体的协议差异、响应解析都只在这里实现一次。
+pub(crate) fn call_configured_model(
+    paths: &AppPaths,
+    system: &str,
+    user: &str,
+    timeout: Duration,
+    max_output_tokens: u64,
+) -> Result<String, ChatCallError> {
+    let provider = list_provider_file(&paths.pi_models_file())
+        .map_err(ChatCallError::Local)?
+        .into_iter()
+        .find(|provider| !provider.models.is_empty())
+        .ok_or(ChatCallError::ProviderUnconfigured)?;
+    let model_id = provider.models[0].id.clone();
+    let api = provider.models[0]
+        .api
+        .as_deref()
+        .map(str::trim)
+        .filter(|api| !api.is_empty())
+        .unwrap_or(provider.api.as_str())
+        .to_owned();
+    let base_url = provider
+        .base_url
+        .as_deref()
+        .ok_or(ChatCallError::BaseUrlMissing)?;
+    let url = chat_url(base_url, &api).map_err(ChatCallError::Local)?;
+    let api_key = provider_api_key(&provider.id).map_err(ChatCallError::Local)?;
+    let agent = chat_agent(&provider, timeout).map_err(ChatCallError::Local)?;
+    let body = chat_request_body(&api, &model_id, system, user, max_output_tokens);
+
+    let request = agent
+        .post(url.as_str())
+        .header("Accept", "application/json");
+    let request = apply_provider_auth(request, &provider, api_key.as_deref());
+    let mut response = request
+        .send_json(&body)
+        .map_err(|error| ChatCallError::Request(error.to_string()))?;
+    let status = response.status().as_u16();
+    let body_text = response
+        .body_mut()
+        .with_config()
+        .limit(CHAT_MAX_RESPONSE_BYTES)
+        .lossy_utf8(true)
+        .read_to_string()
+        .map_err(|error| ChatCallError::ResponseRead(error.to_string()))?;
+    if !(200..300).contains(&status) {
+        return Err(ChatCallError::Http(status));
+    }
+    parse_chat_response(&body_text).map_err(ChatCallError::ResponseInvalid)
+}
+
 fn fetch_provider_models(provider: &ProviderRecord) -> Result<Vec<ProviderModelSummary>, String> {
     let base_url = provider
         .base_url

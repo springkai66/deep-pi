@@ -145,6 +145,7 @@ export const EN_MCP: Record<string, string> = {
   "收起": "Collapse",
   "加载中…": "Loading…",
   "正在加载详情…": "Loading details…",
+  "翻译中…": "Translating…",
   "在站点打开": "Open on site",
   "打开官网": "Open website",
   "共 {total} 条，匹配 {shown} 条": "{shown} of {total} entries shown",
@@ -204,8 +205,6 @@ export const EN_MCP: Record<string, string> = {
   "按名称、描述或分类筛选工作流…": "Filter workflows by name, description, or category…",
   "正在加载工作流目录…": "Loading the workflow catalog…",
   "没有匹配的工作流": "No matching workflows",
-  "安装工作流": "Install workflow",
-  "重新安装": "Reinstall",
   "配置时间：{time}": "Setup time: {time}",
   "难度：{level}": "Level: {level}",
   "技能": "Skills",
@@ -214,8 +213,8 @@ export const EN_MCP: Record<string, string> = {
   "{skills} 个技能 · {mcp} 个 MCP": "{skills} skills · {mcp} MCP servers",
   "安装结果：{name}": "Installation result: {name}",
   "跳过 {count} 个已存在的组件": "Skipped {count} existing components",
-  "工作流来自 agenticskills.io，安装会写入技能与 MCP 配置；重新安装会跳过已存在的组件。":
-    "Workflows come from agenticskills.io; installing writes Skills and MCP configuration, and reinstalling skips components that already exist.",
+  "工作流来自 agenticskills.io，安装会写入技能与 MCP 配置；已存在的组件会被跳过。":
+    "Workflows come from agenticskills.io; installing writes Skills and MCP configuration, and components that already exist are skipped.",
   "已安装工作流": "Installed workflows",
   "刷新已安装工作流": "Refresh installed workflows",
   "正在读取已安装工作流…": "Reading installed workflows…",

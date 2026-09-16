@@ -288,6 +288,17 @@ export const APP_MESSAGES_CORE: Record<string, import("./app-messages").AppMessa
     "zh-TW": "站點給出的設定片段無法解析為 JSON，請手動設定",
     en: "The configuration snippet from the site could not be parsed as JSON; configure it manually.",
   },
+  // —— 详情翻译（agenticskills.io 市场） ——
+  "market.translate_failed": {
+    "zh-CN": "翻译失败：{error}",
+    "zh-TW": "翻譯失敗：{error}",
+    en: "Translation failed: {error}",
+  },
+  "market.translate_request_invalid": {
+    "zh-CN": "翻译请求无效",
+    "zh-TW": "翻譯請求無效",
+    en: "The translation request is invalid.",
+  },
   // —— 本机 Pi 元数据与应用启动失败 ——
   "app.init_thread_failed": {
     "zh-CN": "应用初始化工作线程失败",

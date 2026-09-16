@@ -2,7 +2,14 @@
   import { invoke as nativeInvoke } from "@tauri-apps/api/core";
   import { Download, Plus, RefreshCw, Search, Store, Trash2 } from "@lucide/svelte";
   import { onDestroy, onMount } from "svelte";
-  import { t, tm } from "$lib/i18n.svelte";
+  import {
+    agenticCategoryLabel,
+    agenticLevelLabel,
+    agenticPlatformLabel,
+    agenticTransportLabel,
+    agenticTrustLabel,
+  } from "$lib/agentic-labels";
+  import { getLocale, t, tm } from "$lib/i18n.svelte";
 
   interface McpServerEntry {
     name: string;
@@ -244,6 +251,29 @@
   let workflowResult = $state<{ slug: string; name: string; result: AgenticWorkflowInstallResult } | null>(null);
   let copiedPromptSlug = $state<string | null>(null);
 
+  // 详情翻译：同一会话内按条目 slug 缓存译文，二次展开不再请求（后端也有缓存）。
+  /** slug → （原文 → 译文）；只覆盖自由文本，结构化字段走 agentic-labels。 */
+  let detailTranslations = $state<Record<string, Record<string, string>>>({});
+  /** slug → 翻译状态；失败时保留原文，并在文本旁显示错误文案。 */
+  let translateStates = $state<Record<string, { status: "loading" | "ready" | "error"; message?: string }>>({});
+  /** 正在请求译文的 slug：同一 slug 不并发重复提交。 */
+  const translatingSlugs = new Set<string>();
+
+  // 详情预热：目录加载后把缺详情字段的条目陆续交给后端缓存，失败只写控制台。
+  /** 已提交预热的 slug：同一会话内不重复提交。 */
+  const prefetchedSlugs = new Set<string>();
+  /** 待预热队列：串行分批下发，进程内只跑一个 worker。 */
+  const prefetchQueue: string[] = [];
+  let prefetchRunning = false;
+  /** 组件是否仍挂载；未挂载时预热不再继续。 */
+  let componentAlive = true;
+  /** 挂载时的 mode：同一实例被换市场（mode 变化）时停止预热。 */
+  let mountedMode: Props["mode"] | null = null;
+  /** 面板是否可见：设置页用 hidden 隐藏其余分类，隐藏时停止预热。 */
+  let marketVisible = $state(true);
+  let pageElement = $state<HTMLElement | null>(null);
+  let panelObserver: IntersectionObserver | null = null;
+
   let serverName = $state("");
   let serverConfig = $state("");
   let skillName = $state("");
@@ -326,7 +356,12 @@
   const workflowKickoffPrompt = $derived(workflowDetail?.kickoffPrompt ?? "");
   const mcpDetailWebsiteUrl = $derived(mcpDetailView?.websiteUrl ?? "");
 
-  onDestroy(() => onBusyChange(false));
+  onDestroy(() => {
+    componentAlive = false;
+    panelObserver?.disconnect();
+    panelObserver = null;
+    onBusyChange(false);
+  });
 
   async function refresh() {
     loading = true;
@@ -346,7 +381,15 @@
   }
 
   onMount(() => {
+    mountedMode = mode;
     void refresh();
+    // 设置页用 hidden 隐藏非当前分类；不可见时停止后台预热，避免用户已经离开还在打后端。
+    if (typeof IntersectionObserver === "function" && pageElement) {
+      panelObserver = new IntersectionObserver((entries) => {
+        marketVisible = entries.some((entry) => entry.isIntersecting);
+      });
+      panelObserver.observe(pageElement);
+    }
   });
 
   function serverSummary(config: Record<string, unknown>): string {
@@ -708,15 +751,17 @@
     if (!workflowSearched && !workflowLoading) void loadWorkflowMarket();
   }
 
-  async function loadMcpMarket() {
+  async function loadMcpMarket(refresh = false) {
     if (mcpLoading) return;
     mcpLoading = true;
     mcpSearched = true;
     try {
-      mcpEntries = await invoke<AgenticMcpEntry[]>("search_agentic_mcp", { request: { query: "" } });
+      mcpEntries = await invoke<AgenticMcpEntry[]>("search_agentic_mcp", { request: { query: "", refresh } });
       if (mcpCategory !== null && !mcpEntries.some((entry) => entry.category === mcpCategory)) mcpCategory = null;
       mcpDetailSlug = null;
       mcpDetail = null;
+      // 目录就绪后预热详情：过滤 + 排序后的列表里，缺详情字段的条目按顺序排队。
+      queueDetailPrefetch(filteredMcpEntries.filter((entry) => !hasLocalMcpDetail(entry)).map((entry) => entry.slug));
     } catch (error) {
       onError(error);
     } finally {
@@ -724,15 +769,17 @@
     }
   }
 
-  async function loadSkillMarket() {
+  async function loadSkillMarket(refresh = false) {
     if (skillLoading) return;
     skillLoading = true;
     skillSearched = true;
     try {
-      skillEntries = await invoke<AgenticSkillEntry[]>("search_agentic_skills", { request: { query: "" } });
+      skillEntries = await invoke<AgenticSkillEntry[]>("search_agentic_skills", { request: { query: "", refresh } });
       if (skillCategory !== null && !skillEntries.some((entry) => entry.category === skillCategory)) skillCategory = null;
       skillDetailSlug = null;
       skillDetail = null;
+      // 目录就绪后预热详情：过滤 + 排序后的列表里，缺详情字段的条目按顺序排队。
+      queueDetailPrefetch(filteredSkillEntries.filter((entry) => !hasLocalSkillDetail(entry)).map((entry) => entry.slug));
     } catch (error) {
       onError(error);
     } finally {
@@ -749,17 +796,22 @@
     mcpDetailSlug = entry.slug;
     mcpDetail = null;
     // 条目自带详情字段时直接展开，不打后端；缺字段才请求详情接口兜底。
-    if (hasLocalMcpDetail(entry)) return;
-    mcpDetailLoading = entry.slug;
-    try {
-      const detail = await invoke<AgenticMcpDetail>("agentic_mcp_detail", { request: { slug: entry.slug } });
-      if (mcpDetailSlug === entry.slug) mcpDetail = detail;
-    } catch (error) {
-      if (mcpDetailSlug === entry.slug) mcpDetailSlug = null;
-      onError(error);
-    } finally {
-      if (mcpDetailLoading === entry.slug) mcpDetailLoading = null;
+    if (!hasLocalMcpDetail(entry)) {
+      mcpDetailLoading = entry.slug;
+      try {
+        const detail = await invoke<AgenticMcpDetail>("agentic_mcp_detail", { request: { slug: entry.slug } });
+        if (mcpDetailSlug === entry.slug) mcpDetail = detail;
+      } catch (error) {
+        if (mcpDetailSlug === entry.slug) mcpDetailSlug = null;
+        onError(error);
+      } finally {
+        if (mcpDetailLoading === entry.slug) mcpDetailLoading = null;
+      }
     }
+    if (mcpDetailSlug !== entry.slug) return;
+    // 展开后翻译自由文本：英文模式不发请求；已译过的文本直接命中缓存。
+    const view = mergeMcpDetail(entry, mcpDetail);
+    void translateDetailTexts(entry.slug, detailFreeTexts(view?.description, view?.longDescription));
   }
 
   async function toggleSkillDetail(entry: AgenticSkillEntry) {
@@ -771,17 +823,22 @@
     skillDetailSlug = entry.slug;
     skillDetail = null;
     // 条目自带详情字段时直接展开，不打后端；缺字段才请求详情接口兜底。
-    if (hasLocalSkillDetail(entry)) return;
-    skillDetailLoading = entry.slug;
-    try {
-      const detail = await invoke<AgenticSkillDetail>("agentic_skill_detail", { request: { slug: entry.slug } });
-      if (skillDetailSlug === entry.slug) skillDetail = detail;
-    } catch (error) {
-      if (skillDetailSlug === entry.slug) skillDetailSlug = null;
-      onError(error);
-    } finally {
-      if (skillDetailLoading === entry.slug) skillDetailLoading = null;
+    if (!hasLocalSkillDetail(entry)) {
+      skillDetailLoading = entry.slug;
+      try {
+        const detail = await invoke<AgenticSkillDetail>("agentic_skill_detail", { request: { slug: entry.slug } });
+        if (skillDetailSlug === entry.slug) skillDetail = detail;
+      } catch (error) {
+        if (skillDetailSlug === entry.slug) skillDetailSlug = null;
+        onError(error);
+      } finally {
+        if (skillDetailLoading === entry.slug) skillDetailLoading = null;
+      }
     }
+    if (skillDetailSlug !== entry.slug) return;
+    // 展开后翻译自由文本：英文模式不发请求；已译过的文本直接命中缓存。
+    const view = mergeSkillDetail(entry, skillDetail);
+    void translateDetailTexts(entry.slug, detailFreeTexts(view?.description, view?.longDescription));
   }
 
   async function installAgenticMcp(entry: AgenticMcpEntry) {
@@ -824,14 +881,16 @@
   // ---------- 工作流市场（agenticskills.io；一条工作流只留一个安装入口） ----------
 
   /** 进入市场 tab 时按需拉一次全量工作流目录（query 为空串）。 */
-  async function loadWorkflowMarket() {
+  async function loadWorkflowMarket(refresh = false) {
     if (workflowLoading) return;
     workflowLoading = true;
     workflowSearched = true;
     try {
-      workflowEntries = await invoke<AgenticWorkflowEntry[]>("search_agentic_workflows", { request: { query: "" } });
+      workflowEntries = await invoke<AgenticWorkflowEntry[]>("search_agentic_workflows", { request: { query: "", refresh } });
       workflowDetailSlug = null;
       workflowDetail = null;
+      // 工作流条目只有摘要字段，详情一律缺失：过滤 + 排序后的整个列表都排队预热。
+      queueDetailPrefetch(filteredWorkflowEntries.map((entry) => entry.slug));
     } catch (error) {
       onError(error);
     } finally {
@@ -857,6 +916,13 @@
     } finally {
       if (workflowDetailLoading === entry.slug) workflowDetailLoading = null;
     }
+    if (workflowDetailSlug !== entry.slug || !workflowDetail) return;
+    // 展开后翻译自由文本：描述 / 步骤正文 / 起手提示；英文模式不发请求。
+    void translateDetailTexts(entry.slug, detailFreeTexts(
+      workflowDetail.description,
+      ...workflowDetail.steps.map((step) => step.text),
+      workflowDetail.kickoffPrompt,
+    ));
   }
 
   /** 安装整条工作流：组件级安装由后端统一处理，界面只保留这一个安装按钮。 */
@@ -885,9 +951,123 @@
       onError(t("复制失败：{error}", { error: tm(String(error)) }));
     }
   }
+
+  // ---------- 详情翻译（自由文本；结构化字段走 agentic-labels） ----------
+
+  /** 后端单次翻译上限：texts 最多 6 条，超过按顺序分批。 */
+  const TRANSLATE_BATCH_SIZE = 6;
+
+  /** 详情里要展示的文本：非英文模式且已有译文时用译文，其余情况原样返回。 */
+  function detailText(slug: string | null, text: string | null | undefined): string {
+    const raw = text ?? "";
+    if (!raw || !slug || getLocale() === "en") return raw;
+    return detailTranslations[slug]?.[raw] ?? raw;
+  }
+
+  /** 收集自由文本：空白值与重复值不发送。 */
+  function detailFreeTexts(...values: (string | null | undefined)[]): string[] {
+    const texts: string[] = [];
+    const seen = new Set<string>();
+    for (const value of values) {
+      if (typeof value !== "string" || !value.trim() || seen.has(value)) continue;
+      seen.add(value);
+      texts.push(value);
+    }
+    return texts;
+  }
+
+  /**
+   * 翻译一个条目的自由文本：按 slug 缓存，已译过的文本不再请求；
+   * 英文模式完全不翻译、不发请求；失败时保留原文，并在文本旁记录错误文案。
+   */
+  async function translateDetailTexts(slug: string | null, texts: string[]) {
+    if (!slug || texts.length === 0) return;
+    const locale = getLocale();
+    if (locale === "en") return;
+    const cached = detailTranslations[slug] ?? {};
+    const pending = texts.filter((text) => cached[text] === undefined);
+    if (pending.length === 0 || translatingSlugs.has(slug)) return;
+    translatingSlugs.add(slug);
+    translateStates = { ...translateStates, [slug]: { status: "loading" } };
+    try {
+      const translated: string[] = [];
+      for (let start = 0; start < pending.length; start += TRANSLATE_BATCH_SIZE) {
+        const batch = pending.slice(start, start + TRANSLATE_BATCH_SIZE);
+        const result = await invoke<string[]>("translate_agentic_texts", {
+          request: { texts: batch, target: locale },
+        });
+        batch.forEach((text, offset) => {
+          const value = Array.isArray(result) ? result[offset] : undefined;
+          // 返回缺项 / 空串时保留原文，避免译文把内容吃掉。
+          translated.push(typeof value === "string" && value.trim() ? value : text);
+        });
+      }
+      const next = { ...(detailTranslations[slug] ?? {}) };
+      pending.forEach((text, index) => {
+        next[text] = translated[index] ?? text;
+      });
+      detailTranslations = { ...detailTranslations, [slug]: next };
+      translateStates = { ...translateStates, [slug]: { status: "ready" } };
+    } catch (error) {
+      const raw = error instanceof Error ? error.message : String(error);
+      translateStates = { ...translateStates, [slug]: { status: "error", message: tm(raw) } };
+    } finally {
+      translatingSlugs.delete(slug);
+    }
+  }
+
+  // ---------- 后台预热详情（让后续点击命中后端缓存；不触发翻译） ----------
+
+  /** 后端单次预热的 slug 上限。 */
+  const PREFETCH_BATCH_SIZE = 30;
+
+  /** 预热类型：与当前市场一一对应。 */
+  function prefetchKind(): "skill" | "mcp" | "workflow" {
+    return mode === "mcp" ? "mcp" : mode === "skills" ? "skill" : "workflow";
+  }
+
+  /** 预热继续条件：组件仍挂载、mode 未变、面板可见（设置页其他分类会把它 hidden）。 */
+  function canPrefetch(): boolean {
+    return componentAlive && mode === mountedMode && marketVisible;
+  }
+
+  /** 把缺详情字段的 slug 排队；同一 slug 只提交一次，串行分批继续预热剩余条目。 */
+  function queueDetailPrefetch(slugs: string[]) {
+    for (const slug of slugs) {
+      if (!slug || prefetchedSlugs.has(slug)) continue;
+      prefetchedSlugs.add(slug);
+      prefetchQueue.push(slug);
+    }
+    if (!prefetchRunning && prefetchQueue.length > 0) void runDetailPrefetch();
+  }
+
+  async function runDetailPrefetch() {
+    prefetchRunning = true;
+    const kind = prefetchKind();
+    try {
+      while (prefetchQueue.length > 0 && canPrefetch()) {
+        const batch = prefetchQueue.splice(0, PREFETCH_BATCH_SIZE);
+        try {
+          await invoke<number>("prefetch_agentic_details", { request: { kind, slugs: batch } });
+        } catch (error) {
+          // 预热是可选优化：失败不打扰用户。
+          console.warn("prefetch_agentic_details failed", error);
+        }
+      }
+    } finally {
+      prefetchRunning = false;
+    }
+  }
 </script>
 
-<section class="mcp-skills-page" aria-label={mode === "mcp" ? t("MCP 服务设置") : mode === "skills" ? t("Skills 技能设置") : t("工作流设置")}>
+<section class="mcp-skills-page" bind:this={pageElement} aria-label={mode === "mcp" ? t("MCP 服务设置") : mode === "skills" ? t("Skills 技能设置") : t("工作流设置")}>
+  {#snippet translateNote(slug: string | null)}
+    {#if slug && translateStates[slug]?.status === "loading"}
+      <small class="translate-note" role="status">{t("翻译中…")}</small>
+    {:else if slug && translateStates[slug]?.status === "error"}
+      <small class="translate-error" role="status">{translateStates[slug]?.message ?? ""}</small>
+    {/if}
+  {/snippet}
   <div class="page-controls">
     <div class="scope-switch" role="tablist" aria-label={t("配置范围")}>
       <button type="button" class:active={scope === "global"} aria-pressed={scope === "global"}
@@ -995,7 +1175,7 @@
               <li>
                 <div class="entry-main">
                   <strong>{entry.name}</strong>
-                  <small>{entry.category || entry.slug}</small>
+                  <small>{entry.category ? agenticCategoryLabel(entry.category, getLocale()) : entry.slug}</small>
                   <span class="market-meta">
                     <span>{t("{skills} 个技能 · {mcp} 个 MCP", { skills: entry.skillCount, mcp: entry.mcpCount })}</span>
                     {#if entry.installedAt}<span>{t("安装于 {date}", { date: entry.installedAt })}</span>{/if}
@@ -1014,7 +1194,7 @@
         <span class="muted">{t("市场来源：agenticskills.io")}</span>
       </div>
       <div class="market-toolbar">
-        <form class="market-search" onsubmit={(event) => { event.preventDefault(); void loadMcpMarket(); }}>
+        <form class="market-search" onsubmit={(event) => { event.preventDefault(); void loadMcpMarket(true); }}>
           <Search size={14} />
           <input bind:value={mcpQuery} placeholder={t("按名称、作者或分类筛选 MCP 服务…")} aria-label={t("筛选 MCP 服务")} autocomplete="off" />
           <button type="submit" class="primary-action compact" disabled={mcpLoading || busyMcpEntry !== null} aria-label={t("刷新市场")} title={t("刷新市场")}>
@@ -1038,7 +1218,7 @@
           {#each mcpCategoryOptions as option (option.category)}
             <button type="button" class="category-chip" aria-pressed={mcpCategory === option.category}
               onclick={() => (mcpCategory = mcpCategory === option.category ? null : option.category)}>
-              {option.category}
+              {agenticCategoryLabel(option.category, getLocale())}
             </button>
           {/each}
         </div>
@@ -1062,8 +1242,8 @@
                   <small>{entry.description || entry.slug}</small>
                   <span class="market-meta">
                     {#if entry.author}<span>{t("作者：{author}", { author: entry.author })}</span>{/if}
-                    {#if entry.category}<span class="category-chip" title={t("分类：{category}", { category: entry.category })}>{entry.category}</span>{/if}
-                    {#if (entry.transport ?? []).length}<span>{t("传输：{transport}", { transport: (entry.transport ?? []).join(" · ") })}</span>{/if}
+                    {#if entry.category}<span class="category-chip" title={t("分类：{category}", { category: agenticCategoryLabel(entry.category, getLocale()) })}>{agenticCategoryLabel(entry.category, getLocale())}</span>{/if}
+                    {#if (entry.transport ?? []).length}<span>{t("传输：{transport}", { transport: (entry.transport ?? []).map((value) => agenticTransportLabel(value, getLocale())).join(" · ") })}</span>{/if}
                     {#if formatAmount(entry.popularity)}<span class="downloads">{t("热度 {count}", { count: formatAmount(entry.popularity) })}</span>{/if}
                     {#if audit}<span class="market-flag">{t("审计 {passed}/{total}", { passed: audit.passed, total: audit.total })}</span>{/if}
                     {#if entry.official}<span class="market-flag">{t("官方")}</span>{/if}
@@ -1085,10 +1265,13 @@
                   {#if mcpDetailLoading === entry.slug}
                     <p class="muted" role="status">{t("正在加载详情…")}</p>
                   {:else if mcpDetailView}
-                    {#if mcpDetailLongDescription}<p class="detail-text">{mcpDetailLongDescription}</p>{/if}
+                    {#if mcpDetailLongDescription}
+                      <p class="detail-text">{detailText(mcpDetailSlug, mcpDetailLongDescription)}</p>
+                      {@render translateNote(mcpDetailSlug)}
+                    {/if}
                     <div class="detail-row">
                       {#if mcpDetailAuthor}<span>{t("作者：{author}", { author: mcpDetailAuthor })}</span>{/if}
-                      {#if mcpDetailTrustLevel}<span>{t("信任等级：{level}", { level: mcpDetailTrustLevel })}</span>{/if}
+                      {#if mcpDetailTrustLevel}<span>{t("信任等级：{level}", { level: agenticTrustLabel(mcpDetailTrustLevel, getLocale()) })}</span>{/if}
                       {#if mcpDetailConfigSource}<span>{t("配置来源：{source}", { source: mcpDetailConfigSource })}</span>{/if}
                       {#if mcpDetailAudit}<span>{t("审计 {passed}/{total}", { passed: mcpDetailAudit.passed, total: mcpDetailAudit.total })}</span>{/if}
                       {#if mcpDetailTags.length}<span>{topTags(mcpDetailTags, 6).join(" · ")}</span>{/if}
@@ -1123,7 +1306,7 @@
         <span class="muted">{t("市场来源：agenticskills.io")}</span>
       </div>
       <div class="market-toolbar">
-        <form class="market-search" onsubmit={(event) => { event.preventDefault(); void loadSkillMarket(); }}>
+        <form class="market-search" onsubmit={(event) => { event.preventDefault(); void loadSkillMarket(true); }}>
           <Search size={14} />
           <input bind:value={skillQuery} placeholder={t("按名称、作者或关键词筛选技能…")} aria-label={t("筛选技能")} autocomplete="off" />
           <button type="submit" class="primary-action compact" disabled={skillLoading || busySkillEntry !== null} aria-label={t("刷新市场")} title={t("刷新市场")}>
@@ -1147,7 +1330,7 @@
           {#each skillCategoryOptions as option (option.category)}
             <button type="button" class="category-chip" aria-pressed={skillCategory === option.category}
               onclick={() => (skillCategory = skillCategory === option.category ? null : option.category)}>
-              {option.category}
+              {agenticCategoryLabel(option.category, getLocale())}
             </button>
           {/each}
         </div>
@@ -1171,7 +1354,7 @@
                   <small>{entry.description || entry.slug}</small>
                   <span class="market-meta">
                     {#if entry.author}<span>{t("作者：{author}", { author: entry.author })}</span>{/if}
-                    {#if entry.category}<span class="category-chip" title={t("分类：{category}", { category: entry.category })}>{entry.category}</span>{/if}
+                    {#if entry.category}<span class="category-chip" title={t("分类：{category}", { category: agenticCategoryLabel(entry.category, getLocale()) })}>{agenticCategoryLabel(entry.category, getLocale())}</span>{/if}
                     {#if formatAmount(entry.installs)}<span class="downloads">{t("安装量 {count}", { count: formatAmount(entry.installs) })}</span>{/if}
                     {#if formatAmount(entry.quality)}<span>{t("质量 {level}", { level: formatAmount(entry.quality) })}</span>{/if}
                     {#each tags as tag (tag)}<span class="tag">{tag}</span>{/each}
@@ -1192,10 +1375,13 @@
                   {#if skillDetailLoading === entry.slug}
                     <p class="muted" role="status">{t("正在加载详情…")}</p>
                   {:else if skillDetailView}
-                    {#if skillDetailLongDescription}<p class="detail-text">{skillDetailLongDescription}</p>{/if}
+                    {#if skillDetailLongDescription}
+                      <p class="detail-text">{detailText(skillDetailSlug, skillDetailLongDescription)}</p>
+                      {@render translateNote(skillDetailSlug)}
+                    {/if}
                     <div class="detail-row">
                       {#if skillDetailLicense}<span>{t("许可证：{license}", { license: skillDetailLicense })}</span>{/if}
-                      {#if skillDetailPlatforms.length}<span>{t("平台：{platforms}", { platforms: skillDetailPlatforms.join(" · ") })}</span>{/if}
+                      {#if skillDetailPlatforms.length}<span>{t("平台：{platforms}", { platforms: skillDetailPlatforms.map((value) => agenticPlatformLabel(value, getLocale())).join(" · ") })}</span>{/if}
                       {#if skillDetailUpdated}<span>{t("最近更新：{date}", { date: skillDetailUpdated })}</span>{/if}
                     </div>
                     {#if topTags(skillDetailTags, 6).length}
@@ -1223,7 +1409,7 @@
         <h3>{t("工作流市场")}</h3>
         <span class="muted">{t("市场来源：agenticskills.io")}</span>
       </div>
-      <form class="market-search" onsubmit={(event) => { event.preventDefault(); void loadWorkflowMarket(); }}>
+      <form class="market-search" onsubmit={(event) => { event.preventDefault(); void loadWorkflowMarket(true); }}>
         <Search size={14} />
         <input bind:value={workflowQuery} placeholder={t("按名称、描述或分类筛选工作流…")} aria-label={t("筛选工作流")} autocomplete="off" />
         <button type="submit" class="primary-action compact" disabled={workflowLoading || busyWorkflowEntry !== null} aria-label={t("刷新市场")} title={t("刷新市场")}>
@@ -1244,8 +1430,8 @@
                 <strong>{entry.name}</strong>
                 <small>{entry.description || entry.slug}</small>
                 <span class="market-meta">
-                  {#if entry.category}<span class="category-chip" title={t("分类：{category}", { category: entry.category })}>{entry.category}</span>{/if}
-                  {#if entry.level}<span>{t("难度：{level}", { level: entry.level })}</span>{/if}
+                  {#if entry.category}<span class="category-chip" title={t("分类：{category}", { category: agenticCategoryLabel(entry.category, getLocale()) })}>{agenticCategoryLabel(entry.category, getLocale())}</span>{/if}
+                  {#if entry.level}<span>{t("难度：{level}", { level: agenticLevelLabel(entry.level, getLocale()) })}</span>{/if}
                   <span>{t("{skills} 个技能 · {mcp} 个 MCP", { skills: entry.skillCount, mcp: entry.mcpCount })}</span>
                   {#if installed}<span class="market-flag">{t("已安装")}</span>{/if}
                 </span>
@@ -1256,17 +1442,20 @@
               </button>
               <button type="button" class="primary-action compact" disabled={busyWorkflowEntry !== null} onclick={() => void installAgenticWorkflow(entry)}>
                 {#if busyWorkflowEntry === entry.slug}<span class="spin"><RefreshCw size={12} /></span>{:else}<Download size={12} />{/if}
-                {installed ? t("重新安装") : t("安装工作流")}
+                {t("安装")}
               </button>
               {#if workflowDetailSlug === entry.slug}
                 <div class="market-detail">
                   {#if workflowDetailLoading === entry.slug}
                     <p class="muted" role="status">{t("正在加载详情…")}</p>
                   {:else if workflowDetail}
-                    {#if workflowDetail.description}<p class="detail-text">{workflowDetail.description}</p>{/if}
+                    {#if workflowDetail.description}
+                      <p class="detail-text">{detailText(workflowDetailSlug, workflowDetail.description)}</p>
+                      {@render translateNote(workflowDetailSlug)}
+                    {/if}
                     <div class="detail-row">
-                      {#if workflowDetail.category}<span>{t("分类：{category}", { category: workflowDetail.category })}</span>{/if}
-                      {#if workflowDetail.level}<span>{t("难度：{level}", { level: workflowDetail.level })}</span>{/if}
+                      {#if workflowDetail.category}<span>{t("分类：{category}", { category: agenticCategoryLabel(workflowDetail.category, getLocale()) })}</span>{/if}
+                      {#if workflowDetail.level}<span>{t("难度：{level}", { level: agenticLevelLabel(workflowDetail.level, getLocale()) })}</span>{/if}
                       {#if workflowDetail.setupTime}<span>{t("配置时间：{time}", { time: workflowDetail.setupTime })}</span>{/if}
                       <span>{t("{skills} 个技能 · {mcp} 个 MCP", { skills: workflowSkillComponents.length, mcp: workflowMcpComponents.length })}</span>
                     </div>
@@ -1301,15 +1490,16 @@
                         {#each workflowSteps as step, index (`${index}-${step.name}`)}
                           <li>
                             <strong>{step.name}</strong>
-                            <p>{step.text}</p>
+                            <p>{detailText(workflowDetailSlug, step.text)}</p>
                           </li>
                         {/each}
                       </ol>
                     {/if}
+                    {#if !workflowDetail.description}{@render translateNote(workflowDetailSlug)}{/if}
                     {#if workflowKickoffPrompt}
                       <small class="detail-label">{t("起手提示")}</small>
                       <div class="prompt-block">
-                        <pre class="detail-pre">{workflowKickoffPrompt}</pre>
+                        <pre class="detail-pre">{detailText(workflowDetailSlug, workflowKickoffPrompt)}</pre>
                         <button type="button" class="secondary-action" onclick={() => void copyWorkflowPrompt(entry.slug, workflowKickoffPrompt)}>
                           {copiedPromptSlug === entry.slug ? t("已复制") : t("复制")}
                         </button>
@@ -1343,7 +1533,7 @@
         </ul>
         <p class="muted" role="status">{t("共 {total} 条，匹配 {shown} 条", { total: workflowEntries.length, shown: filteredWorkflowEntries.length })}</p>
       {/if}
-      <p class="muted" role="status">{t("工作流来自 agenticskills.io，安装会写入技能与 MCP 配置；重新安装会跳过已存在的组件。")}</p>
+      <p class="muted" role="status">{t("工作流来自 agenticskills.io，安装会写入技能与 MCP 配置；已存在的组件会被跳过。")}</p>
     </section>
   {/if}
   {#if statusMessage}<p class="status" role="status">{statusMessage}</p>{/if}
@@ -1406,6 +1596,8 @@
   .secondary-action:hover:not(:disabled) { border-color: var(--border-strong); color: var(--text); background: var(--surface-hover); }
   .market-detail { flex: 1 1 100%; min-width: 0; display: grid; gap: 6px; margin-top: 4px; padding-top: 8px; border-top: 1px solid var(--border); }
   .detail-text { margin: 0; font-size: 11px; line-height: 1.5; color: var(--text-muted); white-space: pre-wrap; }
+  .translate-note { font-size: 10px; color: var(--text-muted); }
+  .translate-error { font-size: 10px; color: var(--status-failed); }
   .detail-row { display: flex; flex-wrap: wrap; gap: 10px; font-size: 11px; color: var(--text-muted); }
   .detail-actions { display: flex; flex-wrap: wrap; gap: 10px; }
   .link-action { padding: 0; border: 0; background: transparent; color: var(--accent); font: inherit; font-size: 11px; text-decoration: underline; cursor: pointer; }

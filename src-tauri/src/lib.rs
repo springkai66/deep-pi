@@ -1,6 +1,7 @@
 use tauri::Manager;
 
 mod agent_config;
+mod agentic_translate;
 mod agenticskills;
 mod app_paths;
 mod bridge;
@@ -235,6 +236,7 @@ pub fn run() {
                 agenticskills::install_agentic_skill,
                 agenticskills::install_agentic_workflow,
                 agenticskills::list_installed_workflows,
+                agenticskills::prefetch_agentic_details,
                 agenticskills::search_agentic_mcp,
                 agenticskills::search_agentic_skills,
                 agenticskills::search_agentic_workflows,
@@ -259,6 +261,7 @@ pub fn run() {
                 runtime::rollback_runtime,
                 fonts::list_system_fonts,
                 prompt_enhance::enhance_prompt,
+                agentic_translate::translate_agentic_texts,
                 settings::get_settings,
                 settings::save_settings,
                 theme::theme_export,

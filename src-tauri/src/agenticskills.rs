@@ -22,8 +22,11 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use atomic_write_file::AtomicWriteFile;
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{State, Url};
 
@@ -39,9 +42,18 @@ const AGENTIC_SKILLS_URL: &str = "https://agenticskills.io/skills";
 const AGENTIC_MCP_URL: &str = "https://agenticskills.io/mcp";
 /// 列表页里 chunk 路径的前缀（数据 chunk 与普通组件 chunk 混在一起）。
 const CHUNK_PATH_MARKER: &str = "/_next/static/";
-const CACHE_TTL: Duration = Duration::from_secs(600);
+/// 磁盘缓存有效期：市场数据（目录 / chunk URL / 详情）落盘后 24 小时内直接复用。
+const DISK_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+/// 内存缓存的快速路径 TTL：与磁盘层一致（进程内命中就不用碰磁盘）。
+const CACHE_TTL: Duration = DISK_CACHE_TTL;
 /// 降级（JSON-LD）结果的短缓存：只挡同一轮界面刷新里的重复请求，很快会重试 chunk。
 const FALLBACK_CACHE_TTL: Duration = Duration::from_secs(60);
+/// 磁盘缓存目录名（位于 `AppPaths.cache` 下）。
+const DISK_CACHE_DIR: &str = "agenticskills";
+/// 单个磁盘缓存文件的大小上限：超过就当作损坏，忽略。
+const MAX_DISK_CACHE_BYTES: usize = 8 * 1024 * 1024;
+/// 一次预热最多处理的 slug 数：超出的直接忽略（不报错）。
+const MAX_PREFETCH_SLUGS: usize = 30;
 /// chunk 扫描上限：最多抓 8 个候选、合计 3 MiB，站点改版时也不至于把整页 chunk 拉完。
 const MAX_CHUNK_FETCHES: usize = 8;
 const MAX_CHUNK_BYTES: usize = 3 * 1024 * 1024;
@@ -59,7 +71,7 @@ const MAX_WORKFLOW_RESULTS: usize = 100;
 const MAX_INSTALLED_WORKFLOWS: usize = 64;
 const MAX_WORKFLOW_FILE_BYTES: usize = 256 * 1024;
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgenticSkillEntry {
     pub slug: String,
@@ -83,7 +95,7 @@ pub struct AgenticSkillEntry {
     pub featured: bool,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgenticSkillDetail {
     pub slug: String,
@@ -103,7 +115,7 @@ pub struct AgenticSkillDetail {
     pub source_url: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgenticMcpEntry {
     pub slug: String,
@@ -131,7 +143,7 @@ pub struct AgenticMcpEntry {
     pub featured: bool,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgenticMcpSnippet {
     pub label: String,
@@ -139,7 +151,7 @@ pub struct AgenticMcpSnippet {
     pub code: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgenticMcpDetail {
     pub slug: String,
@@ -162,7 +174,7 @@ pub struct AgenticMcpDetail {
 }
 
 /// 工作流列表条目：JSON-LD 给 slug + name，卡片补分类 / 难度 / 描述 / 组件计数。
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgenticWorkflowEntry {
     pub slug: String,
@@ -185,14 +197,14 @@ pub struct AgenticWorkflowComponent {
     pub url: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgenticWorkflowStep {
     pub name: String,
     pub text: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgenticWorkflowDetail {
     pub slug: String,
@@ -278,12 +290,24 @@ pub(crate) struct CatalogChunk {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgenticQuery {
     pub query: String,
+    /// 「刷新市场」：忽略内存与磁盘缓存，重新抓取并覆盖磁盘缓存（含 chunk URL）。
+    #[serde(default)]
+    pub refresh: bool,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgenticSlug {
     pub slug: String,
+}
+
+/// 详情批量预热请求：`kind` 为 `skill` / `mcp` / `workflow`，`slugs` 来自当前列表。
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PrefetchRequest {
+    pub kind: String,
+    #[serde(default)]
+    pub slugs: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -319,10 +343,61 @@ fn fresh_entries<T: Clone>(snapshot: Option<&(Instant, Vec<T>, bool)>) -> Option
     (created.elapsed() < ttl).then(|| entries.clone())
 }
 
-/// 列表页缓存：与 `market::McpRegistryCache` 同样的 TTL 策略。
+/// 缓存优先的两层快速路径：`refresh = true` 时两层都跳过（强制重新抓取），
+/// 否则先内存、后磁盘。磁盘层是否「有效」由调用方在闭包里判定（TTL / 损坏检查）。
 ///
-/// chunk URL 也一起缓存：命中过一次数据 chunk 之后，同一进程内的后续请求可以直接
-/// 抓它（chunk 名带构建哈希，站点发新版之前一直有效），省掉列表页 HTML。
+/// 抽成纯函数是为了能在不发网络请求的前提下测试 `refresh` 语义。
+fn cached_layer<T>(
+    refresh: bool,
+    memory: impl FnOnce() -> Option<T>,
+    disk: impl FnOnce() -> Option<T>,
+) -> Option<T> {
+    if refresh {
+        return None;
+    }
+    memory().or_else(disk)
+}
+
+/// 详情内存缓存：slug → `(写入时间, 详情)`，TTL 与目录缓存一致（24h）。
+///
+/// 详情命令、安装与预热共用同一份进程级缓存：命中后连磁盘都不读，更不会发网络请求。
+struct DetailCache<T> {
+    entries: Mutex<BTreeMap<String, (Instant, T)>>,
+}
+
+impl<T> DetailCache<T> {
+    /// 供模块级 `static` 使用（`Default::default` 不是 `const`）。
+    const fn new() -> Self {
+        Self {
+            entries: Mutex::new(BTreeMap::new()),
+        }
+    }
+}
+
+impl<T: Clone> DetailCache<T> {
+    fn get(&self, slug: &str) -> Option<T> {
+        let guard = self.entries.lock().ok()?;
+        let (created, detail) = guard.get(slug)?;
+        (created.elapsed() < CACHE_TTL).then(|| detail.clone())
+    }
+
+    fn store(&self, slug: &str, detail: T) {
+        if let Ok(mut guard) = self.entries.lock() {
+            guard.insert(slug.to_owned(), (Instant::now(), detail));
+        }
+    }
+}
+
+impl<T> Default for DetailCache<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// 列表页缓存：与 `market::McpRegistryCache` 同样的 TTL 策略（内存 24h，磁盘层的快速路径）。
+///
+/// chunk URL 也一起缓存：命中过一次数据 chunk 之后，后续请求可以直接抓它
+/// （chunk 名带构建哈希，站点发新版之前一直有效），省掉列表页 HTML。
 #[derive(Default)]
 pub struct AgenticCatalogCache {
     skills: Mutex<CatalogSnapshot<AgenticSkillEntry>>,
@@ -334,8 +409,22 @@ pub struct AgenticCatalogCache {
 /// 因此工作流安装自己持有一个进程级目录缓存：装一个工作流时技能与 MCP 组件共用同一份数据。
 static WORKFLOW_CATALOG_CACHE: AgenticCatalogCache = AgenticCatalogCache::new();
 
-/// 工作流列表缓存：形态与 `AgenticCatalogCache` 一致（`(写入时间, 结果, 是否降级)`，TTL 600s）。
+/// 工作流列表缓存：形态与 `AgenticCatalogCache` 一致（`(写入时间, 结果, 是否降级)`）。
 static WORKFLOW_CACHE: Mutex<CatalogSnapshot<AgenticWorkflowEntry>> = Mutex::new(None);
+
+/// 详情内存缓存（技能 / MCP / 工作流）：详情命令、安装与预热共用。
+static SKILL_DETAIL_CACHE: DetailCache<AgenticSkillDetail> = DetailCache::new();
+static MCP_DETAIL_CACHE: DetailCache<AgenticMcpDetail> = DetailCache::new();
+static WORKFLOW_DETAIL_CACHE: DetailCache<AgenticWorkflowDetail> = DetailCache::new();
+
+/// 测试用网络请求计数：验证「缓存命中后不再发网络请求」（`--ignored` 冒烟与本地回归）。
+#[cfg(test)]
+static NETWORK_REQUESTS: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(test)]
+fn network_request_count() -> usize {
+    NETWORK_REQUESTS.load(Ordering::SeqCst)
+}
 
 impl AgenticCatalogCache {
     /// 供模块级 `static` 使用（`Default::default` 不是 `const`）。
@@ -382,6 +471,195 @@ impl AgenticCatalogCache {
     }
 }
 
+// ── 磁盘缓存（`<AppPaths.cache>/agenticskills/`，TTL 24h）─────────────────────
+//
+// 布局：
+//   skills.json / mcp.json / workflows.json: { fetchedAt, degraded, entries }
+//   chunk-url.json:                          { fetchedAt, url }
+//   details/<kind>-<slug>.json:              { fetchedAt, detail }
+//
+// 文件缺失 / JSON 非法 / 字段类型不对 / `fetchedAt` 在未来 → 一律视为过期（重新抓取，
+// 不向界面报错）；写盘失败只记日志，不影响本次返回。
+
+fn now_seconds() -> Option<u64> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_secs())
+}
+
+/// 磁盘缓存目录：`<AppPaths.cache>/agenticskills`。
+fn disk_cache_dir(paths: &AppPaths) -> PathBuf {
+    paths.cache.join(DISK_CACHE_DIR)
+}
+
+fn catalog_cache_path(paths: &AppPaths, name: &str) -> PathBuf {
+    disk_cache_dir(paths).join(format!("{name}.json"))
+}
+
+fn chunk_url_cache_path(paths: &AppPaths) -> PathBuf {
+    catalog_cache_path(paths, "chunk-url")
+}
+
+/// 详情缓存文件：`details/<kind>-<slug>.json`（slug 已校验，不含路径分隔符）。
+fn detail_cache_path(paths: &AppPaths, kind: &str, slug: &str) -> PathBuf {
+    disk_cache_dir(paths)
+        .join("details")
+        .join(format!("{kind}-{slug}.json"))
+}
+
+/// `fetchedAt` 是否在 TTL 内；落在未来（时钟回拨 / 手改）也算过期。
+fn disk_stamp_is_fresh(fetched_at: u64, now: u64, ttl: Duration) -> bool {
+    fetched_at <= now && now - fetched_at <= ttl.as_secs()
+}
+
+/// 读取并校验一个磁盘缓存文件，返回 `(fetchedAt, Value)`。
+/// 文件缺失 / 超限 / JSON 非法 / `fetchedAt` 缺失、类型不对、过期或落在未来 → `None`。
+fn read_disk_value(path: &Path) -> Option<(u64, Value)> {
+    let metadata = fs::metadata(path).ok()?;
+    if !metadata.is_file() || metadata.len() > MAX_DISK_CACHE_BYTES as u64 {
+        return None;
+    }
+    let content = fs::read(path).ok()?;
+    let value: Value = serde_json::from_slice(&content).ok()?;
+    let fetched_at = value.get("fetchedAt").and_then(Value::as_u64)?;
+    let now = now_seconds()?;
+    disk_stamp_is_fresh(fetched_at, now, DISK_CACHE_TTL).then_some((fetched_at, value))
+}
+
+/// 写一个磁盘缓存文件：目录不存在则创建；失败只记日志（不影响本次返回）。
+fn write_disk_value<T: Serialize>(path: &Path, value: &T) {
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if let Err(error) = fs::create_dir_all(parent) {
+        log::warn!(
+            "event=agentic_cache_write status=dir_failed path={} error={error}",
+            path.display()
+        );
+        return;
+    }
+    let Ok(content) = serde_json::to_vec(value) else {
+        log::warn!(
+            "event=agentic_cache_write status=serialize_failed path={}",
+            path.display()
+        );
+        return;
+    };
+    let result = AtomicWriteFile::open(path).and_then(|mut file| {
+        file.write_all(&content)?;
+        file.commit()
+    });
+    if let Err(error) = result {
+        log::warn!(
+            "event=agentic_cache_write status=failed path={} error={error}",
+            path.display()
+        );
+    }
+}
+
+/// 磁盘上的目录缓存（读时忽略 `fetchedAt`；时效已由 `read_disk_value` 校验）。
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedCatalog<T> {
+    degraded: bool,
+    entries: Vec<T>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedChunkUrl {
+    url: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedDetail<T> {
+    detail: T,
+}
+
+/// 写目录缓存：`{ fetchedAt, degraded, entries }`。
+fn store_disk_catalog<T: Serialize>(paths: &AppPaths, name: &str, degraded: bool, entries: &[T]) {
+    let Some(fetched_at) = now_seconds() else {
+        return;
+    };
+    let payload = serde_json::json!({
+        "fetchedAt": fetched_at,
+        "degraded": degraded,
+        "entries": entries,
+    });
+    write_disk_value(&catalog_cache_path(paths, name), &payload);
+}
+
+/// 读目录缓存：降级结果只挡 `FALLBACK_CACHE_TTL`（尽快重试数据 chunk）。
+fn read_disk_catalog<T: DeserializeOwned>(
+    paths: &AppPaths,
+    name: &str,
+) -> Option<PersistedCatalog<T>> {
+    let (fetched_at, value) = read_disk_value(&catalog_cache_path(paths, name))?;
+    let catalog: PersistedCatalog<T> = serde_json::from_value(value).ok()?;
+    let now = now_seconds()?;
+    if catalog.degraded && !disk_stamp_is_fresh(fetched_at, now, FALLBACK_CACHE_TTL) {
+        return None;
+    }
+    Some(catalog)
+}
+
+/// 写 chunk URL 缓存：`{ fetchedAt, url }`。
+fn store_disk_chunk_url(paths: &AppPaths, url: &str) {
+    let Some(fetched_at) = now_seconds() else {
+        return;
+    };
+    let payload = serde_json::json!({ "fetchedAt": fetched_at, "url": url });
+    write_disk_value(&chunk_url_cache_path(paths), &payload);
+}
+
+/// 读 chunk URL 缓存（24h 内有效）。
+fn read_disk_chunk_url(paths: &AppPaths) -> Option<String> {
+    let (_, value) = read_disk_value(&chunk_url_cache_path(paths))?;
+    let persisted: PersistedChunkUrl = serde_json::from_value(value).ok()?;
+    non_empty(&persisted.url)
+}
+
+/// 写详情缓存：`{ fetchedAt, detail }`。
+fn store_disk_detail<T: Serialize>(paths: &AppPaths, kind: &str, slug: &str, detail: &T) {
+    let Some(fetched_at) = now_seconds() else {
+        return;
+    };
+    let payload = serde_json::json!({ "fetchedAt": fetched_at, "detail": detail });
+    write_disk_value(&detail_cache_path(paths, kind, slug), &payload);
+}
+
+/// 读详情缓存（24h 内有效）。
+fn read_disk_detail<T: DeserializeOwned>(paths: &AppPaths, kind: &str, slug: &str) -> Option<T> {
+    let (_, value) = read_disk_value(&detail_cache_path(paths, kind, slug))?;
+    let persisted: PersistedDetail<T> = serde_json::from_value(value).ok()?;
+    Some(persisted.detail)
+}
+
+/// 详情取数的三层顺序（内存 → 磁盘 24h → 网络），返回 `(详情, 是否来自网络)`。
+///
+/// 内存 / 磁盘命中时不会再发网络请求；网络成功后才写内存与磁盘缓存。
+/// 三层数据源都以闭包注入，测试可以直接验证「命中不联网 / 失败不中断」。
+fn resolve_detail<T: Clone>(
+    cached: Option<T>,
+    disk: impl FnOnce() -> Option<T>,
+    memory_store: impl FnOnce(&T),
+    disk_store: impl FnOnce(&T),
+    fetch: impl FnOnce() -> Result<T, String>,
+) -> Result<(T, bool), String> {
+    if let Some(value) = cached {
+        return Ok((value, false));
+    }
+    if let Some(value) = disk() {
+        memory_store(&value);
+        return Ok((value, false));
+    }
+    let value = fetch()?;
+    memory_store(&value);
+    disk_store(&value);
+    Ok((value, true))
+}
 pub fn validate_slug(slug: &str) -> Result<&str, String> {
     let trimmed = slug.trim();
     if trimmed.is_empty()
@@ -2017,6 +2295,8 @@ fn server_entry(value: &Value) -> Option<Value> {
 }
 
 fn request_html(url: &str) -> Result<String, String> {
+    #[cfg(test)]
+    NETWORK_REQUESTS.fetch_add(1, Ordering::SeqCst);
     let mut response = http_agent().get(url).call().map_err(|error| {
         msg_with(
             "market.agenticskills_request_failed",
@@ -2075,11 +2355,22 @@ fn fetch_catalog_chunk(page_url: &str, known_url: Option<&str>) -> Option<(Strin
     None
 }
 
-/// 取数据 chunk：命中后把 URL 记进缓存，同一进程内的后续请求可以直接抓它。
-fn load_catalog_chunk(cache: &AgenticCatalogCache, page_url: &str) -> Option<CatalogChunk> {
-    let known = cache.chunk_url();
+/// 取数据 chunk：内存 / 磁盘里的 chunk URL 优先（站点发新版前一直有效），
+/// 命中后把 URL 记进内存与磁盘；`refresh = true` 时从列表页重新发现并覆盖两份缓存。
+fn load_catalog_chunk(
+    cache: &AgenticCatalogCache,
+    paths: &AppPaths,
+    page_url: &str,
+    refresh: bool,
+) -> Option<CatalogChunk> {
+    let known = if refresh {
+        None
+    } else {
+        cache.chunk_url().or_else(|| read_disk_chunk_url(paths))
+    };
     let (url, chunk) = fetch_catalog_chunk(page_url, known.as_deref())?;
     cache.store_chunk_url(&url);
+    store_disk_chunk_url(paths, &url);
     Some(chunk)
 }
 
@@ -2142,36 +2433,93 @@ fn download_skill_markdown(source: &str) -> Result<String, String> {
     })
 }
 
-/// 技能目录：缓存 → 数据 chunk（带分类）→ JSON-LD 降级（无分类，只写短缓存）。
-fn cached_skill_catalog(cache: &AgenticCatalogCache) -> Result<Vec<AgenticSkillEntry>, String> {
-    if let Some(entries) = cache.skills() {
+/// 技能目录：内存 → 磁盘（24h）→ 数据 chunk（带分类）→ JSON-LD 降级（无分类，只写短缓存）。
+///
+/// `refresh = true`（「刷新市场」）时忽略内存与磁盘缓存，重新抓取并覆盖磁盘缓存（含 chunk URL）。
+fn cached_skill_catalog(
+    cache: &AgenticCatalogCache,
+    paths: &AppPaths,
+    refresh: bool,
+) -> Result<Vec<AgenticSkillEntry>, String> {
+    if let Some(entries) = cached_layer(
+        refresh,
+        || cache.skills(),
+        || {
+            read_disk_catalog::<AgenticSkillEntry>(paths, "skills").map(|catalog| {
+                cache.store_skills(catalog.entries.clone(), catalog.degraded);
+                catalog.entries
+            })
+        },
+    ) {
         return Ok(entries);
     }
-    if let Some(chunk) = load_catalog_chunk(cache, AGENTIC_SKILLS_URL) {
+    if let Some(chunk) = load_catalog_chunk(cache, paths, AGENTIC_SKILLS_URL, refresh) {
         if !chunk.skills.is_empty() {
             cache.store_skills(chunk.skills.clone(), false);
+            store_disk_catalog(paths, "skills", false, &chunk.skills);
             return Ok(chunk.skills);
         }
     }
     let entries = fetch_skill_catalog()?;
     cache.store_skills(entries.clone(), true);
+    store_disk_catalog(paths, "skills", true, &entries);
     Ok(entries)
 }
 
 /// MCP 目录：与技能同源（同一个数据 chunk 同时含两者），策略一致。
-fn cached_mcp_catalog(cache: &AgenticCatalogCache) -> Result<Vec<AgenticMcpEntry>, String> {
-    if let Some(entries) = cache.mcp() {
+fn cached_mcp_catalog(
+    cache: &AgenticCatalogCache,
+    paths: &AppPaths,
+    refresh: bool,
+) -> Result<Vec<AgenticMcpEntry>, String> {
+    if let Some(entries) = cached_layer(
+        refresh,
+        || cache.mcp(),
+        || {
+            read_disk_catalog::<AgenticMcpEntry>(paths, "mcp").map(|catalog| {
+                cache.store_mcp(catalog.entries.clone(), catalog.degraded);
+                catalog.entries
+            })
+        },
+    ) {
         return Ok(entries);
     }
-    if let Some(chunk) = load_catalog_chunk(cache, AGENTIC_MCP_URL) {
+    if let Some(chunk) = load_catalog_chunk(cache, paths, AGENTIC_MCP_URL, refresh) {
         if !chunk.mcp.is_empty() {
             cache.store_mcp(chunk.mcp.clone(), false);
+            store_disk_catalog(paths, "mcp", false, &chunk.mcp);
             return Ok(chunk.mcp);
         }
     }
     let entries = fetch_mcp_catalog()?;
     cache.store_mcp(entries.clone(), true);
+    store_disk_catalog(paths, "mcp", true, &entries);
     Ok(entries)
+}
+
+/// 技能详情：内存 → 磁盘（24h）→ 详情页，返回 `(详情, 是否来自网络)`。
+/// 命中磁盘时不会再发网络请求；网络成功后才写内存与磁盘缓存。
+fn load_skill_detail(paths: &AppPaths, slug: &str) -> Result<(AgenticSkillDetail, bool), String> {
+    let slug = validate_slug(slug)?.to_owned();
+    resolve_detail(
+        SKILL_DETAIL_CACHE.get(&slug),
+        || read_disk_detail::<AgenticSkillDetail>(paths, "skill", &slug),
+        |detail| SKILL_DETAIL_CACHE.store(&slug, detail.clone()),
+        |detail| store_disk_detail(paths, "skill", &slug, detail),
+        || fetch_skill_detail(&slug),
+    )
+}
+
+/// MCP 详情：与技能详情同策略。
+fn load_mcp_detail(paths: &AppPaths, slug: &str) -> Result<(AgenticMcpDetail, bool), String> {
+    let slug = validate_slug(slug)?.to_owned();
+    resolve_detail(
+        MCP_DETAIL_CACHE.get(&slug),
+        || read_disk_detail::<AgenticMcpDetail>(paths, "mcp", &slug),
+        |detail| MCP_DETAIL_CACHE.store(&slug, detail.clone()),
+        |detail| store_disk_detail(paths, "mcp", &slug, detail),
+        || fetch_mcp_detail(&slug),
+    )
 }
 
 fn filter_skills(entries: Vec<AgenticSkillEntry>, query: &str) -> Vec<AgenticSkillEntry> {
@@ -2260,8 +2608,10 @@ fn skill_description_text(description: Option<&str>, fallback: &str) -> String {
     }
 }
 
-/// 安装源：优先用目录条目里已有的 `skillMdUrl`（chunk 数据），没有再去抓详情页。
+/// 安装源：优先用目录条目里已有的 `skillMdUrl`（chunk 数据），
+/// 没有再用详情缓存（内存 → 磁盘 24h → 详情页）。
 fn skill_install_source(
+    paths: &AppPaths,
     cache: &AgenticCatalogCache,
     slug: &str,
 ) -> Result<(String, Option<String>), String> {
@@ -2274,7 +2624,7 @@ fn skill_install_source(
     if let Some(source) = cached {
         return Ok(source);
     }
-    let detail = fetch_skill_detail(slug)?;
+    let (detail, _) = load_skill_detail(paths, slug)?;
     let source = detail
         .skill_md_url
         .filter(|url| !url.trim().is_empty())
@@ -2289,7 +2639,7 @@ fn install_skill(
 ) -> Result<String, String> {
     let slug = validate_slug(&request.slug)?.to_owned();
     let name = skill_name_for(&slug)?.to_owned();
-    let (source, description) = skill_install_source(cache, &slug)?;
+    let (source, description) = skill_install_source(paths, cache, &slug)?;
     let content = download_skill_markdown(&source)?;
     let description = skill_description_text(description.as_deref(), &name);
     agent_config::save_skill_content(
@@ -2314,8 +2664,10 @@ fn config_from_snippets(snippets: &[AgenticMcpSnippet]) -> Result<Value, String>
         .ok_or_else(|| msg("market.agentic_mcp_config_unparsed"))
 }
 
-/// 安装用配置片段：优先用目录条目里的 `snippets`（chunk 数据），为空再抓详情页。
+/// 安装用配置片段：优先用目录条目里的 `snippets`（chunk 数据），
+/// 为空再用详情缓存（内存 → 磁盘 24h → 详情页）。
 fn mcp_install_snippets(
+    paths: &AppPaths,
     cache: &AgenticCatalogCache,
     slug: &str,
 ) -> Result<Vec<AgenticMcpSnippet>, String> {
@@ -2328,7 +2680,7 @@ fn mcp_install_snippets(
     });
     match cached {
         Some(snippets) => Ok(snippets),
-        None => Ok(fetch_mcp_detail(slug)?.snippets),
+        None => Ok(load_mcp_detail(paths, slug)?.0.snippets),
     }
 }
 
@@ -2340,7 +2692,7 @@ fn install_mcp(
     let slug = validate_slug(&request.slug)?.to_owned();
     // 片段解析失败仍然给明确错误码（`market.agentic_mcp_no_config` /
     // `market.agentic_mcp_config_unparsed`），写入前必须拿到可用的最新配置。
-    let config = config_from_snippets(&mcp_install_snippets(cache, &slug)?)?;
+    let config = config_from_snippets(&mcp_install_snippets(paths, cache, &slug)?)?;
     let name = mcp_server_name(&slug, request.name.as_deref())?;
     agent_config::save_mcp_server_config(
         paths,
@@ -2360,12 +2712,46 @@ fn fetch_workflow_detail(slug: &str) -> Result<AgenticWorkflowDetail, String> {
     parse_workflow_detail(&html, &slug).ok_or_else(|| msg("market.agenticskills_detail_missing"))
 }
 
-/// 工作流列表：缓存（TTL 600s）→ 列表页；站点改版导致解析为空时按详情缺失报错。
-fn cached_workflow_catalog() -> Result<Vec<AgenticWorkflowEntry>, String> {
-    if let Ok(guard) = WORKFLOW_CACHE.lock() {
-        if let Some(entries) = fresh_entries(guard.as_ref()) {
-            return Ok(entries);
-        }
+/// 工作流详情：内存 → 磁盘（24h）→ 详情页，返回 `(详情, 是否来自网络)`。
+/// 详情命令与工作流安装共用，命中缓存时不再发网络请求。
+fn load_workflow_detail(
+    paths: &AppPaths,
+    slug: &str,
+) -> Result<(AgenticWorkflowDetail, bool), String> {
+    let slug = validate_slug(slug)?.to_owned();
+    resolve_detail(
+        WORKFLOW_DETAIL_CACHE.get(&slug),
+        || read_disk_detail::<AgenticWorkflowDetail>(paths, "workflow", &slug),
+        |detail| WORKFLOW_DETAIL_CACHE.store(&slug, detail.clone()),
+        |detail| store_disk_detail(paths, "workflow", &slug, detail),
+        || fetch_workflow_detail(&slug),
+    )
+}
+
+/// 工作流列表：内存（24h）→ 磁盘（24h）→ 列表页；站点改版导致解析为空时按详情缺失报错。
+/// `refresh = true`（「刷新市场」）时忽略内存与磁盘缓存，重新抓取并覆盖磁盘缓存。
+fn cached_workflow_catalog(
+    paths: &AppPaths,
+    refresh: bool,
+) -> Result<Vec<AgenticWorkflowEntry>, String> {
+    if let Some(entries) = cached_layer(
+        refresh,
+        || {
+            WORKFLOW_CACHE
+                .lock()
+                .ok()
+                .and_then(|guard| fresh_entries(guard.as_ref()))
+        },
+        || {
+            read_disk_catalog::<AgenticWorkflowEntry>(paths, "workflows").map(|catalog| {
+                if let Ok(mut guard) = WORKFLOW_CACHE.lock() {
+                    *guard = Some((Instant::now(), catalog.entries.clone(), catalog.degraded));
+                }
+                catalog.entries
+            })
+        },
+    ) {
+        return Ok(entries);
     }
     let html = request_html(AGENTIC_WORKFLOWS_URL)?;
     let entries = parse_workflow_catalog(&html);
@@ -2375,6 +2761,7 @@ fn cached_workflow_catalog() -> Result<Vec<AgenticWorkflowEntry>, String> {
     if let Ok(mut guard) = WORKFLOW_CACHE.lock() {
         *guard = Some((Instant::now(), entries.clone(), false));
     }
+    store_disk_catalog(paths, "workflows", false, &entries);
     Ok(entries)
 }
 
@@ -2667,14 +3054,14 @@ fn install_workflow(
     request: &AgenticWorkflowInstall,
 ) -> Result<AgenticWorkflowInstallResult, String> {
     let slug = validate_slug(&request.slug)?.to_owned();
-    let detail = fetch_workflow_detail(&slug)?;
+    let (detail, _) = load_workflow_detail(paths, &slug)?;
     if detail.components.is_empty() {
         return Err(msg("market.agenticskills_detail_missing"));
     }
     // 目录只抓一次：技能 / MCP 组件都从同一份 chunk 里找条目，找不到再回退各自详情页。
     let cache = &WORKFLOW_CATALOG_CACHE;
-    let _ = cached_skill_catalog(cache);
-    let _ = cached_mcp_catalog(cache);
+    let _ = cached_skill_catalog(cache, paths, false);
+    let _ = cached_mcp_catalog(cache, paths, false);
     let (skills, mcp, skipped, failures) =
         install_workflow_components(&detail.components, |component| {
             install_workflow_component(paths, cache, request, component)
@@ -2694,15 +3081,74 @@ fn install_workflow(
     })
 }
 
+// ── 详情预热（前端后台调用，把当前列表的详情提前抓进缓存）────────────────────
+
+/// 预热支持的市场类型。
+#[derive(Clone, Copy)]
+enum PrefetchKind {
+    Skill,
+    Mcp,
+    Workflow,
+}
+
+impl PrefetchKind {
+    fn parse(kind: &str) -> Option<Self> {
+        match kind.trim() {
+            "skill" => Some(Self::Skill),
+            "mcp" => Some(Self::Mcp),
+            "workflow" => Some(Self::Workflow),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Skill => "skill",
+            Self::Mcp => "mcp",
+            Self::Workflow => "workflow",
+        }
+    }
+}
+
+/// 预热的工作清单：非法 slug 跳过，最多 `MAX_PREFETCH_SLUGS` 个（超出忽略，不报错）。
+fn prefetch_slugs(slugs: &[String]) -> Vec<String> {
+    slugs
+        .iter()
+        .filter_map(|slug| validate_slug(slug).ok().map(str::to_owned))
+        .take(MAX_PREFETCH_SLUGS)
+        .collect()
+}
+
+/// 顺序预热单个 slug：已在有效缓存（内存 / 磁盘）里的直接跳过，失败只跳过这一条。
+fn prefetch_agentic_detail(paths: &AppPaths, kind: PrefetchKind, slug: &str) -> bool {
+    let result = match kind {
+        PrefetchKind::Skill => load_skill_detail(paths, slug).map(|(_, fetched)| fetched),
+        PrefetchKind::Mcp => load_mcp_detail(paths, slug).map(|(_, fetched)| fetched),
+        PrefetchKind::Workflow => load_workflow_detail(paths, slug).map(|(_, fetched)| fetched),
+    };
+    match result {
+        Ok(fetched) => fetched,
+        Err(error) => {
+            log::warn!(
+                "event=agentic_prefetch status=failed kind={} slug={slug} error={error}",
+                kind.as_str()
+            );
+            false
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn search_agentic_skills(
     app: tauri::AppHandle,
+    paths: State<'_, AppPaths>,
     request: AgenticQuery,
 ) -> Result<Vec<AgenticSkillEntry>, String> {
     use tauri::Manager;
+    let paths = paths.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let cache = app.state::<AgenticCatalogCache>();
-        let entries = cached_skill_catalog(&cache)?;
+        let entries = cached_skill_catalog(&cache, &paths, request.refresh)?;
         Ok(filter_skills(entries, &request.query))
     })
     .await
@@ -2710,10 +3156,16 @@ pub async fn search_agentic_skills(
 }
 
 #[tauri::command]
-pub async fn agentic_skill_detail(request: AgenticSlug) -> Result<AgenticSkillDetail, String> {
-    tauri::async_runtime::spawn_blocking(move || fetch_skill_detail(&request.slug))
-        .await
-        .map_err(|error| format!("agentic skill detail worker failed: {error}"))?
+pub async fn agentic_skill_detail(
+    paths: State<'_, AppPaths>,
+    request: AgenticSlug,
+) -> Result<AgenticSkillDetail, String> {
+    let paths = paths.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        load_skill_detail(&paths, &request.slug).map(|(detail, _)| detail)
+    })
+    .await
+    .map_err(|error| format!("agentic skill detail worker failed: {error}"))?
 }
 
 #[tauri::command]
@@ -2735,12 +3187,14 @@ pub async fn install_agentic_skill(
 #[tauri::command]
 pub async fn search_agentic_mcp(
     app: tauri::AppHandle,
+    paths: State<'_, AppPaths>,
     request: AgenticQuery,
 ) -> Result<Vec<AgenticMcpEntry>, String> {
     use tauri::Manager;
+    let paths = paths.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let cache = app.state::<AgenticCatalogCache>();
-        let entries = cached_mcp_catalog(&cache)?;
+        let entries = cached_mcp_catalog(&cache, &paths, request.refresh)?;
         Ok(filter_mcp(entries, &request.query))
     })
     .await
@@ -2748,10 +3202,16 @@ pub async fn search_agentic_mcp(
 }
 
 #[tauri::command]
-pub async fn agentic_mcp_detail(request: AgenticSlug) -> Result<AgenticMcpDetail, String> {
-    tauri::async_runtime::spawn_blocking(move || fetch_mcp_detail(&request.slug))
-        .await
-        .map_err(|error| format!("agentic MCP detail worker failed: {error}"))?
+pub async fn agentic_mcp_detail(
+    paths: State<'_, AppPaths>,
+    request: AgenticSlug,
+) -> Result<AgenticMcpDetail, String> {
+    let paths = paths.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        load_mcp_detail(&paths, &request.slug).map(|(detail, _)| detail)
+    })
+    .await
+    .map_err(|error| format!("agentic MCP detail worker failed: {error}"))?
 }
 
 #[tauri::command]
@@ -2772,10 +3232,12 @@ pub async fn install_agentic_mcp(
 
 #[tauri::command]
 pub async fn search_agentic_workflows(
+    paths: State<'_, AppPaths>,
     request: AgenticQuery,
 ) -> Result<Vec<AgenticWorkflowEntry>, String> {
+    let paths = paths.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let entries = cached_workflow_catalog()?;
+        let entries = cached_workflow_catalog(&paths, request.refresh)?;
         Ok(filter_workflows(entries, &request.query))
     })
     .await
@@ -2784,11 +3246,15 @@ pub async fn search_agentic_workflows(
 
 #[tauri::command]
 pub async fn agentic_workflow_detail(
+    paths: State<'_, AppPaths>,
     request: AgenticSlug,
 ) -> Result<AgenticWorkflowDetail, String> {
-    tauri::async_runtime::spawn_blocking(move || fetch_workflow_detail(&request.slug))
-        .await
-        .map_err(|error| format!("agentic workflow detail worker failed: {error}"))?
+    let paths = paths.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        load_workflow_detail(&paths, &request.slug).map(|(detail, _)| detail)
+    })
+    .await
+    .map_err(|error| format!("agentic workflow detail worker failed: {error}"))?
 }
 
 #[tauri::command]
@@ -2814,6 +3280,39 @@ pub async fn list_installed_workflows(
     })
     .await
     .map_err(|error| format!("agentic workflow list worker failed: {error}"))?
+}
+
+/// 批量预热详情缓存：前端在后台把当前列表的详情提前抓进内存 / 磁盘缓存。
+///
+/// - 顺序抓取（不并发轰炸站点），每次最多处理 `MAX_PREFETCH_SLUGS` 个 slug，超出的忽略；
+/// - 非法 slug 直接跳过；已在有效缓存（内存 / 磁盘 24h）里的 slug 直接跳过；
+/// - 单个 slug 失败只跳过它（不中断整批，也不整体报错）；
+/// - 返回本次真正从网络抓取并写入缓存的条数。
+#[tauri::command]
+pub async fn prefetch_agentic_details(
+    paths: State<'_, AppPaths>,
+    request: PrefetchRequest,
+) -> Result<u32, String> {
+    let paths = paths.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(kind) = PrefetchKind::parse(&request.kind) else {
+            // 未知类型：预热是尽力而为的后台动作，按空批次处理，不打扰界面。
+            log::warn!(
+                "event=agentic_prefetch status=unknown_kind kind={}",
+                request.kind
+            );
+            return Ok(0);
+        };
+        let mut fetched = 0u32;
+        for slug in prefetch_slugs(&request.slugs) {
+            if prefetch_agentic_detail(&paths, kind, &slug) {
+                fetched += 1;
+            }
+        }
+        Ok(fetched)
+    })
+    .await
+    .map_err(|error| format!("agentic prefetch worker failed: {error}"))?
 }
 
 #[cfg(test)]
@@ -3460,23 +3959,26 @@ var t=[{slug:"notion",name:"Notion",description:"Pages, databases, search, and c
     #[test]
     fn install_paths_reuse_catalog_entries_without_extra_fetches() {
         // 目录缓存里有条目时，安装直接吃 chunk 数据（source / snippets），不再抓详情页。
+        let (paths, root) = temp_paths("install-source");
         let cache = super::AgenticCatalogCache::default();
         let chunk = parse_catalog_chunk(CATALOG_CHUNK_JS);
         cache.store_skills(chunk.skills.clone(), false);
         cache.store_mcp(chunk.mcp.clone(), false);
 
         let (source, description) =
-            skill_install_source(&cache, "taste-skill").expect("cached skill source");
+            skill_install_source(&paths, &cache, "taste-skill").expect("cached skill source");
         assert_eq!(
             source,
             "https://raw.githubusercontent.com/Leonxlnx/taste-skill/main/skills/taste-skill/SKILL.md"
         );
         assert!(description.is_some());
 
-        let snippets = mcp_install_snippets(&cache, "notion").expect("cached snippets");
+        let snippets = mcp_install_snippets(&paths, &cache, "notion").expect("cached snippets");
         assert_eq!(snippets.len(), 2);
         let config = config_from_snippets(&snippets).expect("snippet should parse");
         assert_eq!(config["command"], "uvx");
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -4042,9 +4544,10 @@ var t=[
     #[test]
     #[ignore = "requires network access to agenticskills.io"]
     fn fetches_live_agenticskills_catalogs_and_details() {
+        let (paths, root) = temp_paths("live");
         let cache = super::AgenticCatalogCache::default();
-        let skills =
-            super::cached_skill_catalog(&cache).expect("skill catalog should be reachable");
+        let skills = super::cached_skill_catalog(&cache, &paths, false)
+            .expect("skill catalog should be reachable");
         assert!(skills.len() > 100, "expected a full skill catalog");
         let skills_with_category = skills
             .iter()
@@ -4086,7 +4589,8 @@ var t=[
             "skill heat should always mirror stars"
         );
 
-        let mcp = super::cached_mcp_catalog(&cache).expect("MCP catalog should be reachable");
+        let mcp = super::cached_mcp_catalog(&cache, &paths, false)
+            .expect("MCP catalog should be reachable");
         assert!(mcp.len() > 100, "expected a full MCP catalog");
         let mcp_with_category = mcp.iter().filter(|entry| entry.category.is_some()).count();
         let mcp_with_transport = mcp
@@ -4184,18 +4688,40 @@ var t=[
             (Some(1), Some(2)),
             "notion should carry the site's 1/2 audit score"
         );
-        // 第二次目录请求应当直接吃缓存里的 chunk URL（不用再拉列表页）。
+        // 第二次目录查询直接吃内存缓存：不再发起网络请求（chunk URL 仍在缓存里）。
+        let requests = super::network_request_count();
+        let again = super::cached_skill_catalog(&cache, &paths, false).expect("cached skills");
+        assert_eq!(again.len(), skills.len());
+        let again = super::cached_mcp_catalog(&cache, &paths, false).expect("cached MCP");
+        assert_eq!(again.len(), mcp.len());
         assert!(cache.chunk_url().is_some());
+        assert_eq!(
+            super::network_request_count(),
+            requests,
+            "second catalog search should be served from the in-memory cache"
+        );
 
-        let detail = super::fetch_skill_detail("taste-skill").expect("skill detail");
+        // 详情：第一次联网抓取（并写缓存），第二次命中内存缓存、不再联网。
+        let (detail, fetched) =
+            super::load_skill_detail(&paths, "taste-skill").expect("skill detail");
+        assert!(fetched, "first detail load should hit the network");
         assert!(detail.skill_md_url.is_some());
-        let detail = super::fetch_mcp_detail("playwright").expect("MCP detail");
-        assert!(!detail.snippets.is_empty());
+        let requests = super::network_request_count();
+        let (cached_detail, fetched) =
+            super::load_skill_detail(&paths, "taste-skill").expect("cached skill detail");
+        assert_eq!(cached_detail, detail);
+        assert!(!fetched, "second detail load should come from the cache");
+        assert_eq!(super::network_request_count(), requests);
+
+        let (mcp_detail, fetched) =
+            super::load_mcp_detail(&paths, "playwright").expect("MCP detail");
+        assert!(fetched, "first MCP detail load should hit the network");
+        assert!(!mcp_detail.snippets.is_empty());
 
         // 工作流：列表 ≥ 15 条且卡片元信息齐全；详情同时含技能与 MCP 组件；
         // seo-content-sprint 的 step 里带起手提示词。
-        let workflows =
-            super::cached_workflow_catalog().expect("workflow list should be reachable");
+        let workflows = super::cached_workflow_catalog(&paths, false)
+            .expect("workflow list should be reachable");
         let workflows_with_category = workflows
             .iter()
             .filter(|entry| entry.category.is_some())
@@ -4222,7 +4748,9 @@ var t=[
             "almost every workflow card should carry component counts"
         );
 
-        let fullstack = super::fetch_workflow_detail("fullstack-saas").expect("workflow detail");
+        let (fullstack, fetched) =
+            super::load_workflow_detail(&paths, "fullstack-saas").expect("workflow detail");
+        assert!(fetched, "first workflow detail load should hit the network");
         let skill_components = fullstack
             .components
             .iter()
@@ -4244,11 +4772,368 @@ var t=[
         assert!(mcp_components > 0, "fullstack-saas should list MCP servers");
         assert!(fullstack.setup_time.is_some());
 
-        let sprint = super::fetch_workflow_detail("seo-content-sprint").expect("SEO workflow");
+        let (sprint, fetched) =
+            super::load_workflow_detail(&paths, "seo-content-sprint").expect("SEO workflow");
+        assert!(fetched, "first workflow detail load should hit the network");
         println!("seo-content-sprint kickoff={:?}", sprint.kickoff_prompt);
         assert!(
             sprint.kickoff_prompt.is_some(),
             "seo-content-sprint should carry a kickoff prompt"
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    // ── 磁盘缓存 / 预热 / refresh 的单元测试（全部用临时目录，不碰真实用户目录）──
+
+    /// 改写缓存文件里的 `fetchedAt`，模拟过期 / 未来时间戳。
+    fn rewrite_fetched_at(path: &std::path::Path, fetched_at: u64) {
+        let content = fs::read_to_string(path).expect("cache file should exist");
+        let mut value: serde_json::Value =
+            serde_json::from_str(&content).expect("cache file should be JSON");
+        value["fetchedAt"] = serde_json::Value::from(fetched_at);
+        fs::write(
+            path,
+            serde_json::to_vec(&value).expect("value should serialize"),
+        )
+        .expect("cache file should be rewritten");
+    }
+
+    #[test]
+    fn disk_catalog_cache_round_trips_and_ignores_broken_files() {
+        let (paths, root) = temp_paths("disk-catalog");
+        let now = super::now_seconds().expect("system clock should be after epoch");
+        let entries = parse_catalog_chunk(CATALOG_CHUNK_JS).skills;
+        assert!(!entries.is_empty());
+
+        // 写入 → 读回一致；布局是 `{ fetchedAt, degraded, entries }`。
+        super::store_disk_catalog(&paths, "skills", false, &entries);
+        let path = super::catalog_cache_path(&paths, "skills");
+        let stored: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).expect("cache file")).expect("JSON");
+        assert!(stored["fetchedAt"].as_u64().is_some());
+        assert_eq!(stored["degraded"], serde_json::Value::Bool(false));
+        let read_back = super::read_disk_catalog::<super::AgenticSkillEntry>(&paths, "skills")
+            .expect("fresh cache should be readable");
+        assert_eq!(read_back.entries, entries);
+
+        // 过期（25 小时前）→ 未命中。
+        rewrite_fetched_at(&path, now - 25 * 60 * 60);
+        assert!(super::read_disk_catalog::<super::AgenticSkillEntry>(&paths, "skills").is_none());
+
+        // `fetchedAt` 在未来 → 未命中。
+        rewrite_fetched_at(&path, now + 60);
+        assert!(super::read_disk_catalog::<super::AgenticSkillEntry>(&paths, "skills").is_none());
+
+        // JSON 非法 → 未命中。
+        fs::write(&path, "{not json").expect("write should succeed");
+        assert!(super::read_disk_catalog::<super::AgenticSkillEntry>(&paths, "skills").is_none());
+
+        // 缺字段（没有 entries）→ 未命中。
+        fs::write(&path, format!(r#"{{"fetchedAt":{now},"degraded":false}}"#)).expect("write");
+        assert!(super::read_disk_catalog::<super::AgenticSkillEntry>(&paths, "skills").is_none());
+
+        // 字段类型不对（entries 是对象）→ 未命中。
+        fs::write(
+            &path,
+            format!(r#"{{"fetchedAt":{now},"degraded":false,"entries":{{}}}}"#),
+        )
+        .expect("write");
+        assert!(super::read_disk_catalog::<super::AgenticSkillEntry>(&paths, "skills").is_none());
+
+        // `fetchedAt` 类型不对 → 未命中。
+        fs::write(
+            &path,
+            r#"{"fetchedAt":"yesterday","degraded":false,"entries":[]}"#,
+        )
+        .expect("write");
+        assert!(super::read_disk_catalog::<super::AgenticSkillEntry>(&paths, "skills").is_none());
+
+        // 降级结果只挡 `FALLBACK_CACHE_TTL`：刚写入命中、两分钟前未命中。
+        let mcp_entries = parse_catalog_chunk(CATALOG_CHUNK_JS).mcp;
+        super::store_disk_catalog(&paths, "mcp", true, &mcp_entries);
+        assert!(super::read_disk_catalog::<super::AgenticMcpEntry>(&paths, "mcp").is_some());
+        rewrite_fetched_at(&super::catalog_cache_path(&paths, "mcp"), now - 120);
+        assert!(super::read_disk_catalog::<super::AgenticMcpEntry>(&paths, "mcp").is_none());
+
+        // 文件缺失 → 未命中。
+        fs::remove_file(&path).expect("cache file should exist");
+        assert!(super::read_disk_value(&path).is_none());
+        assert!(super::read_disk_catalog::<super::AgenticSkillEntry>(&paths, "skills").is_none());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn disk_chunk_url_and_details_round_trip_only_when_fresh() {
+        let (paths, root) = temp_paths("disk-details");
+        let now = super::now_seconds().expect("system clock should be after epoch");
+
+        // chunk URL：写入 → 读回；过期 → 未命中。
+        let url = "https://agenticskills.io/_next/static/immutable/chunks/demo.js";
+        super::store_disk_chunk_url(&paths, url);
+        assert_eq!(super::read_disk_chunk_url(&paths).as_deref(), Some(url));
+        let chunk_path = super::chunk_url_cache_path(&paths);
+        let stored: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&chunk_path).expect("cache file"))
+                .expect("JSON");
+        assert_eq!(stored["url"], serde_json::Value::from(url));
+        rewrite_fetched_at(&chunk_path, now - 25 * 60 * 60);
+        assert!(super::read_disk_chunk_url(&paths).is_none());
+
+        // 技能详情：布局 `details/skill-<slug>.json`，写入 → 读回一致，过期 → 未命中。
+        let skill = super::AgenticSkillDetail {
+            slug: "prefetch-skill".to_owned(),
+            name: "Prefetch Skill".to_owned(),
+            skill_md_url: Some("https://example.com/SKILL.md".to_owned()),
+            ..Default::default()
+        };
+        super::store_disk_detail(&paths, "skill", &skill.slug, &skill);
+        let skill_path = super::detail_cache_path(&paths, "skill", &skill.slug);
+        assert!(skill_path.is_file());
+        assert_eq!(
+            skill_path.file_name().and_then(|name| name.to_str()),
+            Some("skill-prefetch-skill.json")
+        );
+        assert_eq!(
+            super::read_disk_detail::<super::AgenticSkillDetail>(&paths, "skill", &skill.slug),
+            Some(skill.clone())
+        );
+        rewrite_fetched_at(&skill_path, now - 25 * 60 * 60);
+        assert!(
+            super::read_disk_detail::<super::AgenticSkillDetail>(&paths, "skill", &skill.slug)
+                .is_none()
+        );
+        // 缺 `detail` 字段 → 未命中。
+        fs::write(&skill_path, format!(r#"{{"fetchedAt":{now}}}"#)).expect("write");
+        assert!(
+            super::read_disk_detail::<super::AgenticSkillDetail>(&paths, "skill", &skill.slug)
+                .is_none()
+        );
+
+        // MCP 详情。
+        let mcp = super::AgenticMcpDetail {
+            slug: "prefetch-mcp".to_owned(),
+            name: "Prefetch MCP".to_owned(),
+            ..Default::default()
+        };
+        super::store_disk_detail(&paths, "mcp", &mcp.slug, &mcp);
+        assert_eq!(
+            super::read_disk_detail::<super::AgenticMcpDetail>(&paths, "mcp", &mcp.slug),
+            Some(mcp)
+        );
+
+        // 工作流详情（含组件与步骤，确认嵌套结构也能往返）。
+        let workflow = super::AgenticWorkflowDetail {
+            slug: "prefetch-workflow".to_owned(),
+            name: "Prefetch Workflow".to_owned(),
+            components: vec![AgenticWorkflowComponent {
+                kind: "skill".to_owned(),
+                slug: "demo".to_owned(),
+                name: "Demo".to_owned(),
+                url: "https://agenticskills.io/skills/demo".to_owned(),
+            }],
+            steps: vec![super::AgenticWorkflowStep {
+                name: "Step".to_owned(),
+                text: "Do it".to_owned(),
+            }],
+            ..Default::default()
+        };
+        super::store_disk_detail(&paths, "workflow", &workflow.slug, &workflow);
+        assert_eq!(
+            super::read_disk_detail::<super::AgenticWorkflowDetail>(
+                &paths,
+                "workflow",
+                &workflow.slug
+            ),
+            Some(workflow)
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn refresh_bypasses_memory_and_disk_layers() {
+        // `refresh = true`：内存与磁盘两层都跳过（调用方重新抓取并覆盖缓存）。
+        assert_eq!(
+            super::cached_layer(true, || Some(1u32), || Some(2u32)),
+            None
+        );
+        // 无刷新：内存优先，磁盘层不会被读取。
+        assert_eq!(
+            super::cached_layer(false, || Some(1u32), || panic!("disk layer must not run")),
+            Some(1)
+        );
+        // 内存未命中：磁盘层兜底。
+        assert_eq!(super::cached_layer(false, || None, || Some(2u32)), Some(2));
+        // 两层都未命中：交给网络取数。
+        assert_eq!(super::cached_layer(false, || None::<u32>, || None), None);
+    }
+
+    #[test]
+    fn prefetch_truncates_to_thirty_slugs_and_skips_invalid_ones() {
+        let slugs: Vec<String> = (0..(super::MAX_PREFETCH_SLUGS + 5))
+            .map(|index| format!("skill-{index}"))
+            .collect();
+        let planned = super::prefetch_slugs(&slugs);
+        assert_eq!(planned.len(), super::MAX_PREFETCH_SLUGS);
+        assert_eq!(planned.first().map(String::as_str), Some("skill-0"));
+        let last = format!("skill-{}", super::MAX_PREFETCH_SLUGS - 1);
+        assert_eq!(planned.last().map(String::as_str), Some(last.as_str()));
+
+        // 非法 slug（空串 / 大写 / 空格 / 路径穿越）直接跳过，也不占配额。
+        let mixed = vec![
+            "ok-slug".to_owned(),
+            "BAD".to_owned(),
+            "../evil".to_owned(),
+            String::new(),
+            " second-ok ".to_owned(),
+        ];
+        assert_eq!(
+            super::prefetch_slugs(&mixed),
+            vec!["ok-slug".to_owned(), "second-ok".to_owned()]
+        );
+    }
+
+    #[test]
+    fn detail_resolution_prefers_caches_and_counts_network_fetches() {
+        // 内存命中：磁盘、网络与写缓存都不碰。
+        let memory_hit = super::resolve_detail::<u32>(
+            Some(1),
+            || panic!("disk layer must not run"),
+            |_| panic!("memory must not be written"),
+            |_| panic!("disk must not be written"),
+            || panic!("network must not run"),
+        );
+        assert_eq!(memory_hit.expect("memory hit"), (1, false));
+
+        // 磁盘命中：补内存、不联网、不重写磁盘。
+        let mut memory = Vec::new();
+        let disk_hit = super::resolve_detail::<u32>(
+            None,
+            || Some(2),
+            |value| memory.push(*value),
+            |_| panic!("disk must not be rewritten"),
+            || panic!("network must not run"),
+        );
+        assert_eq!(disk_hit.expect("disk hit"), (2, false));
+        assert_eq!(memory, vec![2]);
+
+        // 两层都未命中：网络结果写内存与磁盘，并计为一次真实抓取。
+        let mut memory = Vec::new();
+        let mut disk = Vec::new();
+        let fetched = super::resolve_detail::<u32>(
+            None,
+            || None,
+            |value| memory.push(*value),
+            |value| disk.push(*value),
+            || Ok(3),
+        );
+        assert_eq!(fetched.expect("network fetch"), (3, true));
+        assert_eq!(memory, vec![3]);
+        assert_eq!(disk, vec![3]);
+
+        // 单条失败：错误原样返回（预热循环只跳过这一条，不中断整批）。
+        let failed =
+            super::resolve_detail::<u32>(None, || None, |_| {}, |_| {}, || Err("network".into()));
+        assert!(failed.is_err());
+
+        let outcomes: Vec<bool> = ["first-ok", "broken", "second-ok"]
+            .into_iter()
+            .map(|slug| {
+                super::resolve_detail::<String>(
+                    None,
+                    || None,
+                    |_| {},
+                    |_| {},
+                    || {
+                        if slug == "broken" {
+                            Err("network".to_owned())
+                        } else {
+                            Ok(slug.to_owned())
+                        }
+                    },
+                )
+                .is_ok()
+            })
+            .collect();
+        assert_eq!(outcomes, vec![true, false, true]);
+    }
+
+    #[test]
+    fn prefetch_skips_details_already_on_disk() {
+        let (paths, root) = temp_paths("prefetch-skip");
+        let detail = super::AgenticSkillDetail {
+            slug: "prefetched-skill".to_owned(),
+            name: "Prefetched".to_owned(),
+            ..Default::default()
+        };
+        super::store_disk_detail(&paths, "skill", &detail.slug, &detail);
+
+        let requests = super::network_request_count();
+        let fetched =
+            super::prefetch_agentic_detail(&paths, super::PrefetchKind::Skill, &detail.slug);
+        assert!(!fetched, "a slug already on disk must not be fetched again");
+        assert_eq!(super::network_request_count(), requests);
+
+        // 磁盘命中顺手补进内存：第二次调用直接命中内存。
+        assert!(super::SKILL_DETAIL_CACHE.get(&detail.slug).is_some());
+        let fetched =
+            super::prefetch_agentic_detail(&paths, super::PrefetchKind::Skill, &detail.slug);
+        assert!(!fetched);
+        assert_eq!(super::network_request_count(), requests);
+
+        // 非法 slug 直接跳过（校验失败只跳过这一条，不报错、不联网）。
+        assert!(!super::prefetch_agentic_detail(
+            &paths,
+            super::PrefetchKind::Skill,
+            "BAD slug"
+        ));
+        assert_eq!(super::network_request_count(), requests);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn catalog_searches_reuse_memory_and_disk_without_network() {
+        let (paths, root) = temp_paths("catalog-hits");
+        let chunk = parse_catalog_chunk(CATALOG_CHUNK_JS);
+        assert!(!chunk.skills.is_empty() && !chunk.mcp.is_empty());
+
+        // 内存命中：不发网络请求。
+        let cache = super::AgenticCatalogCache::default();
+        cache.store_skills(chunk.skills.clone(), false);
+        let requests = super::network_request_count();
+        let entries =
+            super::cached_skill_catalog(&cache, &paths, false).expect("memory hit should succeed");
+        assert_eq!(entries, chunk.skills);
+        assert_eq!(super::network_request_count(), requests);
+
+        // 磁盘命中（内存为空）：同样不发网络请求，并把结果补进内存。
+        super::store_disk_catalog(&paths, "skills", false, &chunk.skills);
+        let cold = super::AgenticCatalogCache::default();
+        let requests = super::network_request_count();
+        let entries =
+            super::cached_skill_catalog(&cold, &paths, false).expect("disk hit should succeed");
+        assert_eq!(entries, chunk.skills);
+        assert_eq!(super::network_request_count(), requests);
+        assert!(
+            cold.skills().is_some(),
+            "disk hit should warm the memory layer"
+        );
+
+        // 工作流目录：磁盘命中同样不联网。
+        let workflows = vec![super::AgenticWorkflowEntry {
+            slug: "demo-workflow".to_owned(),
+            name: "Demo Workflow".to_owned(),
+            category: Some("Demo".to_owned()),
+            ..Default::default()
+        }];
+        super::store_disk_catalog(&paths, "workflows", false, &workflows);
+        let requests = super::network_request_count();
+        let entries = super::cached_workflow_catalog(&paths, false).expect("disk hit");
+        assert_eq!(entries, workflows);
+        assert_eq!(super::network_request_count(), requests);
+
+        let _ = fs::remove_dir_all(root);
     }
 }
