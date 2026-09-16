@@ -2,7 +2,7 @@ import { DEFAULT_LOCALE, type Locale } from "./locale";
 import { DEFAULT_THEME_ID, type ThemePack } from "./theme";
 
 export type ColorMode = "system" | "light" | "dark";
-/** 主题 id：内置（command-flow / win11）或导入主题的标识。 */
+/** 主题 id：内置（command-flow）或导入主题的标识。 */
 export type Theme = string;
 export type CodeFont = "cascadia" | "consolas" | "jetbrains";
 export type CloseBehavior = "ask" | "minimize" | "exit";

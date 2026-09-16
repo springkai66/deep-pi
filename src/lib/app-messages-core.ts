@@ -258,6 +258,36 @@ export const APP_MESSAGES_CORE: Record<string, import("./app-messages").AppMessa
     "zh-TW": "搜尋關鍵字無效：請控制在 100 個字元以內，且不含控制字元",
     en: "Invalid search query: keep it under 100 characters and free of control characters.",
   },
+  "market.agenticskills_slug_invalid": {
+    "zh-CN": "市场条目标识无效",
+    "zh-TW": "市場條目標識無效",
+    en: "The marketplace entry identifier is invalid.",
+  },
+  "market.agenticskills_request_failed": {
+    "zh-CN": "无法访问 agenticskills.io：{error}",
+    "zh-TW": "無法存取 agenticskills.io：{error}",
+    en: "agenticskills.io could not be reached: {error}",
+  },
+  "market.agenticskills_detail_missing": {
+    "zh-CN": "agenticskills.io 返回的页面结构无法识别，站点可能已改版",
+    "zh-TW": "agenticskills.io 回應的頁面結構無法識別，站點可能已改版",
+    en: "The page returned by agenticskills.io could not be recognised; the site may have changed.",
+  },
+  "market.agentic_skill_no_source": {
+    "zh-CN": "该技能没有可直接下载的 SKILL.md 来源，请在站点上手动安装",
+    "zh-TW": "該技能沒有可直接下載的 SKILL.md 來源，請在站點上手動安裝",
+    en: "This Skill has no directly downloadable SKILL.md source; install it manually on the site.",
+  },
+  "market.agentic_mcp_no_config": {
+    "zh-CN": "该服务器没有可自动写入的配置片段，请在站点上按文档手动配置",
+    "zh-TW": "該伺服器沒有可自動寫入的設定片段，請在站點上依文件手動設定",
+    en: "This server has no configuration snippet that can be written automatically; configure it manually following the site's documentation.",
+  },
+  "market.agentic_mcp_config_unparsed": {
+    "zh-CN": "站点给出的配置片段无法解析为 JSON，请手动配置",
+    "zh-TW": "站點給出的設定片段無法解析為 JSON，請手動設定",
+    en: "The configuration snippet from the site could not be parsed as JSON; configure it manually.",
+  },
   // —— 本机 Pi 元数据与应用启动失败 ——
   "app.init_thread_failed": {
     "zh-CN": "应用初始化工作线程失败",

@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   COMMAND_FLOW_THEME,
   DEFAULT_THEME_ID,
-  WIN11_THEME,
   parseThemeFile,
   parseThemePack,
   resolveTheme,
@@ -86,6 +85,10 @@ describe("theme resolution", () => {
     expect(resolveTheme("does-not-exist", []).id).toBe(DEFAULT_THEME_ID);
   });
 
+  it("falls back to the default theme for the removed legacy win11 id", () => {
+    expect(resolveTheme("win11", [])).toBe(COMMAND_FLOW_THEME);
+  });
+
   it("merges the light variant over the base palette", () => {
     const colors = resolveThemeColors(COMMAND_FLOW_THEME, "light");
     expect(colors.pageBg).toBe(COMMAND_FLOW_THEME.light?.pageBg);
@@ -93,8 +96,8 @@ describe("theme resolution", () => {
   });
 
   it("reuses the base palette when a theme has no light variant", () => {
-    const colors = resolveThemeColors(WIN11_THEME, "light");
-    expect(colors.pageBg).toBe(WIN11_THEME.light?.pageBg);
+    const theme: ThemePack = { ...COMMAND_FLOW_THEME, light: undefined };
+    expect(resolveThemeColors(theme, "light")).toBe(theme.colors);
   });
 });
 

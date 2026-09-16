@@ -123,9 +123,6 @@ export const EN_CHAT: Record<string, string> = {
   "Command Flow（精密流式）": "Command Flow (Precision Stream)",
   "深空黑底 + 翠绿强调色的精密仪器风格，配等宽代码字体。":
     "Deep-space black with an emerald accent — precision-instrument styling paired with a monospace code font.",
-  "Win11（经典深板岩）": "Win11 (Classic Slate)",
-  "DeepPi 早期默认主题，深板岩底色与薄荷绿强调色。":
-    "DeepPi's earlier default theme: slate surfaces with a mint accent.",
   "导入主题": "Import theme",
   "导出当前主题": "Export current theme",
   "主题以 ": "Themes are distributed as ",
@@ -134,6 +131,8 @@ export const EN_CHAT: Record<string, string> = {
   "已导入并应用主题「{name}」": "Imported and applied theme “{name}”",
   "主题 id「{id}」与内置主题冲突，请修改主题文件里的 id 后重试": "Theme id “{id}” conflicts with a built-in theme; change the id in the theme file and try again",
   "导入主题已达上限（{limit} 个），请先删除不再使用的主题": "Theme import limit reached ({limit}); delete the themes you no longer use first",
+  "删除所选自定义主题": "Delete selected custom theme",
+  "（自定义）": " (Custom)",
 
   // —— 设置页：外观（主题文件解析错误，来自 theme.ts；PiSettings.svelte 显示） ——
   "主题文件不是一个 JSON 对象": "The theme file is not a JSON object",
@@ -152,7 +151,6 @@ export const EN_CHAT: Record<string, string> = {
   "历史分页已过期或不连续": "The history page has expired or is not contiguous",
   "初始历史分页不是最新快照": "The initial history page is not the latest snapshot",
   "历史分页与当前快照不一致": "The history page does not match the current snapshot",
-  "删除主题 {name}": "Delete theme {name}",
   "删除导入的主题": "Delete imported theme",
   "字体": "Fonts",
   "颜色模式": "Color mode",

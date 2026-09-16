@@ -16,8 +16,10 @@ use crate::{
 
 const MAX_JSON_BYTES: usize = 1024 * 1024;
 const MAX_NAME_LENGTH: usize = 64;
-const MAX_SKILL_CONTENT_BYTES: usize = 64 * 1024;
-const MAX_SKILL_DESCRIPTION_LENGTH: usize = 512;
+/// 单个 SKILL.md 的内容上限：站点上最大的技能约 90 KB（旗舰技能 87 KB），
+/// 因此上限放宽到 256 KiB，既能装下真实技能，也仍然有界（技能数上限 200）。
+pub(crate) const MAX_SKILL_CONTENT_BYTES: usize = 256 * 1024;
+pub(crate) const MAX_SKILL_DESCRIPTION_LENGTH: usize = 512;
 const MAX_MCP_SERVERS: usize = 64;
 const MAX_MCP_CONFIG_BYTES: usize = 8 * 1024;
 const MAX_SKILLS: usize = 200;
@@ -207,6 +209,40 @@ pub async fn list_mcp_servers(
     .await
 }
 
+pub(crate) fn save_mcp_server_config(
+    paths: &AppPaths,
+    scope: ConfigScope,
+    project_path: Option<&str>,
+    name: &str,
+    config: &Value,
+) -> Result<(), String> {
+    let name = name.trim();
+    validate_entry_name(name)?;
+    if !config.is_object() {
+        return Err(msg("agent_config.mcp_not_object"));
+    }
+    if serde_json::to_vec(config)
+        .map_err(|error| error.to_string())?
+        .len()
+        > MAX_MCP_CONFIG_BYTES
+    {
+        return Err(msg("agent_config.mcp_too_large"));
+    }
+    let path = mcp_file(paths, scope, project_path)?;
+    let mut value = read_json_file(&path)?;
+    let mut servers = value
+        .get("mcpServers")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    if !servers.contains_key(name) && servers.len() >= MAX_MCP_SERVERS {
+        return Err(msg("agent_config.mcp_limit_reached"));
+    }
+    servers.insert(name.to_string(), config.clone());
+    value["mcpServers"] = Value::Object(servers);
+    write_json_file(&path, &value)
+}
+
 #[tauri::command]
 pub async fn save_mcp_server(
     paths: State<'_, AppPaths>,
@@ -214,35 +250,13 @@ pub async fn save_mcp_server(
 ) -> Result<(), String> {
     let paths = paths.inner().clone();
     run_blocking(move || {
-        let name = request.name.trim();
-        validate_entry_name(name)?;
-        if !request.config.is_object() {
-            return Err(msg("agent_config.mcp_not_object"));
-        }
-        if serde_json::to_vec(&request.config)
-            .map_err(|error| error.to_string())?
-            .len()
-            > MAX_MCP_CONFIG_BYTES
-        {
-            return Err(msg("agent_config.mcp_too_large"));
-        }
-        let path = mcp_file(
+        save_mcp_server_config(
             &paths,
             request.scope.unwrap_or(ConfigScope::Global),
             request.project_path.as_deref(),
-        )?;
-        let mut value = read_json_file(&path)?;
-        let mut servers = value
-            .get("mcpServers")
-            .and_then(Value::as_object)
-            .cloned()
-            .unwrap_or_default();
-        if !servers.contains_key(name) && servers.len() >= MAX_MCP_SERVERS {
-            return Err(msg("agent_config.mcp_limit_reached"));
-        }
-        servers.insert(name.to_string(), request.config);
-        value["mcpServers"] = Value::Object(servers);
-        write_json_file(&path, &value)
+            &request.name,
+            &request.config,
+        )
     })
     .await
 }
@@ -356,6 +370,42 @@ pub async fn list_skills(
     .await
 }
 
+pub(crate) fn save_skill_content(
+    paths: &AppPaths,
+    scope: ConfigScope,
+    project_path: Option<&str>,
+    name: &str,
+    description: &str,
+    content: &str,
+) -> Result<(), String> {
+    let name = name.trim();
+    validate_entry_name(name)?;
+    let description = description.trim();
+    if description.is_empty() || description.len() > MAX_SKILL_DESCRIPTION_LENGTH {
+        return Err(msg("agent_config.skill_description_length"));
+    }
+    if content.is_empty() || content.len() > MAX_SKILL_CONTENT_BYTES {
+        return Err(msg("agent_config.skill_content_length"));
+    }
+    let dir = skill_dir(paths, scope, project_path, name)?;
+    fs::create_dir_all(&dir)
+        .map_err(|error| format!("failed to create skill directory: {error}"))?;
+    let payload = if content.trim_start().starts_with("---") {
+        content.to_owned()
+    } else {
+        format!(
+            "---\nname: {name}\ndescription: {description}\n---\n\n{}",
+            content.trim_start()
+        )
+    };
+    let mut file = AtomicWriteFile::open(dir.join("SKILL.md"))
+        .map_err(|error| format!("failed to open SKILL.md: {error}"))?;
+    file.write_all(payload.as_bytes())
+        .map_err(|error| format!("failed to write SKILL.md: {error}"))?;
+    file.commit()
+        .map_err(|error| format!("failed to commit SKILL.md: {error}"))
+}
+
 #[tauri::command]
 pub async fn save_skill(
     paths: State<'_, AppPaths>,
@@ -363,37 +413,14 @@ pub async fn save_skill(
 ) -> Result<(), String> {
     let paths = paths.inner().clone();
     run_blocking(move || {
-        let name = request.name.trim();
-        validate_entry_name(name)?;
-        let description = request.description.trim();
-        if description.is_empty() || description.len() > MAX_SKILL_DESCRIPTION_LENGTH {
-            return Err(msg("agent_config.skill_description_length"));
-        }
-        if request.content.is_empty() || request.content.len() > MAX_SKILL_CONTENT_BYTES {
-            return Err(msg("agent_config.skill_content_length"));
-        }
-        let dir = skill_dir(
+        save_skill_content(
             &paths,
             request.scope.unwrap_or(ConfigScope::Global),
             request.project_path.as_deref(),
-            name,
-        )?;
-        fs::create_dir_all(&dir)
-            .map_err(|error| format!("failed to create skill directory: {error}"))?;
-        let content = if request.content.trim_start().starts_with("---") {
-            request.content
-        } else {
-            format!(
-                "---\nname: {name}\ndescription: {description}\n---\n\n{}",
-                request.content.trim_start()
-            )
-        };
-        let mut file = AtomicWriteFile::open(dir.join("SKILL.md"))
-            .map_err(|error| format!("failed to open SKILL.md: {error}"))?;
-        file.write_all(content.as_bytes())
-            .map_err(|error| format!("failed to write SKILL.md: {error}"))?;
-        file.commit()
-            .map_err(|error| format!("failed to commit SKILL.md: {error}"))
+            &request.name,
+            &request.description,
+            &request.content,
+        )
     })
     .await
 }

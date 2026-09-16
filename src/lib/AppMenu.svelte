@@ -50,6 +50,8 @@
       const current = buttons.indexOf(document.activeElement as HTMLButtonElement);
       buttons[(current + (event.key === "ArrowDown" ? 1 : buttons.length - 1)) % buttons.length]?.focus();
     } else if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      // 只有一个菜单项时没有可切换的目标（show() 的同索引分支会把菜单关掉）。
+      if (menus.length < 2) return;
       event.preventDefault();
       const next = (openIndex + (event.key === "ArrowRight" ? 1 : menus.length - 1)) % menus.length;
       const button = root.querySelectorAll<HTMLButtonElement>(".menu-trigger")[next];

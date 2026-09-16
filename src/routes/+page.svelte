@@ -14,7 +14,7 @@
   import {
     Bot,
     FolderPlus,
-    LayoutGrid,
+    Kanban,
   PanelLeftClose,
   PanelLeftOpen,
   PanelRightClose,
@@ -40,6 +40,7 @@
   import { createTaskModeSwitcher, type InteractionMode } from "$lib/task-mode";
   import { SplitSquareHorizontal, SplitSquareVertical } from "@lucide/svelte";
   import AppDialog from "$lib/AppDialog.svelte";
+  import AppMenu from "$lib/AppMenu.svelte";
   import { checkAppUpdate, installAppUpdate, type AppUpdateState, type Update } from "$lib/app-update";
   import type { DialogRequest, DialogValue } from "$lib/dialog";
   import type { Project } from "$lib/project";
@@ -160,6 +161,8 @@
   let filesVisible = $state(true);
   /** 是否用「任务看板」替代流式对话视图（仅 Pi 工作区）。 */
   let boardView = $state(false);
+  /** 应用菜单展开态：展开时暂停全局快捷键，并让原生 DSH Webview 让位（否则会盖住菜单弹层）。 */
+  let menuOpen = $state(false);
   const showFiles = $derived(activeAgent === "pi" && view === "workspace" && filesVisible);
   let fileSidebarVisited = $state(false);
   $effect(() => {
@@ -238,7 +241,7 @@
   // Serialize visibility requests because native child Webviews cover HTML menus.
   $effect(() => {
     const child = dshWebview;
-    const visible = activeAgent === "dsh" && !dialogRequest && !closingWindow && !recoveryProject;
+    const visible = activeAgent === "dsh" && !dialogRequest && !closingWindow && !recoveryProject && !menuOpen;
     dshVisibility = dshVisibility.then(async () => {
       if (child) {
         if (visible) await child.show();
@@ -363,7 +366,7 @@
 
   function handleShortcut(event: KeyboardEvent) {
     if (startupPending || startupFailure) return;
-    const decision = hostShortcutDecision(event, shortcutContext());
+    const decision = hostShortcutDecision(event, shortcutContext(), menuOpen);
     if (decision.consume) { event.preventDefault(); event.stopPropagation(); }
     if (decision.command) runHostCommand(decision.command);
   }
@@ -854,6 +857,15 @@
     );
   }
 
+  /** 应用菜单：布局切换入口（顶栏不再保留「切换布局」按钮）。当前布局项禁用，兼作选中标记。 */
+  const menus = $derived.by(() => [
+    { label: t("视图"), items: [
+      { label: t("单任务"), disabled: layout === "single", action: () => changeLayout("single") },
+      { label: t("双列"), disabled: layout === "split", action: () => changeLayout("split") },
+      { label: t("网格"), disabled: layout === "grid", action: () => changeLayout("grid") },
+    ] },
+  ]);
+
   function removeTerminal(taskId: string) {
     terminalTaskIds = terminalTaskIds.filter((id) => id !== taskId);
     applyPaneSelection(
@@ -1206,10 +1218,6 @@
     <button type="button" class="rail-item" class:selected={activeAgent === "dsh"}
       aria-label={t("DSH 工作区")} aria-pressed={activeAgent === "dsh"}
       title={railTitle(t("DSH 工作区"), "dsh")} onclick={showDsh}><Globe size={18} /></button>
-    <button type="button" class="rail-item" class:selected={boardView && view === "workspace"}
-      aria-label={t("任务看板")} aria-pressed={boardView && view === "workspace"}
-      title={t("任务看板：总览所有任务状态")}
-      onclick={() => { if (!canLeaveSettings()) return; view = "workspace"; activeAgent = "pi"; boardView = !boardView; }}><LayoutGrid size={18} /></button>
     <div class="rail-spacer"></div>
     <button type="button" class="rail-item" class:selected={view !== "workspace"}
       aria-label={t("设置")} aria-pressed={view !== "workspace"} aria-keyshortcuts={shortcutAria("settings")}
@@ -1228,13 +1236,16 @@
       {/if}
     </div>
 
+    <AppMenu {menus} onOpenChange={(open) => { menuOpen = open; }} />
+
     <div class="toolbar">
       {#if activeAgent === "pi"}
         <button type="button" aria-label={t("切换 Git 变更栏")} title={showGit ? t("隐藏 Git 变更栏") : t("显示 Git 变更栏")}
           aria-pressed={showGit} onclick={() => { if (!canLeaveSettings()) return; gitVisible = !gitVisible; }}><GitBranch size={16} /></button>
-        <button type="button" aria-label={t("切换布局")} title={t("布局：{layout}（点击切换）", { layout: layout === "single" ? t("单任务") : layout === "split" ? t("双列") : t("网格") })}
-          onclick={() => changeLayout(layout === "single" ? "split" : layout === "split" ? "grid" : "single")}><LayoutGrid size={16} /></button>
       {/if}
+      <button type="button" aria-label={t("任务看板")} aria-pressed={boardView && view === "workspace"}
+        title={t("任务看板：总览所有任务状态")}
+        onclick={() => { if (!canLeaveSettings()) return; view = "workspace"; activeAgent = "pi"; boardView = !boardView; }}><Kanban size={16} /></button>
     </div>
   </header>
   <aside class="project-sidebar" class:panel-hidden={!showSidebar} aria-label={t("项目侧栏")}>
@@ -1532,4 +1543,6 @@
 <style>
   .recovery-error { position: absolute; inset: 0; z-index: 15; padding: 16px; background: var(--page-bg); overflow: auto; }
   .recovery-error p { overflow-wrap: anywhere; }
+  /* 顶栏三列：面包屑 / 应用菜单 / 工具按钮（app.css 的 .topbar 只声明了两列）。 */
+  .topbar { grid-template-columns: auto auto minmax(0, 1fr); }
 </style>

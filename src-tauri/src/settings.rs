@@ -178,7 +178,7 @@ pub struct SettingsStore {
 
 /// 把旧版 settings.json 字段迁移到当前结构：
 /// - `appFont`/`textFont`（枚举）→ `appFontName`/`sessionFontName`（具体字体族名）；
-/// - `theme: "winxp"` → `"win11"`。
+/// - 早期内置主题名 `theme: "winxp"` → 当前默认主题。
 pub(crate) fn migrate_legacy_settings(mut value: Value) -> Value {
     if let Some(name) = legacy_font_name(&value, "appFont") {
         value["appFontName"] = Value::String(name);
@@ -186,8 +186,9 @@ pub(crate) fn migrate_legacy_settings(mut value: Value) -> Value {
     if let Some(name) = legacy_font_name(&value, "textFont") {
         value["sessionFontName"] = Value::String(name);
     }
+    // 早期内置主题名已不存在，统一迁移到当前默认主题。
     if value.get("theme").and_then(Value::as_str) == Some("winxp") {
-        value["theme"] = Value::String("win11".into());
+        value["theme"] = Value::String(default_theme());
     }
     value
 }
@@ -415,7 +416,7 @@ pub async fn save_settings(app: AppHandle, settings: AppSettings) -> Result<(), 
 
 #[cfg(test)]
 mod tests {
-    use super::{migrate_legacy_settings, AppSettings, SettingsStore};
+    use super::{default_theme, migrate_legacy_settings, AppSettings, SettingsStore};
 
     #[test]
     fn loads_old_settings_with_new_defaults() {
@@ -483,7 +484,19 @@ mod tests {
         let settings: AppSettings = serde_json::from_value(migrate_legacy_settings(value)).unwrap();
         assert_eq!(settings.app_font_name, "Microsoft YaHei UI");
         assert_eq!(settings.session_font_name, "Inter");
+        assert_eq!(settings.theme, default_theme());
+    }
+
+    /// 内置主题被移除后，存量配置里的旧 id 依然合法（只校验格式），由前端 resolveTheme 回落默认主题。
+    #[test]
+    fn stored_win11_theme_id_is_accepted_and_kept() {
+        let value = serde_json::json!({
+            "schemaVersion": 1, "maxConcurrentTasks": 3, "lastProject": null,
+            "theme": "win11",
+        });
+        let settings: AppSettings = serde_json::from_value(value).unwrap();
         assert_eq!(settings.theme, "win11");
+        assert!(super::validate(&settings).is_ok());
     }
 
     #[test]

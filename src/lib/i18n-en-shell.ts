@@ -25,8 +25,6 @@ export const EN_SHELL: Record<string, string> = {
   "切换 Git 变更栏": "Toggle Git changes panel",
   "隐藏 Git 变更栏": "Hide Git changes panel",
   "显示 Git 变更栏": "Show Git changes panel",
-  "切换布局": "Toggle layout",
-  "布局：{layout}（点击切换）": "Layout: {layout} (click to switch)",
   "单任务": "Single task",
   "双列": "Two columns",
   "网格": "Grid",

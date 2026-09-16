@@ -134,59 +134,7 @@ export const COMMAND_FLOW_THEME: ThemePack = {
   },
 };
 
-/** 旧版默认主题，保留以兼容已有用户配置。 */
-export const WIN11_THEME: ThemePack = {
-  $schema: THEME_SCHEMA_URL,
-  id: "win11",
-  name: "Win11（经典深板岩）",
-  author: "DeepPi",
-  version: "1.0.0",
-  description: "DeepPi 早期默认主题，深板岩底色与薄荷绿强调色。",
-  colorScheme: "dark",
-  colors: {
-    pageBg: "#111412",
-    surface: "#191d1a",
-    surfaceAlt: "#161a17",
-    surfaceRaised: "#202521",
-    surfaceHover: "#252b27",
-    border: "#303832",
-    borderStrong: "#39423b",
-    text: "#d8ded9",
-    textStrong: "#f4f7f5",
-    textMuted: "#89928b",
-    textSubtle: "#778078",
-    accent: "#8fd6ad",
-    accentInk: "#111412",
-    statusWaiting: "#d9b06a",
-    statusRunning: "#8fd6ad",
-    statusFailed: "#d97b73",
-    statusDone: "#7fb2e0",
-  },
-  light: {
-    pageBg: "#f7f8fa",
-    surface: "#ffffff",
-    surfaceAlt: "#f4f5f7",
-    surfaceRaised: "#eef0f3",
-    surfaceHover: "#e8edef",
-    border: "#e8ebee",
-    borderStrong: "#c5cbd1",
-    text: "#293139",
-    textStrong: "#172129",
-    textMuted: "#56616a",
-    textSubtle: "#66717b",
-    accent: "#2f8a5d",
-    accentInk: "#ffffff",
-  },
-  typography: {
-    appFont: `system-ui, "Segoe UI", "Microsoft YaHei UI", sans-serif`,
-    sessionFont: `system-ui, "Segoe UI", "Microsoft YaHei UI", sans-serif`,
-    codeFont: `"Cascadia Mono", Consolas, monospace`,
-    appFontSize: 13,
-    sessionFontSize: 13,
-  },
-};
-
-export const BUILT_IN_THEMES: ThemePack[] = [COMMAND_FLOW_THEME, WIN11_THEME];
+export const BUILT_IN_THEMES: ThemePack[] = [COMMAND_FLOW_THEME];
 
 export const DEFAULT_THEME_ID = COMMAND_FLOW_THEME.id;
 

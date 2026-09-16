@@ -183,7 +183,7 @@ pub struct ModelProfileRequest {
     model_id: String,
 }
 
-fn http_agent() -> ureq::Agent {
+pub(crate) fn http_agent() -> ureq::Agent {
     ureq::Agent::config_builder()
         .timeout_global(Some(REQUEST_TIMEOUT))
         .https_only(true)
@@ -191,7 +191,7 @@ fn http_agent() -> ureq::Agent {
         .new_agent()
 }
 
-fn read_response(body: &mut ureq::Body) -> Result<String, String> {
+pub(crate) fn read_response(body: &mut ureq::Body) -> Result<String, String> {
     body.with_config()
         .limit(MAX_RESPONSE_BYTES)
         .lossy_utf8(true)
@@ -206,16 +206,51 @@ fn html_attribute(tag: &str, name: &str) -> Option<String> {
     Some(tag[start..end].to_owned())
 }
 
-fn decode_entities(value: &str) -> String {
-    value
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
+pub(crate) fn decode_entities(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(start) = rest.find('&') {
+        out.push_str(&rest[..start]);
+        let Some(end) = rest[start..].find(';').map(|offset| start + offset) else {
+            out.push_str(&rest[start..]);
+            return out;
+        };
+        let entity = &rest[start + 1..end];
+        match decode_entity(entity) {
+            Some(character) => out.push(character),
+            None => out.push_str(&rest[start..=end]),
+        }
+        rest = &rest[end + 1..];
+    }
+    out.push_str(rest);
+    out
 }
 
-fn strip_tags(value: &str) -> String {
+/// 单个实体（`&` 与 `;` 之间的内容）→ 字符；未知实体返回 `None`（原样保留）。
+fn decode_entity(entity: &str) -> Option<char> {
+    match entity {
+        "amp" => Some('&'),
+        "lt" => Some('<'),
+        "gt" => Some('>'),
+        "quot" => Some('"'),
+        "apos" => Some('\''),
+        "nbsp" => Some(' '),
+        numeric => {
+            let code = numeric
+                .strip_prefix("#x")
+                .or_else(|| numeric.strip_prefix("#X"))
+                .and_then(|hex| u32::from_str_radix(hex, 16).ok())
+                .or_else(|| {
+                    numeric
+                        .strip_prefix('#')
+                        .and_then(|digits| digits.parse().ok())
+                })?;
+            char::from_u32(code)
+        }
+    }
+}
+
+pub(crate) fn strip_tags(value: &str) -> String {
     let mut text = String::with_capacity(value.len());
     let mut in_tag = false;
     for character in value.chars() {

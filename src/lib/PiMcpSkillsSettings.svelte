@@ -2,7 +2,6 @@
   import { invoke as nativeInvoke } from "@tauri-apps/api/core";
   import { Download, Plus, RefreshCw, Search, Store, Trash2 } from "@lucide/svelte";
   import { onDestroy, onMount } from "svelte";
-  import { createOperationRunner, type OperationState } from "./operation";
   import { t } from "$lib/i18n.svelte";
 
   interface McpServerEntry {
@@ -16,27 +15,75 @@
     path: string;
   }
 
-  interface McpRegistryEntry {
+  /** agenticskills.io 技能条目（后端 search_agentic_skills 返回）。 */
+  interface AgenticSkillEntry {
+    slug: string;
     name: string;
-    description: string;
-    version: string | null;
-    repository: string | null;
-    remoteUrl: string | null;
-    package: string | null;
+    description?: string | null;
+    author?: string | null;
+    tags?: string[];
+    installs?: number | null;
+    quality?: string | number | null;
+    featured?: boolean;
   }
 
-  interface PiPackage {
+  interface AgenticSkillDetail {
+    slug: string;
     name: string;
-    description: string;
-    types: string[];
-    downloads: number;
-    publishedAt: number;
-    path: string;
+    description?: string | null;
+    longDescription?: string | null;
+    author?: string | null;
+    authorUrl?: string | null;
+    tags?: string[];
+    platforms?: string[];
+    license?: string | null;
+    quality?: string | number | null;
+    lastUpdated?: string | null;
+    githubUrl?: string | null;
+    skillMdUrl?: string | null;
+    installCommand?: string | null;
+    sourceUrl?: string | null;
   }
 
-  interface PackageMetadata {
-    version: string;
-    license: string | null;
+  /** agenticskills.io MCP 服务器条目（后端 search_agentic_mcp 返回）。 */
+  interface AgenticMcpEntry {
+    slug: string;
+    name: string;
+    description?: string | null;
+    author?: string | null;
+    category?: string | null;
+    transport?: string[];
+    official?: boolean;
+    requiresApiKey?: boolean;
+    popularity?: number | null;
+    tags?: string[];
+    featured?: boolean;
+  }
+
+  interface AgenticMcpSnippet {
+    label: string;
+    file?: string | null;
+    code: string;
+  }
+
+  interface AgenticMcpDetail {
+    slug: string;
+    name: string;
+    description?: string | null;
+    longDescription?: string | null;
+    author?: string | null;
+    authorUrl?: string | null;
+    category?: string | null;
+    official?: boolean;
+    trustLevel?: string | null;
+    transport?: string[];
+    requiresApiKey?: boolean;
+    websiteUrl?: string | null;
+    configSource?: string | null;
+    popularity?: number | null;
+    tags?: string[];
+    snippets?: AgenticMcpSnippet[];
+    sourceUrl?: string | null;
   }
 
   interface Props {
@@ -50,7 +97,6 @@
 
   let { mode, confirm, onError, projectPath = null, onBusyChange = () => {}, invokeCommand = nativeInvoke }: Props = $props();
   const invoke = <T,>(command: string, args?: Parameters<typeof nativeInvoke>[1]) => invokeCommand<T>(command, args);
-  const operations = createOperationRunner(invoke, (state: OperationState | null) => { operationState = state; });
 
   let scope = $state<"global" | "project">("global");
   let tab = $state<"installed" | "market">("installed");
@@ -59,20 +105,26 @@
   let loading = $state(false);
   let busy = $state(false);
   let statusMessage = $state("");
-  let operationState = $state<OperationState | null>(null);
 
-  // 市场搜索状态（MCP 与 Skills 各自独立）。
+  // 市场状态（MCP 与 Skills 各自独立）。
+  // 目录来自 agenticskills.io：进入市场 tab 时拉一次全量，输入框只在本地过滤。
   let mcpQuery = $state("");
-  let mcpEntries = $state<McpRegistryEntry[]>([]);
+  let mcpEntries = $state<AgenticMcpEntry[]>([]);
   let mcpLoading = $state(false);
   let mcpSearched = $state(false);
   let busyMcpEntry = $state<string | null>(null);
+  let mcpDetailSlug = $state<string | null>(null);
+  let mcpDetail = $state<AgenticMcpDetail | null>(null);
+  let mcpDetailLoading = $state<string | null>(null);
 
   let skillQuery = $state("");
-  let skillPackages = $state<PiPackage[]>([]);
+  let skillEntries = $state<AgenticSkillEntry[]>([]);
   let skillLoading = $state(false);
   let skillSearched = $state(false);
-  let busySkillPackage = $state<string | null>(null);
+  let busySkillEntry = $state<string | null>(null);
+  let skillDetailSlug = $state<string | null>(null);
+  let skillDetail = $state<AgenticSkillDetail | null>(null);
+  let skillDetailLoading = $state<string | null>(null);
 
   let serverName = $state("");
   let serverConfig = $state("");
@@ -84,8 +136,45 @@
   $effect(() => {
     if (!canUseProjectScope && scope === "project") scope = "global";
   });
-  const componentBusy = $derived(busy || busyMcpEntry !== null || busySkillPackage !== null);
+  const componentBusy = $derived(
+    busy ||
+      busyMcpEntry !== null ||
+      busySkillEntry !== null ||
+      mcpDetailLoading !== null ||
+      skillDetailLoading !== null,
+  );
   $effect(() => onBusyChange(componentBusy));
+
+  /** 已加载的全量目录按关键词本地过滤，输入时不打后端。 */
+  const filteredMcpEntries = $derived(
+    mcpEntries.filter((entry) =>
+      matchesKeyword(mcpQuery, entry.name, entry.slug, entry.description, entry.author, entry.category),
+    ),
+  );
+  const filteredSkillEntries = $derived(
+    skillEntries.filter((entry) =>
+      matchesKeyword(skillQuery, entry.name, entry.slug, entry.description, entry.author),
+    ),
+  );
+
+  // 详情面板的派生值：展开哪一条就渲染哪一条，避免模板里到处判空。
+  const skillDetailLongDescription = $derived(skillDetail?.longDescription || skillDetail?.description || "");
+  const skillDetailTags = $derived(skillDetail?.tags ?? []);
+  const skillDetailPlatforms = $derived(skillDetail?.platforms ?? []);
+  const skillDetailLicense = $derived(skillDetail?.license ?? "");
+  const skillDetailUpdated = $derived(skillDetail?.lastUpdated ?? "");
+  const skillDetailSiteUrl = $derived(skillSiteUrl(skillDetail));
+  const skillDetailSkillMdUrl = $derived(skillDetail?.skillMdUrl ?? "");
+
+  const mcpDetailLongDescription = $derived(mcpDetail?.longDescription || mcpDetail?.description || "");
+  const mcpDetailAuthor = $derived(mcpDetail?.author ?? "");
+  const mcpDetailTrustLevel = $derived(mcpDetail?.trustLevel ?? "");
+  const mcpDetailConfigSource = $derived(mcpDetail?.configSource ?? "");
+  const mcpDetailTags = $derived(mcpDetail?.tags ?? []);
+  const mcpDetailSnippets = $derived(mcpDetail?.snippets ?? []);
+  const mcpDetailSiteUrl = $derived(mcpSiteUrl(mcpDetail));
+  const mcpDetailWebsiteUrl = $derived(mcpDetail?.websiteUrl ?? "");
+
   onDestroy(() => onBusyChange(false));
 
   async function refresh() {
@@ -213,28 +302,68 @@
     }
   }
 
-  // ---------- MCP 市场（官方 registry.modelcontextprotocol.io） ----------
+  // ---------- 市场目录（agenticskills.io；后端负责抓取与解析） ----------
 
-  function shortServerName(registryName: string): string {
-    const segment = registryName.includes("/") ? registryName.split("/").pop() ?? registryName : registryName;
-    const cleaned = segment.replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^[-_]+|[-_]+$/g, "");
-    if (!cleaned) return "mcp-server";
-    return cleaned.length > 64 ? cleaned.slice(0, 64) : cleaned;
+  /** 站点根地址：详情里缺少 sourceUrl/websiteUrl 时用它兜底，不引入额外依赖。 */
+  const AGENTIC_SKILLS_SITE = "https://agenticskills.io";
+
+  /** 关键词本地过滤：命中 名称 / slug / 描述 / 作者（大小写不敏感），空关键词不过滤。 */
+  function matchesKeyword(keyword: string, ...values: (string | null | undefined)[]): boolean {
+    const needle = keyword.trim().toLowerCase();
+    if (!needle) return true;
+    return values.some((value) => (value ?? "").toLowerCase().includes(needle));
   }
 
-  function mcpConfigFromEntry(entry: McpRegistryEntry): Record<string, unknown> | null {
-    if (entry.remoteUrl) return { url: entry.remoteUrl };
-    if (entry.package && !entry.package.includes("://")) {
-      return { command: "npx", args: ["-y", entry.package] };
+  /** 列表行最多展示的标签数。 */
+  function topTags(tags: string[] | null | undefined, limit = 3): string[] {
+    return (tags ?? []).slice(0, limit);
+  }
+
+  /** 数字指标用 K/M 缩写（安装量、热度）；字符串（如质量等级）原样显示；缺失返回空串。 */
+  function formatAmount(value: number | string | null | undefined): string {
+    if (typeof value === "number") return formatDownloads(value);
+    if (value === null || value === undefined) return "";
+    return String(value);
+  }
+
+  function skillSiteUrl(detail: AgenticSkillDetail | null | undefined): string {
+    if (!detail) return AGENTIC_SKILLS_SITE;
+    return detail.sourceUrl || detail.githubUrl || `${AGENTIC_SKILLS_SITE}/skills/${detail.slug}`;
+  }
+
+  function mcpSiteUrl(detail: AgenticMcpDetail | null | undefined): string {
+    if (!detail) return AGENTIC_SKILLS_SITE;
+    return detail.sourceUrl || detail.websiteUrl || `${AGENTIC_SKILLS_SITE}/mcp/${detail.slug}`;
+  }
+
+  /** 用系统浏览器打开站点链接；opener 插件不可用时回落到 window.open。 */
+  async function openSiteUrl(url: string | null | undefined) {
+    if (!url) return;
+    try {
+      const { openUrl } = await import("@tauri-apps/plugin-opener");
+      await openUrl(url);
+    } catch {
+      window.open(url, "_blank", "noopener,noreferrer");
     }
-    return null;
   }
 
-  async function searchMcpMarket() {
+  /** 首次进入市场 tab 时按需拉一次全量目录（query 为空串）。 */
+  function ensureMarketLoaded() {
+    if (mode === "mcp") {
+      if (!mcpSearched && !mcpLoading) void loadMcpMarket();
+      return;
+    }
+    if (!skillSearched && !skillLoading) void loadSkillMarket();
+  }
+
+  async function loadMcpMarket() {
+    if (mcpLoading) return;
     mcpLoading = true;
     mcpSearched = true;
     try {
-      mcpEntries = await invoke<McpRegistryEntry[]>("search_mcp_registry", { request: { query: mcpQuery.trim() } });
+      mcpEntries = await invoke<AgenticMcpEntry[]>("search_agentic_mcp", { request: { query: "" } });
+      mcpDetailSlug = null;
+      mcpDetail = null;
     } catch (error) {
       onError(error);
     } finally {
@@ -242,31 +371,69 @@
     }
   }
 
-  async function installMcpEntry(entry: McpRegistryEntry) {
-    if (busyMcpEntry) return;
-    const config = mcpConfigFromEntry(entry);
-    if (!config) {
-      onError(t("该条目没有可自动写入的传输配置，请手动添加"));
+  async function loadSkillMarket() {
+    if (skillLoading) return;
+    skillLoading = true;
+    skillSearched = true;
+    try {
+      skillEntries = await invoke<AgenticSkillEntry[]>("search_agentic_skills", { request: { query: "" } });
+      skillDetailSlug = null;
+      skillDetail = null;
+    } catch (error) {
+      onError(error);
+    } finally {
+      skillLoading = false;
+    }
+  }
+
+  async function toggleMcpDetail(entry: AgenticMcpEntry) {
+    if (mcpDetailSlug === entry.slug) {
+      mcpDetailSlug = null;
+      mcpDetail = null;
       return;
     }
-    const name = shortServerName(entry.name);
-    busyMcpEntry = entry.name;
+    mcpDetailSlug = entry.slug;
+    mcpDetail = null;
+    mcpDetailLoading = entry.slug;
     try {
-      if (servers.some((server) => server.name === name)) {
-        if (!(await confirm(t("覆盖 MCP 服务"), t("已存在同名 MCP 服务 “{name}”，覆盖其配置吗？", { name }), t("覆盖")))) return;
-      } else if (
-        !(await confirm(
-          t("添加 MCP 服务"),
-          t("把 “{name}” 添加到{scope} MCP 配置吗？", { name, scope: scope === "project" ? t("项目") : t("全局") }),
-          t("添加"),
-        ))
-      ) {
-        return;
-      }
-      await invoke("save_mcp_server", { request: { name, config, scope, projectPath } });
+      const detail = await invoke<AgenticMcpDetail>("agentic_mcp_detail", { request: { slug: entry.slug } });
+      if (mcpDetailSlug === entry.slug) mcpDetail = detail;
+    } catch (error) {
+      if (mcpDetailSlug === entry.slug) mcpDetailSlug = null;
+      onError(error);
+    } finally {
+      if (mcpDetailLoading === entry.slug) mcpDetailLoading = null;
+    }
+  }
+
+  async function toggleSkillDetail(entry: AgenticSkillEntry) {
+    if (skillDetailSlug === entry.slug) {
+      skillDetailSlug = null;
+      skillDetail = null;
+      return;
+    }
+    skillDetailSlug = entry.slug;
+    skillDetail = null;
+    skillDetailLoading = entry.slug;
+    try {
+      const detail = await invoke<AgenticSkillDetail>("agentic_skill_detail", { request: { slug: entry.slug } });
+      if (skillDetailSlug === entry.slug) skillDetail = detail;
+    } catch (error) {
+      if (skillDetailSlug === entry.slug) skillDetailSlug = null;
+      onError(error);
+    } finally {
+      if (skillDetailLoading === entry.slug) skillDetailLoading = null;
+    }
+  }
+
+  async function installAgenticMcp(entry: AgenticMcpEntry) {
+    if (busyMcpEntry) return;
+    busyMcpEntry = entry.slug;
+    try {
+      const installed = await invoke<string>("install_agentic_mcp", { request: { slug: entry.slug, scope, projectPath } });
       statusMessage = t("MCP 服务 {name} 已添加{detail}；新服务在重启 Pi 任务后生效", {
-        name,
-        detail: entry.remoteUrl ? t("（远程传输）") : t("（本地命令 {package}）", { package: String(entry.package) }),
+        name: installed || entry.name,
+        detail: t("（来自 agenticskills.io）"),
       });
       await refresh();
     } catch (error) {
@@ -276,52 +443,17 @@
     }
   }
 
-  // ---------- Skills 市场（pi.dev 官方目录，skill 类型） ----------
-
-  async function searchSkillMarket() {
-    skillLoading = true;
-    skillSearched = true;
+  async function installAgenticSkill(entry: AgenticSkillEntry) {
+    if (busySkillEntry) return;
+    busySkillEntry = entry.slug;
     try {
-      skillPackages = await invoke<PiPackage[]>("search_pi_packages", {
-        request: { query: skillQuery.trim(), types: ["skill"] },
-      });
-    } catch (error) {
-      onError(error);
-    } finally {
-      skillLoading = false;
-    }
-  }
-
-  async function installSkillPackage(pkg: PiPackage) {
-    if (busySkillPackage) return;
-    busySkillPackage = pkg.name;
-    try {
-      const metadata = await invoke<PackageMetadata>("pi_package_metadata", { request: { name: pkg.name } });
-      if (
-        !(await confirm(
-          t("安装 Skill Package"),
-          t("安装 {name}@{version} 吗？安装会运行 Pi 包管理器，期间需要停止所有 Pi 任务。", {
-            name: pkg.name,
-            version: metadata.version,
-          }),
-          t("安装"),
-        ))
-      ) {
-        return;
-      }
-      await operations.run("package_operation", {
-        operation: "install",
-        spec: `npm:${pkg.name}@${metadata.version}`,
-        scope,
-        projectPath,
-        environment: "managed",
-      });
-      statusMessage = t("{name} 已安装；技能在重启 Pi 任务后生效", { name: pkg.name });
+      const installed = await invoke<string>("install_agentic_skill", { request: { slug: entry.slug, scope, projectPath } });
+      statusMessage = t("已安装技能 {name}", { name: installed || entry.name });
       await refresh();
     } catch (error) {
       onError(error);
     } finally {
-      busySkillPackage = null;
+      busySkillEntry = null;
     }
   }
 
@@ -329,12 +461,6 @@
     if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
     if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
     return String(value);
-  }
-
-  function installSummary(entry: McpRegistryEntry): string {
-    if (entry.remoteUrl) return t("远程 · {url}", { url: entry.remoteUrl });
-    if (entry.package) return t("本地 · {package}", { package: entry.package });
-    return t("无可用传输配置");
   }
 </script>
 
@@ -350,7 +476,7 @@
     <div class="scope-switch tab-switch" role="tablist" aria-label={t("视图")}>
       <button type="button" class:active={tab === "installed"} aria-pressed={tab === "installed"}
         onclick={() => { tab = "installed"; void refresh(); }}>{t("已安装")}</button>
-      <button type="button" class:active={tab === "market"} aria-pressed={tab === "market"} onclick={() => { tab = "market"; }}>
+      <button type="button" class:active={tab === "market"} aria-pressed={tab === "market"} onclick={() => { tab = "market"; ensureMarketLoaded(); }}>
         {t("市场")}
       </button>
     </div>
@@ -432,79 +558,150 @@
   {:else if mode === "mcp"}
     <section class="settings-group">
       <div class="group-header">
-        <h3>{t("MCP 市场官方目录")}</h3>
-        <span class="muted">registry.modelcontextprotocol.io</span>
+        <h3>{t("MCP 市场")}</h3>
+        <span class="muted">{t("市场来源：agenticskills.io")}</span>
       </div>
-      <form class="market-search" onsubmit={(event) => { event.preventDefault(); void searchMcpMarket(); }}>
+      <form class="market-search" onsubmit={(event) => { event.preventDefault(); void loadMcpMarket(); }}>
         <Search size={14} />
-        <input bind:value={mcpQuery} placeholder={t("搜索 MCP 服务（如 context7、fetch）")} aria-label={t("搜索 MCP 市场")} autocomplete="off" />
-        <button type="submit" class="primary-action" disabled={mcpLoading || busyMcpEntry !== null} aria-label={t("搜索")}>
-          {#if mcpLoading}<span class="spin"><RefreshCw size={13} /></span>{:else}<Search size={13} />{/if}
-          {t("搜索")}
+        <input bind:value={mcpQuery} placeholder={t("按名称、作者或分类筛选 MCP 服务…")} aria-label={t("筛选 MCP 服务")} autocomplete="off" />
+        <button type="submit" class="primary-action compact" disabled={mcpLoading || busyMcpEntry !== null} aria-label={t("刷新市场")} title={t("刷新市场")}>
+          {#if mcpLoading}<span class="spin"><RefreshCw size={13} /></span>{:else}<RefreshCw size={13} />{/if}
+          {t("刷新市场")}
         </button>
       </form>
-      {#if mcpLoading}
+      {#if mcpLoading && mcpEntries.length === 0}
         <p class="muted" role="status">{t("正在加载 MCP 目录…")}</p>
-      {:else if mcpSearched && mcpEntries.length === 0}
+      {:else if filteredMcpEntries.length === 0}
         <p class="muted" role="status">{t("没有匹配的 MCP 服务")}</p>
-      {:else if mcpEntries.length === 0}
-        <p class="muted" role="status">{t("输入关键词搜索官方 MCP 注册表，选择后一键写入 MCP 配置。")}</p>
       {:else}
         <ul class="entry-list market-list">
-          {#each mcpEntries as entry (entry.name)}
+          {#each filteredMcpEntries as entry (entry.slug)}
             <li>
               <div class="entry-main">
-                <strong>{entry.name}{entry.version ? ` · v${entry.version}` : ""}</strong>
-                <small>{entry.description || installSummary(entry)}</small>
+                <strong>{entry.name}</strong>
+                <small>{entry.description || entry.slug}</small>
+                <span class="market-meta">
+                  {#if entry.author}<span>{t("作者：{author}", { author: entry.author })}</span>{/if}
+                  {#if entry.category}<span>{t("分类：{category}", { category: entry.category })}</span>{/if}
+                  {#if (entry.transport ?? []).length}<span>{t("传输：{transport}", { transport: (entry.transport ?? []).join(" · ") })}</span>{/if}
+                  {#if formatAmount(entry.popularity)}<span class="downloads">{t("热度 {count}", { count: formatAmount(entry.popularity) })}</span>{/if}
+                  {#if entry.official}<span class="market-flag">{t("官方")}</span>{/if}
+                  {#if entry.requiresApiKey}<span class="market-flag">{t("需要 API Key")}</span>{/if}
+                </span>
               </div>
-              <button type="button" class="primary-action compact" disabled={busyMcpEntry !== null} title={installSummary(entry)}
-                onclick={() => void installMcpEntry(entry)}>
-                {#if busyMcpEntry === entry.name}<span class="spin"><RefreshCw size={12} /></span>{:else}<Download size={12} />{/if}
+              <span class="market-source">agenticskills.io</span>
+              <button type="button" class="secondary-action" disabled={mcpDetailLoading !== null} onclick={() => void toggleMcpDetail(entry)}>
+                {mcpDetailLoading === entry.slug ? t("加载中…") : mcpDetailSlug === entry.slug ? t("收起") : t("详情")}
+              </button>
+              <button type="button" class="primary-action compact" disabled={busyMcpEntry !== null} onclick={() => void installAgenticMcp(entry)}>
+                {#if busyMcpEntry === entry.slug}<span class="spin"><RefreshCw size={12} /></span>{:else}<Download size={12} />{/if}
                 {t("添加")}
               </button>
+              {#if mcpDetailSlug === entry.slug}
+                <div class="market-detail">
+                  {#if mcpDetailLoading === entry.slug}
+                    <p class="muted" role="status">{t("正在加载详情…")}</p>
+                  {:else if mcpDetail}
+                    {#if mcpDetailLongDescription}<p class="detail-text">{mcpDetailLongDescription}</p>{/if}
+                    <div class="detail-row">
+                      {#if mcpDetailAuthor}<span>{t("作者：{author}", { author: mcpDetailAuthor })}</span>{/if}
+                      {#if mcpDetailTrustLevel}<span>{t("信任等级：{level}", { level: mcpDetailTrustLevel })}</span>{/if}
+                      {#if mcpDetailConfigSource}<span>{t("配置来源：{source}", { source: mcpDetailConfigSource })}</span>{/if}
+                      {#if mcpDetailTags.length}<span>{topTags(mcpDetailTags, 6).join(" · ")}</span>{/if}
+                    </div>
+                    {#if mcpDetailSnippets.length}
+                      <small>{t("配置片段")}</small>
+                      {#each mcpDetailSnippets as snippet, index (`${snippet.label}-${index}`)}
+                        <small>{snippet.label}{snippet.file ? ` · ${snippet.file}` : ""}</small>
+                        <pre class="detail-pre">{snippet.code}</pre>
+                      {/each}
+                    {/if}
+                    <div class="detail-actions">
+                      <button type="button" class="link-action" onclick={() => void openSiteUrl(mcpDetailSiteUrl)}>{t("在站点打开")}</button>
+                      {#if mcpDetailWebsiteUrl}
+                        <button type="button" class="link-action" onclick={() => void openSiteUrl(mcpDetailWebsiteUrl)}>{t("打开官网")}</button>
+                      {/if}
+                    </div>
+                  {/if}
+                </div>
+              {/if}
             </li>
           {/each}
         </ul>
+        <p class="muted" role="status">{t("共 {total} 条，匹配 {shown} 条", { total: mcpEntries.length, shown: filteredMcpEntries.length })}</p>
       {/if}
+      <p class="muted" role="status">{t("筛选目录后点击「添加」，新服务在重启 Pi 任务后生效。")}</p>
     </section>
   {:else}
     <section class="settings-group">
       <div class="group-header">
         <h3>{t("Skills 市场")}</h3>
-        <span class="muted">{t("pi.dev 官方目录 · skill 类型")}</span>
+        <span class="muted">{t("市场来源：agenticskills.io")}</span>
       </div>
-      <form class="market-search" onsubmit={(event) => { event.preventDefault(); void searchSkillMarket(); }}>
+      <form class="market-search" onsubmit={(event) => { event.preventDefault(); void loadSkillMarket(); }}>
         <Search size={14} />
-        <input bind:value={skillQuery} placeholder={t("搜索 Skill 包")} aria-label={t("搜索 Skills 市场")} autocomplete="off" />
-        <button type="submit" class="primary-action" disabled={skillLoading || busySkillPackage !== null} aria-label={t("搜索")}>
-          {#if skillLoading}<span class="spin"><RefreshCw size={13} /></span>{:else}<Search size={13} />{/if}
-          {t("搜索")}
+        <input bind:value={skillQuery} placeholder={t("按名称、作者或关键词筛选技能…")} aria-label={t("筛选技能")} autocomplete="off" />
+        <button type="submit" class="primary-action compact" disabled={skillLoading || busySkillEntry !== null} aria-label={t("刷新市场")} title={t("刷新市场")}>
+          {#if skillLoading}<span class="spin"><RefreshCw size={13} /></span>{:else}<RefreshCw size={13} />{/if}
+          {t("刷新市场")}
         </button>
       </form>
-      {#if skillLoading}
+      {#if skillLoading && skillEntries.length === 0}
         <p class="muted" role="status">{t("正在加载 Skills 目录…")}</p>
-      {:else if skillSearched && skillPackages.length === 0}
-        <p class="muted" role="status">{t("没有匹配的 Skill 包")}</p>
-      {:else if skillPackages.length === 0}
-        <p class="muted" role="status">{t("输入关键词搜索 pi.dev 官方目录中的 Skill 包；安装会运行 Pi 包管理器。")}</p>
+      {:else if filteredSkillEntries.length === 0}
+        <p class="muted" role="status">{t("没有匹配的技能")}</p>
       {:else}
         <ul class="entry-list market-list">
-          {#each skillPackages as pkg (pkg.name)}
+          {#each filteredSkillEntries as entry (entry.slug)}
+            {@const tags = topTags(entry.tags)}
             <li>
               <div class="entry-main">
-                <strong>{pkg.name}</strong>
-                <small>{pkg.description || pkg.types.join(" · ")}</small>
+                <strong>{entry.name}</strong>
+                <small>{entry.description || entry.slug}</small>
+                <span class="market-meta">
+                  {#if entry.author}<span>{t("作者：{author}", { author: entry.author })}</span>{/if}
+                  {#if formatAmount(entry.installs)}<span class="downloads">{t("安装量 {count}", { count: formatAmount(entry.installs) })}</span>{/if}
+                  {#if formatAmount(entry.quality)}<span>{t("质量 {level}", { level: formatAmount(entry.quality) })}</span>{/if}
+                  {#each tags as tag (tag)}<span class="tag">{tag}</span>{/each}
+                </span>
               </div>
-              <span class="downloads">{t("{count}/月", { count: formatDownloads(pkg.downloads) })}</span>
-              <button type="button" class="primary-action compact" disabled={busySkillPackage !== null} onclick={() => void installSkillPackage(pkg)}>
-                {#if busySkillPackage === pkg.name}<span class="spin"><RefreshCw size={12} /></span>{:else}<Store size={12} />{/if}
+              <span class="market-source">agenticskills.io</span>
+              <button type="button" class="secondary-action" disabled={skillDetailLoading !== null} onclick={() => void toggleSkillDetail(entry)}>
+                {skillDetailLoading === entry.slug ? t("加载中…") : skillDetailSlug === entry.slug ? t("收起") : t("详情")}
+              </button>
+              <button type="button" class="primary-action compact" disabled={busySkillEntry !== null} onclick={() => void installAgenticSkill(entry)}>
+                {#if busySkillEntry === entry.slug}<span class="spin"><RefreshCw size={12} /></span>{:else}<Store size={12} />{/if}
                 {t("安装")}
               </button>
+              {#if skillDetailSlug === entry.slug}
+                <div class="market-detail">
+                  {#if skillDetailLoading === entry.slug}
+                    <p class="muted" role="status">{t("正在加载详情…")}</p>
+                  {:else if skillDetail}
+                    {#if skillDetailLongDescription}<p class="detail-text">{skillDetailLongDescription}</p>{/if}
+                    <div class="detail-row">
+                      {#if skillDetailLicense}<span>{t("许可证：{license}", { license: skillDetailLicense })}</span>{/if}
+                      {#if skillDetailPlatforms.length}<span>{t("平台：{platforms}", { platforms: skillDetailPlatforms.join(" · ") })}</span>{/if}
+                      {#if skillDetailUpdated}<span>{t("最近更新：{date}", { date: skillDetailUpdated })}</span>{/if}
+                    </div>
+                    {#if topTags(skillDetailTags, 6).length}
+                      <span class="market-meta">{#each topTags(skillDetailTags, 6) as tag (tag)}<span class="tag">{tag}</span>{/each}</span>
+                    {/if}
+                    <div class="detail-actions">
+                      <button type="button" class="link-action" onclick={() => void openSiteUrl(skillDetailSiteUrl)}>{t("在站点打开")}</button>
+                      {#if skillDetailSkillMdUrl}
+                        <button type="button" class="link-action" onclick={() => void openSiteUrl(skillDetailSkillMdUrl)}>{t("打开 SKILL.md")}</button>
+                      {/if}
+                    </div>
+                  {/if}
+                </div>
+              {/if}
             </li>
           {/each}
         </ul>
+        <p class="muted" role="status">{t("共 {total} 条，匹配 {shown} 条", { total: skillEntries.length, shown: filteredSkillEntries.length })}</p>
       {/if}
-      <p class="muted" role="status">{t("安装由 Pi 包管理器执行，需要先停止所有 Pi 任务；安装失败会自动回滚。")}</p>
+      <p class="muted" role="status">{t("技能来自 agenticskills.io，安装后重启 Pi 任务生效。")}</p>
     </section>
   {/if}
   {#if statusMessage}<p class="status" role="status">{statusMessage}</p>{/if}
@@ -543,4 +740,18 @@
   .spin { display: inline-grid; animation: mcp-spin 0.8s linear infinite; }
   @keyframes mcp-spin { to { transform: rotate(360deg); } }
   button:disabled { opacity: .45; cursor: default; }
+  /* ---------- 市场列表（agenticskills.io） ---------- */
+  .market-list li { flex-wrap: wrap; }
+  .market-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 10px; color: var(--text-muted); }
+  .market-flag { flex-shrink: 0; padding: 1px 5px; border: 1px solid var(--border-strong); border-radius: 3px; color: var(--text); font-size: 10px; }
+  .market-source { flex-shrink: 0; padding: 1px 5px; border: 1px solid var(--border); border-radius: 3px; color: var(--text-muted); font-size: 10px; }
+  .tag { padding: 1px 5px; border-radius: 3px; background: var(--surface-hover); color: var(--text-muted); font-size: 10px; }
+  .secondary-action { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; min-height: 26px; padding: 0 10px; border: 1px solid var(--border); border-radius: 4px; background: transparent; color: var(--text-muted); font-size: 11px; cursor: pointer; }
+  .secondary-action:hover:not(:disabled) { border-color: var(--border-strong); color: var(--text); background: var(--surface-hover); }
+  .market-detail { flex: 1 1 100%; min-width: 0; display: grid; gap: 6px; margin-top: 4px; padding-top: 8px; border-top: 1px solid var(--border); }
+  .detail-text { margin: 0; font-size: 11px; line-height: 1.5; color: var(--text-muted); white-space: pre-wrap; }
+  .detail-row { display: flex; flex-wrap: wrap; gap: 10px; font-size: 11px; color: var(--text-muted); }
+  .detail-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+  .link-action { padding: 0; border: 0; background: transparent; color: var(--accent); font: inherit; font-size: 11px; text-decoration: underline; cursor: pointer; }
+  .detail-pre { max-height: 220px; margin: 0; padding: 8px 10px; overflow: auto; border: 1px solid var(--border); border-radius: 4px; background: var(--page-bg); color: var(--text); font-family: var(--code-font); font-size: 11px; white-space: pre-wrap; word-break: break-word; }
 </style>

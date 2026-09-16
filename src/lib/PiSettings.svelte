@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ArrowLeft, Monitor, Palette, Server, Download, PackageOpen, Puzzle, Sparkles, Wrench, Globe, Upload, Trash2, Check } from "@lucide/svelte";
+  import { ArrowLeft, Monitor, Palette, Server, Download, PackageOpen, Puzzle, Sparkles, Wrench, Globe, Upload, Trash2 } from "@lucide/svelte";
   import type { Snippet } from "svelte";
   import { onMount } from "svelte";
   import { invoke as nativeInvoke } from "@tauri-apps/api/core";
@@ -56,6 +56,10 @@
 
   const activeTheme = $derived(resolveTheme(runtime.settings.theme, runtime.settings.customThemes ?? []));
   const themeOptions = $derived([...BUILT_IN_THEMES, ...(runtime.settings.customThemes ?? [])]);
+  /** 下拉中当前选中的主题；旧配置里的未知 id 由 resolveTheme 回落到默认主题。 */
+  const selectedTheme = $derived(themeOptions.find((option) => option.id === runtime.settings.theme) ?? activeTheme);
+  /** 选中的主题若是用户导入的，则允许删除。 */
+  const selectedCustomTheme = $derived((runtime.settings.customThemes ?? []).find((theme) => theme.id === runtime.settings.theme));
   let themeBusy = $state(false);
   let themeNotice = $state("");
   let themeError = $state("");
@@ -233,29 +237,28 @@
             </div>
           </div>
           <p class="muted">{t("主题以 ")}<code>.deeppi-theme.json</code>{t(" 文件分发，包含配色与字体令牌；可导出分享，也可导入他人的主题。")}</p>
-          <ul class="theme-list">
-            {#each themeOptions as option (option.id)}
-              <li class:active={option.id === runtime.settings.theme} class="theme-item">
-                <button type="button" class="theme-pick" aria-pressed={option.id === runtime.settings.theme}
-                  onclick={() => selectTheme(option.id)}>
-                  <span class="theme-swatches" aria-hidden="true">
-                    <span style={`background:${option.colors.pageBg}`}></span>
-                    <span style={`background:${option.colors.surface}`}></span>
-                    <span style={`background:${option.colors.accent}`}></span>
-                  </span>
-                  <span class="theme-copy">
-                    <strong>{t(option.name)}</strong>
-                    <small>{t(option.description ?? option.id)}</small>
-                  </span>
-                  {#if option.id === runtime.settings.theme}<Check size={14} aria-hidden="true" />{/if}
-                </button>
-                {#if !findBuiltInTheme(option.id)}
-                  <button type="button" class="theme-remove" aria-label={t("删除主题 {name}", { name: t(option.name) })} title={t("删除导入的主题")}
-                    onclick={() => removeTheme(option.id)}><Trash2 size={13} /></button>
-                {/if}
-              </li>
-            {/each}
-          </ul>
+          <label class="setting-control"><strong>{t("主题")}</strong>
+            <select value={runtime.settings.theme} aria-label={t("主题")} onchange={(event) => selectTheme(event.currentTarget.value)}>
+              {#each themeOptions as option (option.id)}
+                <option value={option.id}>{t(option.name)}{#if !findBuiltInTheme(option.id)}{t("（自定义）")}{/if}</option>
+              {/each}
+            </select>
+          </label>
+          <div class="theme-preview">
+            <span class="theme-swatches" aria-hidden="true">
+              <span style={`background:${selectedTheme.colors.pageBg}`}></span>
+              <span style={`background:${selectedTheme.colors.surface}`}></span>
+              <span style={`background:${selectedTheme.colors.accent}`}></span>
+            </span>
+            <span class="theme-copy">
+              <strong>{t(selectedTheme.name)}</strong>
+              <small>{t(selectedTheme.description ?? selectedTheme.id)}</small>
+            </span>
+            {#if selectedCustomTheme}
+              <button type="button" class="quiet-button" disabled={themeBusy} title={t("删除导入的主题")}
+                onclick={() => removeTheme(runtime.settings.theme)}><Trash2 size={13} />{t("删除所选自定义主题")}</button>
+            {/if}
+          </div>
           {#if themeNotice}<p class="theme-status" role="status">{themeNotice}</p>{/if}
           {#if themeError}<p class="theme-error" role="alert">{tm(themeError)}</p>{/if}
         </section>
@@ -352,18 +355,12 @@
   }
   @media (max-width: 400px) { .settings-navigation { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
   .theme-actions { display: flex; flex-wrap: wrap; gap: 6px; }
-  .theme-list { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 6px; }
-  .theme-item { display: flex; align-items: stretch; gap: 6px; }
-  .theme-pick { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); color: var(--text); text-align: left; cursor: pointer; }
-  .theme-pick:hover { border-color: var(--border-strong); background: var(--surface-hover); }
-  .theme-item.active .theme-pick { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+  .theme-preview { display: flex; align-items: center; gap: 10px; margin-top: 8px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); }
   .theme-swatches { display: flex; flex-shrink: 0; border-radius: 5px; overflow: hidden; border: 1px solid var(--border-strong); }
   .theme-swatches span { width: 14px; height: 26px; }
   .theme-copy { flex: 1; min-width: 0; display: grid; gap: 2px; }
   .theme-copy strong { font-size: 12px; color: var(--text-strong); }
   .theme-copy small { font-size: 11px; color: var(--text-muted); overflow-wrap: anywhere; }
-  .theme-remove { flex-shrink: 0; display: grid; place-items: center; width: 30px; padding: 0; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); color: var(--text-muted); cursor: pointer; }
-  .theme-remove:hover { border-color: var(--border-strong); color: var(--status-failed); }
   .theme-status { margin: 8px 0 0; font-size: 12px; color: var(--accent); overflow-wrap: anywhere; }
   .theme-error { margin: 8px 0 0; font-size: 12px; color: var(--status-failed); overflow-wrap: anywhere; }
 </style>

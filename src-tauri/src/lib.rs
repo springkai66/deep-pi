@@ -1,6 +1,7 @@
 use tauri::Manager;
 
 mod agent_config;
+mod agenticskills;
 mod app_paths;
 mod bridge;
 mod credentials;
@@ -87,6 +88,7 @@ pub fn run() {
         .manage(market::MarketCache::default())
         .manage(market::ModelCatalogCache::default())
         .manage(market::McpRegistryCache::default())
+        .manage(agenticskills::AgenticCatalogCache::default())
         .manage(runtime::UpdateCache::default())
         .manage(runtime::RuntimeOperationLock::default())
         .manage(operation::OperationManager::default())
@@ -226,6 +228,12 @@ pub fn run() {
                 credentials::save_provider_credential,
                 credentials::test_provider_connection,
                 credentials::test_model_connection,
+                agenticskills::agentic_mcp_detail,
+                agenticskills::agentic_skill_detail,
+                agenticskills::install_agentic_mcp,
+                agenticskills::install_agentic_skill,
+                agenticskills::search_agentic_mcp,
+                agenticskills::search_agentic_skills,
                 market::pi_model_profile,
                 market::pi_package_metadata,
                 market::search_pi_models,

@@ -137,4 +137,46 @@ export const EN_MCP: Record<string, string> = {
   "卸载 Pi Package": "Uninstall Pi Package",
   "卸载 {name} 吗？": "Uninstall {name}?",
   "{name} 已卸载": "{name} uninstalled",
+
+  /* ---------- 市场（agenticskills.io）通用 ---------- */
+  "市场来源：agenticskills.io": "Marketplace source: agenticskills.io",
+  "刷新市场": "Refresh marketplace",
+  "详情": "Details",
+  "收起": "Collapse",
+  "加载中…": "Loading…",
+  "正在加载详情…": "Loading details…",
+  "在站点打开": "Open on site",
+  "打开官网": "Open website",
+  "共 {total} 条，匹配 {shown} 条": "{shown} of {total} entries shown",
+  "作者：{author}": "Author: {author}",
+
+  /* ---------- MCP 市场（agenticskills.io） ---------- */
+  "MCP 市场": "MCP marketplace",
+  "筛选 MCP 服务": "Filter MCP servers",
+  "按名称、作者或分类筛选 MCP 服务…": "Filter MCP servers by name, author, or category…",
+  "分类：{category}": "Category: {category}",
+  "传输：{transport}": "Transport: {transport}",
+  "热度 {count}": "Popularity {count}",
+  "官方": "Official",
+  "需要 API Key": "Requires API key",
+  "信任等级：{level}": "Trust level: {level}",
+  "配置来源：{source}": "Config source: {source}",
+  "配置片段": "Configuration snippets",
+  "筛选目录后点击「添加」，新服务在重启 Pi 任务后生效。":
+    "Filter the catalog and click “Add”; the new server takes effect after Pi tasks are restarted.",
+  "（来自 agenticskills.io）": "(from agenticskills.io)",
+
+  /* ---------- Skills 市场（agenticskills.io） ---------- */
+  "筛选技能": "Filter skills",
+  "按名称、作者或关键词筛选技能…": "Filter skills by name, author, or keyword…",
+  "没有匹配的技能": "No matching skills",
+  "安装量 {count}": "Installs {count}",
+  "质量 {level}": "Quality {level}",
+  "许可证：{license}": "License: {license}",
+  "平台：{platforms}": "Platforms: {platforms}",
+  "最近更新：{date}": "Last updated: {date}",
+  "打开 SKILL.md": "Open SKILL.md",
+  "已安装技能 {name}": "Skill {name} installed",
+  "技能来自 agenticskills.io，安装后重启 Pi 任务生效。":
+    "Skills come from agenticskills.io; installed Skills take effect after Pi tasks are restarted.",
 };

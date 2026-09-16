@@ -62,9 +62,9 @@ export const APP_MESSAGES_FILES: Record<string, import("./app-messages").AppMess
     en: "A project scope needs a project path.",
   },
   "agent_config.skill_content_length": {
-    "zh-CN": "Skill 内容必须包含 1 到 65536 字节",
-    "zh-TW": "Skill 內容必須包含 1 到 65536 字節",
-    en: "Skill content must have between 1 and 65536 bytes.",
+    "zh-CN": "Skill 内容必须包含 1 到 262144 字节",
+    "zh-TW": "Skill 內容必須包含 1 到 262144 字節",
+    en: "Skill content must have between 1 and 262144 bytes.",
   },
   "agent_config.skill_description_length": {
     "zh-CN": "Skill 描述必须包含 1 到 512 个字符",
