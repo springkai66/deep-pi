@@ -162,8 +162,8 @@ export const EN_MCP: Record<string, string> = {
   "信任等级：{level}": "Trust level: {level}",
   "配置来源：{source}": "Config source: {source}",
   "配置片段": "Configuration snippets",
-  "筛选目录后点击「添加」，新服务在重启 Pi 任务后生效。":
-    "Filter the catalog and click “Add”; the new server takes effect after Pi tasks are restarted.",
+  "筛选目录后点击「安装」，新服务在重启 Pi 任务后生效。":
+    "Filter the catalog and click “Install”; the new server takes effect after Pi tasks are restarted.",
   "（来自 agenticskills.io）": "(from agenticskills.io)",
 
   /* ---------- Skills 市场（agenticskills.io） ---------- */

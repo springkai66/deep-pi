@@ -595,7 +595,7 @@
               </button>
               <button type="button" class="primary-action compact" disabled={busyMcpEntry !== null} onclick={() => void installAgenticMcp(entry)}>
                 {#if busyMcpEntry === entry.slug}<span class="spin"><RefreshCw size={12} /></span>{:else}<Download size={12} />{/if}
-                {t("添加")}
+                {t("安装")}
               </button>
               {#if mcpDetailSlug === entry.slug}
                 <div class="market-detail">
@@ -630,7 +630,7 @@
         </ul>
         <p class="muted" role="status">{t("共 {total} 条，匹配 {shown} 条", { total: mcpEntries.length, shown: filteredMcpEntries.length })}</p>
       {/if}
-      <p class="muted" role="status">{t("筛选目录后点击「添加」，新服务在重启 Pi 任务后生效。")}</p>
+      <p class="muted" role="status">{t("筛选目录后点击「安装」，新服务在重启 Pi 任务后生效。")}</p>
     </section>
   {:else}
     <section class="settings-group">
