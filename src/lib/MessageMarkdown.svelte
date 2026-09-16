@@ -1,6 +1,7 @@
 <script lang="ts">
   import { parseMessageMarkdown, type MarkdownNode } from "./message-markdown";
   import MessageCodeBlock from "./MessageCodeBlock.svelte";
+  import { t } from "$lib/i18n.svelte";
   let { content, onOpenLink }: { content: string; onOpenLink: (url: string) => void } = $props();
   const parsed = $derived(parseMessageMarkdown(content));
 </script>
@@ -15,8 +16,8 @@
       {:else}<code>{node.content}</code>{/if}
     {:else if node.kind === "image"}
       {#if node.href}<a href={node.href} title={node.href} target="_blank" rel="noopener noreferrer" onclick={(event) => { event.preventDefault(); onOpenLink(node.href!); }}
-        onauxclick={(event) => { if (event.button === 1) { event.preventDefault(); onOpenLink(node.href!); } }}>图片：{node.content || node.href}</a>
-      {:else}<span>图片：{node.content}</span>{/if}
+        onauxclick={(event) => { if (event.button === 1) { event.preventDefault(); onOpenLink(node.href!); } }}>{t("图片：{source}", { source: node.content || node.href })}</a>
+      {:else}<span>{t("图片：{source}", { source: node.content })}</span>{/if}
     {:else if node.kind === "element"}
       {#if node.tag === "a"}
         {#if node.href}<a href={node.href} title={node.href} target="_blank" rel="noopener noreferrer" onclick={(event) => { event.preventDefault(); onOpenLink(node.href!); }}
@@ -24,7 +25,7 @@
         {:else}<span>{@render children(node.children)}</span>{/if}
       {:else if node.tag === "table"}
         <!-- svelte-ignore a11y_no_noninteractive_tabindex (Scrollable tables need keyboard focus.) -->
-        <div class="table-scroll" tabindex="0" role="region" aria-label="消息表格"><table>{@render children(node.children)}</table></div>
+        <div class="table-scroll" tabindex="0" role="region" aria-label={t("消息表格")}><table>{@render children(node.children)}</table></div>
       {:else}
         <svelte:element this={node.tag} start={node.start} style:text-align={node.align}>{@render children(node.children)}</svelte:element>
       {/if}

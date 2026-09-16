@@ -3,7 +3,7 @@
   import PiSettings from "../../src/lib/PiSettings.svelte";
   import PiProviderSettings from "../../src/lib/PiProviderSettings.svelte";
   import PiMarketplace from "../../src/lib/PiMarketplace.svelte";
-  import { DEFAULT_APP_SETTINGS, cssFontFamily, type AppSettings } from "../../src/lib/settings";
+  import { DEFAULT_APP_SETTINGS, cssAppFontFamily, cssSessionFontFamily, type AppSettings } from "../../src/lib/settings";
   import type { SettingsCategory } from "../../src/lib/settings-navigation";
   import type { ProviderRecord } from "../../src/lib/provider";
 
@@ -28,8 +28,8 @@
   };
   $effect(() => {
     document.documentElement.dataset.colorScheme = settings.colorMode === "light" ? "light" : "dark";
-    document.documentElement.style.setProperty("--app-font", cssFontFamily(settings.appFont));
-    document.documentElement.style.setProperty("--text-font", cssFontFamily(settings.textFont));
+    document.documentElement.style.setProperty("--app-font", cssAppFontFamily(settings.appFontName));
+    document.documentElement.style.setProperty("--session-font", cssSessionFontFamily(settings.sessionFontName));
   });
 </script>
 
@@ -66,6 +66,7 @@
     {#snippet extensions()}<PiMarketplace embedded projectPath={null} invokeCommand={command} confirm={async () => true} onClose={() => {}} onError={(cause) => { error = String(cause); }} />{/snippet}
     {#snippet mcp()}<p>MCP</p>{/snippet}
     {#snippet skills()}<p>Skills</p>{/snippet}
+    {#snippet dsh()}<p>DSH</p>{/snippet}
   </PiSettings>
 </main>
 

@@ -1,15 +1,37 @@
 export const SETTINGS_CATEGORIES = [
-  { id: "general", label: "通用" },
-  { id: "appearance", label: "外观" },
-  { id: "models", label: "模型与凭据" },
-  { id: "runtime", label: "运行时与更新" },
-  { id: "extensions", label: "Pi 扩展" },
-  { id: "mcp", label: "MCP 服务" },
-  { id: "skills", label: "Skills 技能" },
-  { id: "advanced", label: "高级与诊断" },
+  { id: "general", label: "通用", group: "应用" },
+  { id: "appearance", label: "外观", group: "应用" },
+  { id: "models", label: "模型与凭据", group: "Pi Coding Agent" },
+  { id: "extensions", label: "Pi 扩展", group: "Pi Coding Agent" },
+  { id: "mcp", label: "MCP 服务", group: "Pi Coding Agent" },
+  { id: "skills", label: "Skills 技能", group: "Pi Coding Agent" },
+  { id: "dsh", label: "DSH 服务", group: "DSH (DeepSeek Harness)" },
+  { id: "runtime", label: "运行时与更新", group: "系统" },
+  { id: "advanced", label: "高级与诊断", group: "系统" },
 ] as const;
 
 export type SettingsCategory = typeof SETTINGS_CATEGORIES[number]["id"];
+
+export interface SettingsGroup {
+  label: string;
+  categories: { id: SettingsCategory; label: string }[];
+}
+
+/** 按首次出现顺序把扁平分类聚合成导航分组。 */
+export function settingsGroups(
+  categories: ReadonlyArray<{ id: SettingsCategory; label: string; group: string }> = SETTINGS_CATEGORIES,
+): SettingsGroup[] {
+  const groups: SettingsGroup[] = [];
+  for (const category of categories) {
+    let group = groups.find((candidate) => candidate.label === category.group);
+    if (!group) {
+      group = { label: category.group, categories: [] };
+      groups.push(group);
+    }
+    group.categories.push({ id: category.id, label: category.label });
+  }
+  return groups;
+}
 
 export function nextSettingsCategory(current: SettingsCategory, key: string): SettingsCategory | null {
   const index = SETTINGS_CATEGORIES.findIndex((category) => category.id === current);

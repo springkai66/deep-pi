@@ -1,3 +1,4 @@
+import { t, tm } from "./i18n.svelte";
 export interface GitEntry {
   path: string;
   originalPath: string | null;
@@ -50,7 +51,7 @@ export function createGitStatusLoader<T, Request = string>(
     void cancelRead(active.id).catch((error) => {
       if (!disposed && expected === generation) changed({
         loading: false, value: null,
-        error: `取消请求发送失败，旧结果不会显示；后台将按预算停止：${String(error)}`,
+        error: t("取消请求发送失败，旧结果不会显示；后台将按预算停止：{error}", { error: tm(String(error)) }),
       });
     });
   }
@@ -66,7 +67,7 @@ export function createGitStatusLoader<T, Request = string>(
           const value = await read(request.input, active.id);
           if (!disposed && request.generation === generation) changed({ loading: false, value, error: "" });
         } catch (error) {
-          if (!disposed && request.generation === generation) changed({ loading: false, value: null, error: String(error) });
+          if (!disposed && request.generation === generation) changed({ loading: false, value: null, error: tm(String(error)) });
         } finally { active = null; }
       }
     } finally { running = false; }
@@ -81,7 +82,7 @@ export function createGitStatusLoader<T, Request = string>(
     },
     cancel() {
       generation++; pending = null; cancelActive();
-      if (!disposed) changed({ loading: false, value: null, error: "已取消读取" });
+      if (!disposed) changed({ loading: false, value: null, error: t("已取消读取") });
     },
     invalidate() { generation++; pending = null; cancelActive(); },
     dispose() { disposed = true; generation++; pending = null; cancelActive(); },

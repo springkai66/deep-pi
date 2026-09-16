@@ -1,3 +1,4 @@
+import { t } from "./i18n.svelte";
 import type { Task } from "./task";
 
 export type InteractionMode = "tui" | "rpc";
@@ -15,13 +16,13 @@ export function createTaskModeSwitcher(ports: ModePorts) {
     async switch(task: Task, target: InteractionMode): Promise<Task | null> {
       if (busy.has(task.id) || (task.interactionMode ?? "tui") === target) return null;
       if (task.agent !== "pi" || !task.projectId || task.archivedAt !== null) {
-        throw new Error("请先选择未归档的 Pi 项目任务");
+        throw new Error(t("请先选择未归档的 Pi 项目任务"));
       }
       const snapshot = { ...task };
       const assertCurrent = () => {
         if (task.runId !== snapshot.runId || task.interactionMode !== snapshot.interactionMode
           || task.archivedAt !== snapshot.archivedAt || task.sessionId !== snapshot.sessionId) {
-          throw new Error("任务状态已发生变化，请重新选择切换操作");
+          throw new Error(t("任务状态已发生变化，请重新选择切换操作"));
         }
       };
       busy.add(task.id);
@@ -30,7 +31,7 @@ export function createTaskModeSwitcher(ports: ModePorts) {
         if (!await ports.confirm(snapshot, target)) return null;
         assertCurrent();
         if (!snapshot.runId && (task.status === "running" || task.status === "waiting")) {
-          throw new Error("活动任务缺少运行标识，请刷新任务列表");
+          throw new Error(t("活动任务缺少运行标识，请刷新任务列表"));
         }
         if (snapshot.runId) {
           const wasActive = task.status === "running" || task.status === "waiting";

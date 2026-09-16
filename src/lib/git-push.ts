@@ -1,3 +1,4 @@
+import { t, tm } from "./i18n.svelte";
 export interface PushTarget { remote: string; destination: string }
 export interface PushTargets { sourceRef: string; sourceOid: string; targets: PushTarget[] }
 export interface PushPreview extends PushTarget { sourceRef: string; sourceOid: string; targetRef: string }
@@ -56,7 +57,7 @@ export function createPushController(
           emit({ targets, branch: targets.sourceRef.startsWith("refs/heads/") ? targets.sourceRef.slice(11) : "" });
         }
       } catch (error) {
-        if (!disposed && generation === expectedGeneration) emit({ error: String(error) });
+        if (!disposed && generation === expectedGeneration) emit({ error: tm(String(error)) });
       } finally { active = null; emit({ busy: false, phase: "idle", cancelling: false }); }
     },
     async push() {
@@ -76,7 +77,7 @@ export function createPushController(
         if (!disposed && projectGeneration === expectedProjectGeneration && result) emit({ result, targets: null, selected: -1 });
         if (!disposed && projectGeneration === expectedProjectGeneration && result === null) emit(previous);
       } catch (error) {
-        if (!disposed && projectGeneration === expectedProjectGeneration) emit({ targets: null, selected: -1, error: `推送结果未确认，请核对远程目标；不会自动重试：${String(error)}` });
+        if (!disposed && projectGeneration === expectedProjectGeneration) emit({ targets: null, selected: -1, error: t("推送结果未确认，请核对远程目标；不会自动重试：{error}", { error: tm(String(error)) }) });
       } finally { active = null; emit({ busy: false, phase: "idle", cancelling: false }); }
       if (succeeded && !disposed) applied(projectId);
     },
@@ -90,11 +91,11 @@ export function createPushController(
       try {
         const verification = await ports.verify(projectId, attempted, id);
         if (!disposed && projectGeneration === expectedProjectGeneration) {
-          emit(active.cancelling ? { error: "已取消远程核对，目标状态尚未确认" } : { verification });
+          emit(active.cancelling ? { error: t("已取消远程核对，目标状态尚未确认") } : { verification });
         }
       } catch (error) {
         if (!disposed && projectGeneration === expectedProjectGeneration) {
-          emit({ error: active.cancelling ? "已取消远程核对，目标状态尚未确认" : `远程核对未完成，不能据此判断目标状态：${String(error)}` });
+          emit({ error: active.cancelling ? t("已取消远程核对，目标状态尚未确认") : t("远程核对未完成，不能据此判断目标状态：{error}", { error: tm(String(error)) }) });
         }
       } finally { active = null; emit({ busy: false, phase: "idle", cancelling: false }); }
     },
@@ -113,7 +114,7 @@ export function createPushController(
       } catch (error) {
         refresh = true;
         if (!disposed && projectGeneration === expectedProjectGeneration) {
-          emit({ error: `跟踪引用同步未确认完成，请刷新并核对本地状态；不会自动重试：${String(error)}` });
+          emit({ error: t("跟踪引用同步未确认完成，请刷新并核对本地状态；不会自动重试：{error}", { error: tm(String(error)) }) });
         }
       } finally { active = null; emit({ busy: false, phase: "idle", cancelling: false }); }
       if (refresh && !disposed) applied(projectId);
@@ -124,7 +125,7 @@ export function createPushController(
       const id = active.id;
       emit({ cancelling: true });
       try { await ports.cancel(id); }
-      catch (error) { if (active?.id === id) emit({ error: `取消请求发送失败，仍在等待结果：${String(error)}` }); }
+      catch (error) { if (active?.id === id) emit({ error: t("取消请求发送失败，仍在等待结果：{error}", { error: tm(String(error)) }) }); }
     },
     dispose() { disposed = true; generation++; },
   };

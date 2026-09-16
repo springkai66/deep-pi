@@ -14,6 +14,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::message::msg;
+
 pub const MAX_HISTORY_BYTES: usize = 128 * 1024 * 1024;
 const MAX_MESSAGE_BYTES: usize = 8 * 1024 * 1024;
 const PAGE_BYTES: usize = 2 * 1024 * 1024;
@@ -85,7 +87,7 @@ impl HistorySnapshot {
     fn new() -> Result<Self, String> {
         Ok(Self {
             id: uuid::Uuid::new_v4().to_string(),
-            file: tempfile::tempfile().map_err(|_| "无法创建临时历史快照")?,
+            file: tempfile::tempfile().map_err(|_| msg("rpc.history.spool_failed"))?,
             entries: Vec::new(),
             bytes: 0,
         })
@@ -93,18 +95,19 @@ impl HistorySnapshot {
 
     fn append(&mut self, message: Value) -> Result<(), String> {
         if !message.is_object() || !message["role"].is_string() {
-            return Err("历史消息格式无效".into());
+            return Err(msg("rpc.history.message_invalid"));
         }
-        let bytes = serde_json::to_vec(&message).map_err(|_| "无法序列化历史消息")?;
+        let bytes = serde_json::to_vec(&message)
+            .map_err(|_| msg("rpc.history.message_serialize_failed"))?;
         if bytes.len() > MAX_MESSAGE_BYTES
             || self.bytes + bytes.len() > MAX_HISTORY_BYTES
             || self.entries.len() >= MAX_MESSAGES
         {
-            return Err("历史快照超过大小或消息数量上限".into());
+            return Err(msg("rpc.history.size_limit_reached"));
         }
         self.file
             .write_all(&bytes)
-            .map_err(|_| "无法写入临时历史快照")?;
+            .map_err(|_| msg("rpc.history.spool_write_failed"))?;
         self.entries.push((self.bytes as u64, bytes.len()));
         self.bytes += bytes.len();
         Ok(())
@@ -131,15 +134,17 @@ impl HistorySnapshot {
             budget,
         }
         .deserialize(&mut decoder)
-        .map_err(|_| "历史响应格式无效或单条消息超过上限")?;
-        decoder.end().map_err(|_| "历史响应存在多余内容")?;
+        .map_err(|_| msg("rpc.history.response_invalid"))?;
+        decoder
+            .end()
+            .map_err(|_| msg("rpc.history.response_trailing_content"))?;
         Ok((id, snapshot))
     }
 
     pub fn page(&mut self, before: Option<usize>, sequence: u64) -> Result<HistoryPage, String> {
         let end = before.unwrap_or(self.entries.len());
         if end > self.entries.len() {
-            return Err("历史分页位置无效".into());
+            return Err(msg("rpc.history.cursor_invalid"));
         }
         let mut start = end;
         let mut bytes = 0;
@@ -155,12 +160,14 @@ impl HistorySnapshot {
         for &(offset, length) in &self.entries[start..end] {
             self.file
                 .seek(SeekFrom::Start(offset))
-                .map_err(|_| "无法定位历史快照")?;
+                .map_err(|_| msg("rpc.history.snapshot_seek_failed"))?;
             let mut bytes = vec![0; length];
             self.file
                 .read_exact(&mut bytes)
-                .map_err(|_| "无法读取历史快照")?;
-            messages.push(serde_json::from_slice(&bytes).map_err(|_| "历史快照内容无效")?);
+                .map_err(|_| msg("rpc.history.snapshot_read_failed"))?;
+            messages.push(
+                serde_json::from_slice(&bytes).map_err(|_| msg("rpc.history.snapshot_invalid"))?,
+            );
         }
         Ok(HistoryPage {
             snapshot_id: self.id.clone(),
@@ -191,11 +198,14 @@ impl HistoryStore {
         mut snapshot: HistorySnapshot,
         sequence: u64,
     ) -> Result<HistoryPage, String> {
-        let mut entries = self.0.lock().map_err(|_| "历史快照锁不可用")?;
+        let mut entries = self
+            .0
+            .lock()
+            .map_err(|_| msg("rpc.history.lock_unavailable"))?;
         entries.retain(|_, entry| entry.last_access.elapsed() < Duration::from_secs(30 * 60));
         let bytes: usize = entries.values().map(|entry| entry.snapshot.bytes).sum();
         if entries.len() >= 64 || bytes + snapshot.bytes > 512 * 1024 * 1024 {
-            return Err("历史快照占用已达上限，请关闭不用的任务后重试".into());
+            return Err(msg("rpc.history.size_limit_reached"));
         }
         let page = snapshot.page(None, sequence)?;
         entries.insert(
@@ -218,18 +228,24 @@ impl HistoryStore {
         id: &str,
         before: usize,
     ) -> Result<HistoryPage, String> {
-        let mut entries = self.0.lock().map_err(|_| "历史快照锁不可用")?;
+        let mut entries = self
+            .0
+            .lock()
+            .map_err(|_| msg("rpc.history.lock_unavailable"))?;
         entries.retain(|_, entry| entry.last_access.elapsed() < Duration::from_secs(30 * 60));
         let entry = entries
             .get_mut(id)
             .filter(|entry| entry.task == task && entry.run == run)
-            .ok_or("历史快照已失效或空闲过期，请重新打开任务")?;
+            .ok_or(msg("rpc.history.expired"))?;
         entry.last_access = Instant::now();
         entry.snapshot.page(Some(before), entry.sequence)
     }
 
     pub fn close(&self, task: &str, run: &str, id: &str) -> Result<(), String> {
-        let mut entries = self.0.lock().map_err(|_| "历史快照锁不可用")?;
+        let mut entries = self
+            .0
+            .lock()
+            .map_err(|_| msg("rpc.history.lock_unavailable"))?;
         if entries
             .get(id)
             .is_some_and(|entry| entry.task == task && entry.run == run)

@@ -1,3 +1,4 @@
+import { t } from "./i18n.svelte";
 export interface ProjectWatchEvent {
   projectId: string;
   watchId: string;
@@ -36,8 +37,8 @@ export function createProjectWatch(projectId: string, ports: Ports) {
     if (closed || failed || event.projectId !== projectId || event.watchId !== id) return;
     ports.changed(event.files, event.git);
     if (event.status !== "changed") {
-      fail(event.status === "rootChanged" ? "项目目录已变化，请重新连接文件监听"
-        : event.status === "expired" ? "文件监听已过期，请重新连接" : "文件监听已中断，可手动刷新或重新连接");
+      fail(t(event.status === "rootChanged" ? "项目目录已变化，请重新连接文件监听"
+        : event.status === "expired" ? "文件监听已过期，请重新连接" : "文件监听已中断，可手动刷新或重新连接"));
     }
   }
   return {
@@ -50,10 +51,10 @@ export function createProjectWatch(projectId: string, ports: Ports) {
         timer = setInterval(() => {
           if (closed || failed || pinging) return;
           pinging = true;
-          void ports.ping(id).catch(() => fail("文件监听连接已失效，请重新连接")).finally(() => { pinging = false; });
+          void ports.ping(id).catch(() => fail(t("文件监听连接已失效，请重新连接"))).finally(() => { pinging = false; });
         }, 30_000);
       }).catch(() => {
-        fail("无法启用文件监听，可手动刷新或重新连接");
+        fail(t("无法启用文件监听，可手动刷新或重新连接"));
         void release();
       });
     },

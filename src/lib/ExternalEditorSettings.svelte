@@ -3,6 +3,7 @@
   import { open } from "@tauri-apps/plugin-dialog";
   import { FolderOpen, Save, X } from "@lucide/svelte";
   import type { ExternalEditor } from "./settings";
+  import { t, tm } from "$lib/i18n.svelte";
 
   let { editor, onSaved }: { editor: ExternalEditor | null; onSaved: (editor: ExternalEditor | null) => void } = $props();
   let kind = $state<ExternalEditor["kind"]>("vscode");
@@ -18,10 +19,10 @@
     busy = true;
     error = status = "";
     try {
-      if (!isTauri()) throw new Error("请选择桌面应用中的编辑器路径");
-      const path = await open({ directory: false, multiple: false, title: "选择外部编辑器", filters: [{ name: "Executable", extensions: ["exe"] }] });
+      if (!isTauri()) throw new Error(t("请选择桌面应用中的编辑器路径"));
+      const path = await open({ directory: false, multiple: false, title: t("选择外部编辑器"), filters: [{ name: "Executable", extensions: ["exe"] }] });
       if (typeof path === "string") executable = path;
-    } catch (cause) { error = String(cause); }
+    } catch (cause) { error = tm(String(cause)); }
     finally { busy = false; }
   }
 
@@ -32,32 +33,32 @@
     try {
       await invoke("save_external_editor", { editor: value });
       onSaved(value);
-      status = "已保存";
-    } catch (cause) { error = String(cause); }
+      status = t("已保存");
+    } catch (cause) { error = tm(String(cause)); }
     finally { busy = false; }
   }
 </script>
 
 <section class="editor-settings" aria-labelledby="external-editor-heading">
-  <h3 id="external-editor-heading">外部编辑器</h3>
+  <h3 id="external-editor-heading">{t("外部编辑器")}</h3>
   <form onsubmit={(event) => { event.preventDefault(); void save({ kind, executable }); }}>
-    <label for="editor-kind">编辑器</label>
+    <label for="editor-kind">{t("编辑器")}</label>
     <select id="editor-kind" bind:value={kind} disabled={busy} onchange={() => { error = status = ""; }}>
       <option value="vscode">Visual Studio Code / Insiders</option>
       <option value="notepadPlusPlus">Notepad++</option>
     </select>
-    <label for="editor-executable">可执行文件</label>
+    <label for="editor-executable">{t("可执行文件")}</label>
     <div class="path-control">
       <input id="editor-executable" bind:value={executable} disabled={busy} maxlength="4096" spellcheck="false" oninput={() => { error = status = ""; }} />
-      <button type="button" title="选择编辑器文件" aria-label="选择编辑器文件" disabled={busy} onclick={() => void browse()}><FolderOpen size={16} /></button>
+      <button type="button" title={t("选择编辑器文件")} aria-label={t("选择编辑器文件")} disabled={busy} onclick={() => void browse()}><FolderOpen size={16} /></button>
     </div>
     <div class="editor-actions">
       {#if status}<span role="status">{status}</span>{/if}
-      <button type="submit" title="保存外部编辑器" aria-label="保存外部编辑器" disabled={busy || !dirty || !executable.trim()}><Save size={16} /></button>
-      <button type="button" title="清除外部编辑器配置" aria-label="清除外部编辑器配置" disabled={busy || !editor} onclick={() => void save(null)}><X size={16} /></button>
+      <button type="submit" title={t("保存外部编辑器")} aria-label={t("保存外部编辑器")} disabled={busy || !dirty || !executable.trim()}><Save size={16} /></button>
+      <button type="button" title={t("清除外部编辑器配置")} aria-label={t("清除外部编辑器配置")} disabled={busy || !editor} onclick={() => void save(null)}><X size={16} /></button>
     </div>
   </form>
-  {#if error}<p role="alert">{error}</p>{/if}
+  {#if error}<p role="alert">{tm(error)}</p>{/if}
 </section>
 
 <style>
@@ -67,7 +68,7 @@
   label { font-size: 12px; color: var(--text); }
   input, select { width: 100%; min-width: 0; height: 32px; padding: 4px 8px; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--surface); color: var(--text); font: inherit; font-size: 12px; }
   .path-control { display: flex; gap: 6px; min-width: 0; }
-  button { width: 30px; height: 30px; flex-shrink: 0; display: grid; place-items: center; border: 1px solid var(--border); border-radius: 4px; color: var(--text); background: var(--surface); cursor: pointer; }
+  button { width: 30px; height: 30px; padding: 0; flex-shrink: 0; display: grid; place-items: center; border: 1px solid var(--border); border-radius: 4px; color: var(--text); background: var(--surface); cursor: pointer; }
   button:hover:not(:disabled) { background: var(--surface-hover); }
   button:disabled { opacity: .4; cursor: default; }
   .editor-actions { grid-column: 1 / -1; display: flex; justify-content: flex-end; align-items: center; gap: 8px; }

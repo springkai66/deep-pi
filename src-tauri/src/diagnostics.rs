@@ -1,3 +1,4 @@
+use crate::message::msg;
 use serde::Serialize;
 use std::{
     collections::VecDeque,
@@ -137,8 +138,11 @@ impl Diagnostics {
         let _gate = self
             .export_gate
             .try_lock()
-            .map_err(|_| "诊断报告正在导出")?;
-        let mut journal = self.inner.lock().map_err(|_| "诊断记录暂不可用")?;
+            .map_err(|_| msg("diagnostics.export_in_progress"))?;
+        let mut journal = self
+            .inner
+            .lock()
+            .map_err(|_| msg("diagnostics.journal_unavailable"))?;
         let report = DiagnosticReport {
             schema_version: 1,
             snapshot_id: uuid::Uuid::new_v4().to_string(),
@@ -154,23 +158,29 @@ impl Diagnostics {
     }
 
     fn export_bytes(&self, id: &str) -> Result<Vec<u8>, String> {
-        let journal = self.inner.lock().map_err(|_| "诊断记录暂不可用")?;
+        let journal = self
+            .inner
+            .lock()
+            .map_err(|_| msg("diagnostics.journal_unavailable"))?;
         let (report, _) = journal
             .preview
             .as_ref()
             .filter(|(report, created)| {
                 report.snapshot_id == id && created.elapsed() < Duration::from_secs(600)
             })
-            .ok_or("诊断预览已失效，请刷新后重新导出")?;
-        serde_json::to_vec_pretty(report).map_err(|_| "无法生成诊断报告".into())
+            .ok_or(msg("diagnostics.preview_expired"))?;
+        serde_json::to_vec_pretty(report).map_err(|_| msg("diagnostics.report_generate_failed"))
     }
 
     fn clear(&self) -> Result<(), String> {
         let _gate = self
             .export_gate
             .try_lock()
-            .map_err(|_| "诊断报告正在导出")?;
-        let mut journal = self.inner.lock().map_err(|_| "诊断记录暂不可用")?;
+            .map_err(|_| msg("diagnostics.export_in_progress"))?;
+        let mut journal = self
+            .inner
+            .lock()
+            .map_err(|_| msg("diagnostics.journal_unavailable"))?;
         journal.events.clear();
         journal.dropped = 0;
         journal.preview = None;
@@ -184,7 +194,7 @@ fn write_export(path: &Path, bytes: &[u8]) -> Result<(), String> {
             .file_name()
             .is_none_or(|name| name.to_string_lossy().contains(':'))
     {
-        return Err("报告需要完整的普通文件路径".into());
+        return Err(msg("diagnostics.report_path_required"));
     }
     #[cfg(windows)]
     {
@@ -192,7 +202,7 @@ fn write_export(path: &Path, bytes: &[u8]) -> Result<(), String> {
         if !matches!(path.components().next(), Some(Component::Prefix(prefix)) if matches!(
             prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_) | Prefix::UNC(_, _) | Prefix::VerbatimUNC(_, _)
         )) {
-            return Err("报告不支持设备路径".into());
+            return Err(msg("diagnostics.report_device_path"));
         }
         for component in path.components() {
             if let Component::Normal(name) = component {
@@ -208,7 +218,7 @@ fn write_export(path: &Path, bytes: &[u8]) -> Result<(), String> {
                         && (stem.starts_with("COM") || stem.starts_with("LPT"))
                         && stem.as_bytes()[3].is_ascii_digit())
                 {
-                    return Err("报告文件名无效".into());
+                    return Err(msg("diagnostics.report_file_name_invalid"));
                 }
             }
         }
@@ -222,17 +232,17 @@ fn write_export(path: &Path, bytes: &[u8]) -> Result<(), String> {
     }
     let mut file = options
         .open(path)
-        .map_err(|_| "无法创建报告，请选择可写目录和新的文件名；不会覆盖已有文件")?;
+        .map_err(|_| msg("diagnostics.report_create_failed"))?;
     file.write_all(bytes)
         .and_then(|_| file.sync_all())
-        .map_err(|_| "报告写入未完成，目标可能保留不完整文件，请核对后另选文件名".into())
+        .map_err(|_| msg("diagnostics.report_write_incomplete"))
 }
 
 fn require_main(webview: &tauri::Webview) -> Result<(), String> {
     if webview.label() == "main" {
         Ok(())
     } else {
-        Err("诊断仅允许主窗口访问".into())
+        Err(msg("diagnostics.main_window_only"))
     }
 }
 
@@ -256,6 +266,8 @@ pub async fn diagnostics_export(
     webview: tauri::Webview,
     app: AppHandle,
     snapshot_id: String,
+    // 对话框标题由前端传入（前端掌握当前语言），后端不持有任何文案。
+    dialog_title: String,
 ) -> Result<bool, String> {
     require_main(&webview)?;
     tauri::async_runtime::spawn_blocking(move || {
@@ -264,26 +276,30 @@ pub async fn diagnostics_export(
             .diagnostics
             .export_gate
             .try_lock()
-            .map_err(|_| "诊断报告正在导出")?;
+            .map_err(|_| msg("diagnostics.export_in_progress"))?;
         let bytes = manager.diagnostics.export_bytes(&snapshot_id)?;
-        let window = app.get_webview_window("main").ok_or("主窗口已关闭")?;
+        let window = app
+            .get_webview_window("main")
+            .ok_or(msg("app.main_window_closed"))?;
         let Some(file) = app
             .dialog()
             .file()
             .set_parent(&window)
-            .set_title("导出诊断报告（新文件）")
+            .set_title(dialog_title)
             .set_file_name(format!("deeppi-diagnostics-{}.json", uuid::Uuid::new_v4()))
             .add_filter("JSON", &["json"])
             .blocking_save_file()
         else {
             return Ok(false);
         };
-        let path = file.into_path().map_err(|_| "不支持该报告保存位置")?;
+        let path = file
+            .into_path()
+            .map_err(|_| msg("diagnostics.export_location_unsupported"))?;
         write_export(&path, &bytes)?;
         Ok(true)
     })
     .await
-    .map_err(|_| "诊断导出任务失败")?
+    .map_err(|_| msg("diagnostics.export_task_failed"))?
 }
 
 #[cfg(test)]

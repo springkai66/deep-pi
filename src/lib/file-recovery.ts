@@ -1,3 +1,5 @@
+import { appConfirmDialog, resolveAppMessage } from "./app-messages";
+import { getLocale, t, tm } from "./i18n.svelte";
 import type { FileSaveResult } from "./file-workspace";
 
 export interface RecoveryItem {
@@ -58,7 +60,7 @@ export function createRecoveryManager(
       const rows = offset ? [...state.items, ...page.items] : page.items;
       update({ ...page, items: [...new Map(rows.map((row) => [row.id, row])).values()] });
     } catch (cause) {
-      if (generation === scope && sequence === request) update({ error: String(cause) });
+      if (generation === scope && sequence === request) update({ error: tm(String(cause)) });
     } finally {
       if (generation === scope && sequence === request) update({ loading: false });
     }
@@ -77,20 +79,24 @@ export function createRecoveryManager(
       const result = action === "restore"
         ? await invoke<FileSaveResult | null>("restore_project_recovery", { projectId, request: {
           recordId: item.id, expectedVersion: item.version, relativePath,
-        } })
+        }, dialog: appConfirmDialog("recovery.restore.dialog", getLocale()) })
         : await invoke<boolean>("delete_project_recovery", {
           projectId, recordId: item.id, expectedVersion: action === "forget" ? null : item.version,
+          dialogs: {
+            permanent: appConfirmDialog("recovery.delete.dialog.permanent", getLocale()),
+            recordOnly: appConfirmDialog("recovery.delete.dialog.record_only", getLocale()),
+          },
         });
       if (!result) return;
       changed(projectId);
       if (generation !== scope) return;
       const message = typeof result === "boolean"
-        ? action === "forget" ? "已移除记录，未删除副本文件。" : "已删除副本。"
-        : `${result.outcome === "saved" ? "已另存恢复。" : "恢复结果需要核对。"} ${result.detail ?? ""}`;
+        ? action === "forget" ? t("已移除记录，未删除副本文件。") : t("已删除副本。")
+        : `${result.outcome === "saved" ? t("已另存恢复。") : t("恢复结果需要核对。")} ${resolveAppMessage(result.detail ?? "", getLocale())}`;
       await load();
       if (generation === scope) update({ message });
     } catch (cause) {
-      if (generation === scope) update({ error: `操作结果未确认，请刷新核对；不会自动重试。${String(cause)}` });
+      if (generation === scope) update({ error: t("操作结果未确认，请刷新核对；不会自动重试。{error}", { error: tm(String(cause)) }) });
     } finally {
       update({ writing: false });
       busyChanged(false);

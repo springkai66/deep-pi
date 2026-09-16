@@ -2,6 +2,7 @@
   import { untrack } from "svelte";
   import { FileText } from "@lucide/svelte";
   import { groupSearchMatches, type SearchMatch } from "./search";
+  import { t } from "$lib/i18n.svelte";
 
   let { matches, onOpen, onClear, focusToken }: {
     matches: SearchMatch[];
@@ -39,7 +40,7 @@
   }
 </script>
 
-<div class="content-results" aria-label="内容搜索结果">
+<div class="content-results" aria-label={t("内容搜索结果")}>
   {#each groups as group (group.path)}
     <section aria-label={group.path}>
       <h3 title={group.path}><FileText size={13} /><span>{group.path}</span><small>{group.matches.length}</small></h3>

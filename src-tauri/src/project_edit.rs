@@ -6,6 +6,7 @@ use std::{
 use serde::Serialize;
 use tauri::{Manager, State};
 
+use crate::message::{msg, msg_with};
 use crate::{
     project_files::{project_root, require_main, validate_relative, MAX_PREVIEW_BYTES},
     task::TaskStore,
@@ -111,30 +112,24 @@ fn save_windows(
     let original = match expected {
         Some(version) => {
             if !target.try_exists().map_err(|error| error.to_string())? {
-                return Ok(SaveResult::conflict(
-                    "文件已删除或移动，请重载或另存为新文件。",
-                ));
+                return Ok(SaveResult::conflict(&msg("files.save.target_missing")));
             }
             let guard = GuardedPath::open(root, relative, false)?;
             if read_guarded_text(&guard, relative)?.version != version {
-                return Ok(SaveResult::conflict(
-                    "文件已被外部修改，本次未写入。请比较或重载后再保存。",
-                ));
+                return Ok(SaveResult::conflict(&msg("files.save.external_change")));
             }
             if fs::metadata(&target)
                 .map_err(|error| error.to_string())?
                 .permissions()
                 .readonly()
             {
-                return Err("文件为只读，本次未写入。".into());
+                return Err(msg("files.save.read_only"));
             }
             Some(guard)
         }
         None => {
             if fs::symlink_metadata(&target).is_ok() {
-                return Ok(SaveResult::conflict(
-                    "另存目标已存在，本次未覆盖。请选择新文件名。",
-                ));
+                return Ok(SaveResult::conflict(&msg("files.save.destination_exists")));
             }
             None
         }
@@ -160,7 +155,12 @@ fn save_windows(
         .create_new(true)
         .share_mode(0)
         .open(&temporary)
-        .map_err(|error| format!("无法创建保存临时文件：{error}"))?;
+        .map_err(|error| {
+            msg_with(
+                "files.save.temp_create_failed",
+                &[("detail", &error.to_string())],
+            )
+        })?;
     let written = file
         .write_all(content.as_bytes())
         .and_then(|_| file.sync_all());
@@ -169,7 +169,12 @@ fn save_windows(
         path: temporary.clone(),
         preserve: false,
     };
-    written.map_err(|error| format!("无法写入保存临时文件：{error}"))?;
+    written.map_err(|error| {
+        msg_with(
+            "files.save.temp_write_failed",
+            &[("detail", &error.to_string())],
+        )
+    })?;
     let candidate = GuardedPath::open(root, &pending_relative, false)?;
     let new_version = candidate.version(relative, content.as_bytes())?;
     drop(candidate);
@@ -193,11 +198,12 @@ fn save_windows(
         if published == 0 {
             let error = std::io::Error::last_os_error();
             if matches!(error.raw_os_error(), Some(80 | 183)) {
-                return Ok(SaveResult::conflict(
-                    "另存目标刚被其他程序创建，本次未覆盖。",
-                ));
+                return Ok(SaveResult::conflict(&msg("files.save.destination_created")));
             }
-            return Err(format!("无法发布新文件，本次未覆盖现有文件：{error}"));
+            return Err(msg_with(
+                "files.save.publish_failed",
+                &[("detail", &error.to_string())],
+            ));
         }
         pending.preserve = true;
         if !read_text(root, relative).is_ok_and(|current| current.version == new_version) {
@@ -206,9 +212,7 @@ fn save_windows(
                 version: None,
                 recovery_path: None,
                 pending_path: None,
-                detail:
-                    "新文件已发布，但内容或身份核验不一致。请保留草稿并检查目标文件，不要直接重试。"
-                        .into(),
+                detail: msg("files.save.unverified"),
             });
         }
         return Ok(SaveResult {
@@ -216,7 +220,7 @@ fn save_windows(
             version: Some(new_version),
             recovery_path: None,
             pending_path: None,
-            detail: "已另存为新文件。".into(),
+            detail: msg("files.save.saved_as_new"),
         });
     }
     let recovery_name = wide_path(&recovery)?;
@@ -234,9 +238,14 @@ fn save_windows(
     };
     if replaced == 0 {
         return Ok(SaveResult {
-            outcome: SaveOutcome::Unknown, version: None,
-            recovery_path: Some(recovery_relative), pending_path: Some(pending_relative),
-            detail: format!("替换结果未确认：{}。目标或恢复路径可能已变化，请先核对；未自动重试或删除恢复文件。", std::io::Error::last_os_error()),
+            outcome: SaveOutcome::Unknown,
+            version: None,
+            recovery_path: Some(recovery_relative),
+            pending_path: Some(pending_relative),
+            detail: msg_with(
+                "files.save.replace_unverified",
+                &[("detail", &std::io::Error::last_os_error().to_string())],
+            ),
         });
     }
     // The backup is the file actually replaced, not a stale preflight copy.
@@ -245,21 +254,39 @@ fn save_windows(
     match replaced_version {
         Ok(version) if Some(version.as_str()) == expected => {
             if !read_text(root, relative).is_ok_and(|current| current.version == new_version) {
-                return Ok(SaveResult { outcome: SaveOutcome::Unknown, version: None,
-                    recovery_path: Some(recovery_relative), pending_path: None,
-                    detail: "文件已替换，但新内容或身份核验不一致。旧版本副本已保留，请比较后处理。".into() });
+                return Ok(SaveResult {
+                    outcome: SaveOutcome::Unknown,
+                    version: None,
+                    recovery_path: Some(recovery_relative),
+                    pending_path: None,
+                    detail: msg("files.save.replace_mismatch"),
+                });
             }
-            Ok(SaveResult { outcome: SaveOutcome::Saved, version: Some(new_version),
+            Ok(SaveResult {
+                outcome: SaveOutcome::Saved,
+                version: Some(new_version),
                 recovery_path: Some(recovery_relative),
                 pending_path: None,
-                detail: "已保存，旧版本保留在恢复副本中。".into() })
+                detail: msg("files.save.saved"),
+            })
         }
-        Ok(_) => Ok(SaveResult { outcome: SaveOutcome::Conflict, version: None,
-            recovery_path: Some(recovery_relative), pending_path: None,
-            detail: "替换期间检测到外部修改：目标可能已是本次内容，外部版本已保留在恢复副本。请比较后处理，不要直接重试。".into() }),
-        Err(error) => Ok(SaveResult { outcome: SaveOutcome::Unknown, version: None,
-            recovery_path: Some(recovery_relative), pending_path: None,
-            detail: format!("文件已替换，但无法核验旧版本：{error}。已保留恢复副本，请先核对。") }),
+        Ok(_) => Ok(SaveResult {
+            outcome: SaveOutcome::Conflict,
+            version: None,
+            recovery_path: Some(recovery_relative),
+            pending_path: None,
+            detail: msg("files.save.replace_conflict"),
+        }),
+        Err(error) => Ok(SaveResult {
+            outcome: SaveOutcome::Unknown,
+            version: None,
+            recovery_path: Some(recovery_relative),
+            pending_path: None,
+            detail: msg_with(
+                "files.save.backup_unverified",
+                &[("detail", &error.to_string())],
+            ),
+        }),
     }
 }
 
@@ -319,9 +346,7 @@ pub async fn save_project_file(
         .inner()
         .clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let _permit = gate
-            .try_lock()
-            .map_err(|_| "另一文件正在保存，请稍后重试。")?;
+        let _permit = gate.try_lock().map_err(|_| msg("files.save.busy"))?;
         save_registered(
             &root,
             &relative_path,

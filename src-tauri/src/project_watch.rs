@@ -1,3 +1,4 @@
+use crate::message::msg;
 use crate::project_files::{excluded_directory, require_main, GuardedPath};
 use notify::{EventKind, RecursiveMode, Watcher};
 use serde::Serialize;
@@ -118,11 +119,11 @@ impl ProjectWatch {
                 };
                 queued.fetch_or(bits, Ordering::Release);
             })
-            .map_err(|_| "无法创建项目文件监听")?;
+            .map_err(|_| msg("files.watch_create_failed"))?;
         // Hold the existing reparse-safe root guards until the native watch has acknowledged registration.
         watcher
             .watch(root, RecursiveMode::Recursive)
-            .map_err(|_| "无法监听项目目录，请检查权限或使用手动刷新")?;
+            .map_err(|_| msg("files.watch_start_failed"))?;
         drop(guard);
         let root = root.to_path_buf();
         let project_id = project.to_owned();
@@ -182,7 +183,7 @@ impl ProjectWatch {
                     }
                 }
             })
-            .map_err(|_| "无法启动项目文件监听线程")?;
+            .map_err(|_| msg("files.watch_thread_failed"))?;
         Ok(Self {
             project: project.to_owned(),
             stop,
@@ -207,7 +208,7 @@ pub struct ProjectWatchManager(Mutex<HashMap<String, ProjectWatch>>);
 impl ProjectWatchManager {
     fn close(&self, project: &str, id: &str) -> Result<(), String> {
         let removed = {
-            let mut watches = self.0.lock().map_err(|_| "项目监听暂不可用")?;
+            let mut watches = self.0.lock().map_err(|_| msg("files.watch_unavailable"))?;
             if watches
                 .get(id)
                 .is_some_and(|watch| watch.project == project)
@@ -222,7 +223,7 @@ impl ProjectWatchManager {
     }
 
     fn ping(&self, project: &str, id: &str) -> Result<(), String> {
-        let watches = self.0.lock().map_err(|_| "项目监听暂不可用")?;
+        let watches = self.0.lock().map_err(|_| msg("files.watch_unavailable"))?;
         let watch = watches
             .get(id)
             .filter(|watch| {
@@ -232,8 +233,11 @@ impl ProjectWatchManager {
                         .as_ref()
                         .is_some_and(|worker| !worker.is_finished())
             })
-            .ok_or("项目监听已结束，请重新连接")?;
-        *watch.touched.lock().map_err(|_| "项目监听暂不可用")? = Instant::now();
+            .ok_or(msg("files.watch_closed"))?;
+        *watch
+            .touched
+            .lock()
+            .map_err(|_| msg("files.watch_unavailable"))? = Instant::now();
         Ok(())
     }
 }
@@ -247,13 +251,16 @@ pub async fn start_project_watch(
     channel: Channel<WatchEvent>,
 ) -> Result<(), String> {
     require_main(&webview)?;
-    uuid::Uuid::parse_str(&watch_id).map_err(|_| "项目监听标识无效")?;
+    uuid::Uuid::parse_str(&watch_id).map_err(|_| msg("files.watch_id_invalid"))?;
     tauri::async_runtime::spawn_blocking(move || {
         let root = app
             .state::<crate::task::TaskStore>()
             .project_path(&project_id)?;
         let manager = app.state::<ProjectWatchManager>();
-        let mut watches = manager.0.lock().map_err(|_| "项目监听暂不可用")?;
+        let mut watches = manager
+            .0
+            .lock()
+            .map_err(|_| msg("files.watch_unavailable"))?;
         watches.retain(|_, watch| {
             watch
                 .worker
@@ -261,7 +268,7 @@ pub async fn start_project_watch(
                 .is_some_and(|worker| !worker.is_finished())
         });
         if watches.contains_key(&watch_id) || watches.len() >= 8 {
-            return Err("项目监听重复或已达容量上限".into());
+            return Err(msg("files.watch_capacity"));
         }
         let watch = ProjectWatch::start(Path::new(&root), &project_id, &watch_id, move |event| {
             channel.send(event).is_ok()
@@ -270,7 +277,7 @@ pub async fn start_project_watch(
         Ok(())
     })
     .await
-    .map_err(|_| "项目监听启动任务失败")?
+    .map_err(|_| msg("files.watch_spawn_failed"))?
 }
 
 #[tauri::command]
@@ -286,7 +293,7 @@ pub async fn stop_project_watch(
             .close(&project_id, &watch_id)
     })
     .await
-    .map_err(|_| "项目监听停止任务失败")?
+    .map_err(|_| msg("files.watch_stop_failed"))?
 }
 
 #[tauri::command]
@@ -302,7 +309,7 @@ pub async fn ping_project_watch(
             .ping(&project_id, &watch_id)
     })
     .await
-    .map_err(|_| "项目监听续期失败")?
+    .map_err(|_| msg("files.watch_ping_failed"))?
 }
 
 #[cfg(test)]

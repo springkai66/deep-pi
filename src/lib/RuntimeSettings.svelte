@@ -35,101 +35,106 @@
 
 <script lang="ts">
   import { Download, RefreshCw, RotateCcw, X } from "@lucide/svelte";
+  import { t, tm } from "$lib/i18n.svelte";
   let { settings, runtimes, updates, isCheckingUpdates, busyRuntime, runtimeOperation, runtimeProgress, onCancelRuntime,
     appUpdate, onCheckUpdates, onCheckAppUpdate, onInstallAppUpdate, onUpdateRuntime, onRollbackRuntime,
     onSnoozeRuntime, onSkipRuntime, onRestartPi, onRestartDsh, restartBusy, runningPiCount, dshRunning }: RuntimeSettingsProps = $props();
-  const sourceLabels = { managed: "托管", development: "开发目录", profile: "配置文件" };
+  const sourceLabels = $derived({
+    managed: t("托管"),
+    development: t("开发目录"),
+    profile: t("配置文件"),
+  });
 </script>
 
 <section class="settings-group" aria-labelledby="app-update-heading">
   <div class="settings-group-header">
     <h3 id="app-update-heading">DeepPi</h3>
-    <span class="muted" role="status">{appUpdate.status === "checking" ? "检查中" : appUpdate.status === "installing" ? "安装中" : appUpdate.status === "available" ? `可更新 · ${appUpdate.version}` : appUpdate.status === "current" ? "已是最新" : appUpdate.status === "error" ? "不可用" : "未检查"}</span>
+    <span class="muted" role="status">{appUpdate.status === "checking" ? t("检查中") : appUpdate.status === "installing" ? t("安装中") : appUpdate.status === "available" ? t("可更新 · {version}", { version: appUpdate.version ?? "" }) : appUpdate.status === "current" ? t("已是最新") : appUpdate.status === "error" ? t("不可用") : t("未检查")}</span>
   </div>
   <div class="setting-control">
-    <strong>应用更新</strong>
+    <strong>{t("应用更新")}</strong>
     <div class="runtime-actions">
       {#if appUpdate.status === "available"}
-        <button type="button" class="quiet-button" onclick={onInstallAppUpdate}><Download size={14} />安装更新</button>
+        <button type="button" class="quiet-button" onclick={onInstallAppUpdate}><Download size={14} />{t("安装更新")}</button>
       {:else}
         <button type="button" class="quiet-button" disabled={appUpdate.status === "checking" || appUpdate.status === "installing"} onclick={onCheckAppUpdate}>
-          <RefreshCw size={14} />检查应用更新
+          <RefreshCw size={14} />{t("检查应用更新")}
         </button>
       {/if}
     </div>
   </div>
-  {#if appUpdate.notes}<p class="release-notes">{appUpdate.notes}</p>{/if}
-  {#if appUpdate.error}<p role="alert">{appUpdate.error}</p>{/if}
+  {#if appUpdate.notes}<p class="release-notes">{tm(appUpdate.notes)}</p>{/if}
+  {#if appUpdate.error}<p role="alert">{tm(appUpdate.error)}</p>{/if}
 </section>
 
 <section class="settings-group" aria-labelledby="service-restart-heading">
   <div class="settings-group-header">
-    <h3 id="service-restart-heading">运行服务</h3>
+    <h3 id="service-restart-heading">{t("运行服务")}</h3>
   </div>
   <div class="setting-control">
-    <span class="setting-copy"><strong>Pi Coding Agent</strong><small>{runningPiCount > 0 ? `${runningPiCount} 个任务运行中` : "没有运行中的任务"}</small></span>
+    <span class="setting-copy"><strong>Pi Coding Agent</strong><small>{runningPiCount > 0 ? t("{count} 个任务运行中", { count: runningPiCount }) : t("没有运行中的任务")}</small></span>
     <div class="runtime-actions">
-      {#if restartBusy === "pi"}<span role="status" class="muted">正在逐个重启任务…</span>{/if}
+      {#if restartBusy === "pi"}<span role="status" class="muted">{t("正在逐个重启任务…")}</span>{/if}
       <button type="button" class="quiet-button" disabled={restartBusy !== null || busyRuntime !== null || runningPiCount === 0} onclick={onRestartPi}>
-        <RotateCcw size={14} />重启全部任务
+        <RotateCcw size={14} />{t("重启全部任务")}
       </button>
     </div>
   </div>
   <div class="setting-control">
-    <span class="setting-copy"><strong>DSH</strong><small>{dshRunning ? "运行中" : "未运行"}</small></span>
+    <span class="setting-copy"><strong>DSH</strong><small>{dshRunning ? t("运行中") : t("未运行")}</small></span>
     <div class="runtime-actions">
-      {#if restartBusy === "dsh"}<span role="status" class="muted">正在重启…</span>{/if}
+      {#if restartBusy === "dsh"}<span role="status" class="muted">{t("正在重启…")}</span>{/if}
       <button type="button" class="quiet-button" disabled={restartBusy !== null || busyRuntime !== null} onclick={onRestartDsh}>
-        <RotateCcw size={14} />{dshRunning ? "重启" : "启动"}
+        <RotateCcw size={14} />{dshRunning ? t("重启") : t("启动")}
       </button>
     </div>
   </div>
-  <p class="muted" role="status">重启 Pi 会逐个重启所有运行中的任务（会话内容保留）；重启 DSH 会停止并重新拉起 DSH 服务与界面。</p>
+  <p class="muted" role="status">{t("重启 Pi 会逐个重启所有运行中的任务（会话内容保留）；重启 DSH 会停止并重新拉起 DSH 服务与界面。")}</p>
 </section>
 
 <section class="settings-group" aria-labelledby="runtime-settings-heading">
   <div class="settings-group-header">
-    <h3 id="runtime-settings-heading">组件</h3>
-    <button type="button" class="quiet-button" disabled={isCheckingUpdates} onclick={onCheckUpdates}><RefreshCw size={14} />检查组件更新</button>
+    <h3 id="runtime-settings-heading">{t("组件")}</h3>
+    <button type="button" class="quiet-button" disabled={isCheckingUpdates} onclick={onCheckUpdates}><RefreshCw size={14} />{t("检查组件更新")}</button>
   </div>
-  {#if runtimes.length === 0}<p class="muted" role="status">尚无组件信息</p>
+  {#if runtimes.length === 0}<p class="muted" role="status">{t("尚无组件信息")}</p>
   {:else}
     {#each runtimes as runtime (runtime.id)}
       {@const update = updates.find((candidate) => candidate.id === runtime.id)}
       {@const { skipped, snoozed } = updateSuppressed({ componentId: runtime.id, update, skippedUpdates: settings.skippedUpdates, snoozedUpdates: settings.snoozedUpdates })}
       <div class="setting-control">
-        <span class="setting-copy"><strong>{runtime.name}</strong><small>{sourceLabels[runtime.source]} · {runtime.currentVersion ?? "未安装"}</small></span>
+        <span class="setting-copy"><strong>{runtime.name}</strong><small>{sourceLabels[runtime.source]} · {runtime.currentVersion ?? t("未安装")}</small></span>
         <div class="runtime-actions">
           <span role="status" class="muted">
-            {#if busyRuntime === runtime.id}{runtimeOperation?.cancelling ? "正在取消并恢复" : "处理中"}
-            {:else if skipped}已跳过 {update?.latestVersion}
-            {:else if snoozed}已稍后提醒
-            {:else if update?.stale}离线缓存 · {update.latestVersion ?? "无版本"}
-            {:else if update?.error}检查失败
-            {:else if update?.updateAvailable}可更新 · {update.latestVersion}
-            {:else if update?.latestVersion}最新{:else}未检查{/if}
+            {#if busyRuntime === runtime.id}{runtimeOperation?.cancelling ? t("正在取消并恢复") : t("处理中")}
+            {:else if skipped}{t("已跳过 {version}", { version: update?.latestVersion ?? "" })}
+            {:else if snoozed}{t("已稍后提醒")}
+            {:else if update?.stale}{t("离线缓存 · {version}", { version: update.latestVersion ?? t("无版本") })}
+            {:else if update?.error}{t("检查失败")}
+            {:else if update?.updateAvailable}{t("可更新 · {version}", { version: update.latestVersion ?? "" })}
+            {:else if update?.latestVersion}{t("最新")}{:else}{t("未检查")}{/if}
           </span>
           {#if updateActionsVisible(update, skipped, snoozed)}
             {#if update.updateAvailable}
-              <button type="button" class="quiet-button" disabled={busyRuntime !== null} onclick={() => onUpdateRuntime(update)}>{runtime.currentVersion ? "更新" : "安装"}</button>
-              <button type="button" class="quiet-button" onclick={() => onSnoozeRuntime(update)}>稍后</button>
-              <button type="button" class="quiet-button" onclick={() => onSkipRuntime(update)}>跳过</button>
+              <button type="button" class="quiet-button" disabled={busyRuntime !== null} onclick={() => onUpdateRuntime(update)}>{runtime.currentVersion ? t("更新") : t("安装")}</button>
+              <button type="button" class="quiet-button" onclick={() => onSnoozeRuntime(update)}>{t("稍后")}</button>
+              <button type="button" class="quiet-button" onclick={() => onSkipRuntime(update)}>{t("跳过")}</button>
             {:else if !update.stale && !update.error}
-              <button type="button" class="quiet-button" disabled={busyRuntime !== null} onclick={() => onUpdateRuntime(update)}>修复</button>
+              <button type="button" class="quiet-button" disabled={busyRuntime !== null} onclick={() => onUpdateRuntime(update)}>{t("修复")}</button>
             {/if}
           {/if}
           {#if update?.canRollback && !skipped}
-            <button type="button" class="quiet-button" disabled={busyRuntime !== null} onclick={() => onRollbackRuntime(update)}>回滚</button>
+            <button type="button" class="quiet-button" disabled={busyRuntime !== null} onclick={() => onRollbackRuntime(update)}>{t("回滚")}</button>
           {/if}
           {#if busyRuntime === runtime.id && runtimeOperation}
-            <button type="button" class="quiet-button icon-button" aria-label="取消组件操作" title="取消组件操作" disabled={runtimeOperation.cancelling} onclick={onCancelRuntime}><X size={14} /></button>
+            <button type="button" class="quiet-button icon-button" aria-label={t("取消组件操作")} title={t("取消组件操作")} disabled={runtimeOperation.cancelling} onclick={onCancelRuntime}><X size={14} /></button>
           {/if}
         </div>
       </div>
-      {#if update?.error}<p role="alert">{update.error}</p>{/if}
-      {#if update?.note && !update.error}<p class="muted" role="status">{update.note}</p>{/if}
+      {#if update?.error}<p role="alert">{tm(update.error)}</p>{/if}
+      {#if update?.note && !update.error}<p class="muted" role="status">{tm(update.note)}</p>{/if}
       {#if busyRuntime === runtime.id && runtimeProgress}
-        <div class="runtime-progress" role="status" aria-label="组件更新进度">
+        <div class="runtime-progress" role="status" aria-label={t("组件更新进度")}>
           <div class="runtime-progress-bar" aria-hidden="true">
             <div
               class="runtime-progress-fill"

@@ -4,6 +4,7 @@
   import { onDestroy, onMount, untrack } from "svelte";
   import { createGitStatusLoader, type GitLoadState } from "./git-status";
   import { DIFF_AREA_LABELS, diffScrollPosition, parseUnifiedDiff, type ConflictSide, type GitDiff, type GitDiffSelection } from "./git-diff";
+  import { t, tm } from "$lib/i18n.svelte";
 
   type DiffReadRequest = GitDiffSelection & { conflictSide: ConflictSide };
   let { selection, refreshToken, onClose, cancelRead = (operationId: string) => invoke<void>("cancel_git_read", { operationId }), readDiff = (request: DiffReadRequest, operationId: string) => invoke<GitDiff>("project_git_diff", {
@@ -70,44 +71,44 @@
   }
 </script>
 
-<section class="git-diff-view" aria-label="文件差异" aria-busy={loadState.loading}>
+<section class="git-diff-view" aria-label={t("文件差异")} aria-busy={loadState.loading}>
   <header>
     <FileDiff size={16} />
     <strong title={selection.path}>{selection.path}</strong>
-    <span>{DIFF_AREA_LABELS[selection.area]}</span>
+    <span>{t(DIFF_AREA_LABELS[selection.area])}</span>
     {#if loadState.loading}
-      <button type="button" aria-label="取消差异读取" title="取消差异读取" onclick={() => loader.cancel()}><Square size={14} /></button>
+      <button type="button" aria-label={t("取消差异读取")} title={t("取消差异读取")} onclick={() => loader.cancel()}><Square size={14} /></button>
     {/if}
-    <button type="button" aria-label="刷新差异" title="刷新差异" disabled={loadState.loading} onclick={() => { localRefresh++; }}><RefreshCw size={15} /></button>
-    <button type="button" aria-label="关闭差异" title="关闭差异" onclick={onClose}><X size={16} /></button>
+    <button type="button" aria-label={t("刷新差异")} title={t("刷新差异")} disabled={loadState.loading} onclick={() => { localRefresh++; }}><RefreshCw size={15} /></button>
+    <button type="button" aria-label={t("关闭差异")} title={t("关闭差异")} onclick={onClose}><X size={16} /></button>
   </header>
   {#if selection.area === "conflict"}
-    <div class="conflict-options" role="group" aria-label="工作区的比较基准">
-      <button type="button" aria-pressed={conflictSide === "base"} onclick={() => { conflictSide = "base"; }}>基准</button>
-      <button type="button" aria-pressed={conflictSide === "ours"} onclick={() => { conflictSide = "ours"; }}>当前分支</button>
-      <button type="button" aria-pressed={conflictSide === "theirs"} onclick={() => { conflictSide = "theirs"; }}>合入分支</button>
-      <span>与工作区比较</span>
+    <div class="conflict-options" role="group" aria-label={t("工作区的比较基准")}>
+      <button type="button" aria-pressed={conflictSide === "base"} onclick={() => { conflictSide = "base"; }}>{t("基准")}</button>
+      <button type="button" aria-pressed={conflictSide === "ours"} onclick={() => { conflictSide = "ours"; }}>{t("当前分支")}</button>
+      <button type="button" aria-pressed={conflictSide === "theirs"} onclick={() => { conflictSide = "theirs"; }}>{t("合入分支")}</button>
+      <span>{t("与工作区比较")}</span>
     </div>
   {/if}
   {#if loadState.loading && !loadState.value}
-    <p role="status">正在读取差异…</p>
+    <p role="status">{t("正在读取差异…")}</p>
   {:else if loadState.error}
-    <p role="alert">{loadState.error}</p>
+    <p role="alert">{tm(loadState.error)}</p>
   {:else if loadState.value}
     {@const diff = loadState.value}
-    {#if diff.truncated}<p class="warning" role="status">差异超过显示上限，仅展示部分内容。</p>{/if}
-    {#if diff.sourceOutsideProject}<p class="warning">重命名源位于项目范围外，仅比较本项目内容。</p>{/if}
+    {#if diff.truncated}<p class="warning" role="status">{t("差异超过显示上限，仅展示部分内容。")}</p>{/if}
+    {#if diff.sourceOutsideProject}<p class="warning">{t("重命名源位于项目范围外，仅比较本项目内容。")}</p>{/if}
     {#if diff.format === "binary"}
-      <p role="status">二进制文件，无法显示文本差异。</p>
+      <p role="status">{t("二进制文件，无法显示文本差异。")}</p>
     {:else if diff.format === "unsupportedEncoding"}
-      <p role="status">文件不是有效 UTF-8，未进行有损转换。请使用支持该编码的外部编辑器查看。</p>
+      <p role="status">{t("文件不是有效 UTF-8，未进行有损转换。请使用支持该编码的外部编辑器查看。")}</p>
     {:else if !rows.length}
-      <p role="status">{selection.area === "conflict" ? "所选侧没有可显示的文本差异，文件仍处于冲突状态。" : "当前没有可显示的文本差异。"}</p>
+      <p role="status">{selection.area === "conflict" ? t("所选侧没有可显示的文本差异，文件仍处于冲突状态。") : t("当前没有可显示的文本差异。")}</p>
     {:else}
       <div class="diff-scroll" bind:this={viewport} bind:clientHeight={height}
         onkeydown={scrollWithKeyboard}
         onscroll={(event) => { scrollTop = event.currentTarget.scrollTop; }}
-        tabindex="0" role="textbox" aria-readonly="true" aria-multiline="true" aria-label="统一差异，左侧为原始行号，右侧为新行号">
+        tabindex="0" role="textbox" aria-readonly="true" aria-multiline="true" aria-label={t("统一差异，左侧为原始行号，右侧为新行号")}>
         <div class="diff-lines" style:height={`${rows.length * rowHeight}px`} style:min-width={`calc(14ch + ${widthChars}ch)`}>
           <div class="visible-lines" style:transform={`translateY(${start * rowHeight}px)`}>
             {#each rows.slice(start, end) as row, index (start + index)}
@@ -132,7 +133,7 @@
   header :global(svg) { flex-shrink: 0; }
   strong { flex: 1; min-width: 50px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
   header span { color: var(--text-muted); font-size: 11px; }
-  header button { display: grid; place-items: center; flex-shrink: 0; width: 28px; height: 28px; border: 0; border-radius: 4px; background: transparent; color: var(--text); cursor: pointer; }
+  header button { display: grid; place-items: center; flex-shrink: 0; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--text); cursor: pointer; }
   button:disabled { opacity: .4; cursor: default; }
   button:hover:not(:disabled) { background: var(--surface-hover); }
   .conflict-options { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 6px 12px; border-bottom: 1px solid var(--border); }

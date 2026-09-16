@@ -15,17 +15,19 @@
     Bot,
     FolderPlus,
     LayoutGrid,
-    PanelLeft,
-    PanelRight,
-    PanelTop,
+  PanelLeftClose,
+  PanelLeftOpen,
+  PanelRightClose,
+  PanelRightOpen,
     Plus,
     RotateCcw,
+    Wrench,
+    History,
     Settings2,
     Globe,
     GitBranch,
   } from "@lucide/svelte";
   import { onMount, tick } from "svelte";
-  import AppMenu from "$lib/AppMenu.svelte";
   import FileSidebar from "$lib/FileSidebar.svelte";
   import { createFileWorkspace, type FileDocument, type FileSaveResult } from "$lib/file-workspace";
   import type { FilePreview } from "$lib/files";
@@ -45,6 +47,7 @@
   import PiMcpSkillsSettings from "$lib/PiMcpSkillsSettings.svelte";
   import PiProviderSettings from "$lib/PiProviderSettings.svelte";
   import PiSettings from "$lib/PiSettings.svelte";
+  import DshSettings from "$lib/DshSettings.svelte";
   import type { SettingsCategory } from "$lib/settings-navigation";
   import { createSettingsSaver } from "$lib/settings-save";
   import TaskSidebar from "$lib/TaskSidebar.svelte";
@@ -53,11 +56,16 @@
   import { SNOOZE_DURATION_MS } from "$lib/runtime";
   import {
     DEFAULT_APP_SETTINGS,
-    cssFontFamily,
+    cssAppFontFamily,
+    cssSessionFontFamily,
+    cssCodeFontFamily,
     isLightColorMode,
     type AppSettings,
     type CloseBehavior,
   } from "$lib/settings";
+  import { resolveTheme, themeCssVariables } from "$lib/theme";
+  import { setLocale, t, tm } from "$lib/i18n.svelte";
+  import TaskBoard from "$lib/TaskBoard.svelte";
   import type { Task, TaskStatus } from "$lib/task";
   import {
     changePaneCapacity,
@@ -118,6 +126,7 @@
   let view = $state<"workspace" | "settings">("workspace");
   let settingsCategory = $state<SettingsCategory>("general");
   let diagnosticsBusy = $state(false);
+  let dshBusy = $state(false);
   let settingsPackageBusy = $state(false);
   let activeAgent = $state<"pi" | "dsh">("pi");
   let isDshStarting = $state(false);
@@ -127,8 +136,8 @@
   let switchingTasks = $state(new Set<string>());
   const modeSwitcher = createTaskModeSwitcher({
     confirm: (task, target) => confirmDialog(
-      target === "rpc" ? "切换到对话模式" : "切换到终端兼容模式",
-      `停止“${task.title}”的当前进程，并使用同一个 Pi 会话继续吗？当前未完成的响应可能中断。`,
+      target === "rpc" ? t("切换到对话模式") : t("切换到终端兼容模式"),
+      t("停止“{title}”的当前进程，并使用同一个 Pi 会话继续吗？当前未完成的响应可能中断。", { title: task.title }),
     ),
     stop: (task) => invoke(task.interactionMode === "rpc" ? "stop_rpc_task" : "stop_pi_run", {
       taskId: task.id, runId: task.runId,
@@ -149,6 +158,8 @@
   let gitVisible = $state(false);
   const showGit = $derived(gitVisible && activeAgent === "pi" && view === "workspace");
   let filesVisible = $state(true);
+  /** 是否用「任务看板」替代流式对话视图（仅 Pi 工作区）。 */
+  let boardView = $state(false);
   const showFiles = $derived(activeAgent === "pi" && view === "workspace" && filesVisible);
   let fileSidebarVisited = $state(false);
   $effect(() => {
@@ -192,9 +203,9 @@
     save: (projectId, relativePath, content, expectedVersion) => invoke<FileSaveResult>("save_project_file", { projectId, relativePath, content, expectedVersion }),
     chooseClose: async (documents) => {
       const result = await dialogs.request({
-        kind: "choice", title: "未保存的文件",
+        kind: "choice", title: t("未保存的文件"),
         message: documents.map((doc) => `${projects.find((project) => project.id === doc.projectId)?.name ?? doc.projectId} / ${doc.path}`).join("\n"),
-        choices: [{ value: "save", label: "保存后继续" }, { value: "discard", label: "放弃未保存的修改" }],
+        choices: [{ value: "save", label: t("保存后继续") }, { value: "discard", label: t("放弃未保存的修改") }],
       });
       return result === "save" || result === "discard" ? result : null;
     },
@@ -205,8 +216,10 @@
   let openedDiff = $state<GitDiffSelection | null>(null);
   const inspectingFile = $derived(!!openedFile || !!openedDiff);
   let searchFocusToken = $state(0);
-  let menuOpen = $state(false);
   let dshVisibility = Promise.resolve();
+  let sidebarWidth = $state<number | null>(null);
+  let filesWidth = $state<number | null>(null);
+  let gitWidth = $state<number | null>(null);
   const showSidebar = $derived(activeAgent === "pi" && view === "workspace" && sidebarVisible);
   const activeTask = $derived(tasks.find((task) => task.id === activeTaskId));
   const runningPiCount = $derived(tasks.filter((task) => task.agent === "pi" && ["running", "waiting"].includes(task.status)).length);
@@ -225,7 +238,7 @@
   // Serialize visibility requests because native child Webviews cover HTML menus.
   $effect(() => {
     const child = dshWebview;
-    const visible = activeAgent === "dsh" && !menuOpen && !dialogRequest && !closingWindow && !recoveryProject;
+    const visible = activeAgent === "dsh" && !dialogRequest && !closingWindow && !recoveryProject;
     dshVisibility = dshVisibility.then(async () => {
       if (child) {
         if (visible) await child.show();
@@ -288,69 +301,73 @@
     else sidebarVisible = !sidebarVisible;
   }
 
+  const PANEL_WIDTH_KEY = "deeppi-panel-widths";
+  const PANEL_WIDTH_BOUNDS = { min: 170, max: 560 } as const;
+
+  function clampPanelWidth(width: number): number {
+    return Math.round(Math.min(PANEL_WIDTH_BOUNDS.max, Math.max(PANEL_WIDTH_BOUNDS.min, width)));
+  }
+
+  function loadPanelWidths() {
+    try {
+      const raw = localStorage.getItem(PANEL_WIDTH_KEY);
+      if (!raw) return;
+      const parsed: unknown = JSON.parse(raw);
+      if (typeof parsed !== "object" || parsed === null) return;
+      const widths = parsed as Record<string, unknown>;
+      if (typeof widths.sidebar === "number" && Number.isFinite(widths.sidebar)) sidebarWidth = clampPanelWidth(widths.sidebar);
+      if (typeof widths.files === "number" && Number.isFinite(widths.files)) filesWidth = clampPanelWidth(widths.files);
+      if (typeof widths.git === "number" && Number.isFinite(widths.git)) gitWidth = clampPanelWidth(widths.git);
+    } catch {
+      // 忽略损坏的本地缓存。
+    }
+  }
+
+  function savePanelWidths() {
+    try {
+      localStorage.setItem(PANEL_WIDTH_KEY, JSON.stringify({ sidebar: sidebarWidth, files: filesWidth, git: gitWidth }));
+    } catch {
+      // 存储不可用时静默降级。
+    }
+  }
+
+  /// 面板边缘拖拽调宽：left 面板右缘向右拖增宽；right 面板左缘向左拖增宽。
+  function startPanelResize(panel: "sidebar" | "files" | "git", event: PointerEvent) {
+    const handle = event.currentTarget as HTMLElement;
+    const panelEl = handle.parentElement;
+    if (!panelEl) return;
+    event.preventDefault();
+    const startX = event.clientX;
+    const initial = panelEl.getBoundingClientRect().width;
+    const growRight = panel === "sidebar";
+    handle.setPointerCapture(event.pointerId);
+    handle.classList.add("resizing");
+    document.body.classList.add("panel-resizing");
+    const onMove = (move: PointerEvent) => {
+      const delta = move.clientX - startX;
+      const next = clampPanelWidth(initial + (growRight ? delta : -delta));
+      if (panel === "sidebar") sidebarWidth = next;
+      else if (panel === "files") filesWidth = next;
+      else gitWidth = next;
+    };
+    const onUp = () => {
+      handle.removeEventListener("pointermove", onMove);
+      handle.removeEventListener("pointerup", onUp);
+      handle.classList.remove("resizing");
+      document.body.classList.remove("panel-resizing");
+      savePanelWidths();
+    };
+    handle.addEventListener("pointermove", onMove);
+    handle.addEventListener("pointerup", onUp);
+  }
+
   function handleShortcut(event: KeyboardEvent) {
     if (startupPending || startupFailure) return;
-    const decision = hostShortcutDecision(event, shortcutContext(), menuOpen);
+    const decision = hostShortcutDecision(event, shortcutContext());
     if (decision.consume) { event.preventDefault(); event.stopPropagation(); }
     if (decision.command) runHostCommand(decision.command);
   }
 
-  function shortcutMenu(command: HostCommand) {
-    return {
-      shortcut: shortcutLabel(command), shortcutAria: shortcutAria(command),
-      disabled: !hostCommandEnabled(command, shortcutContext()), action: () => runHostCommand(command),
-    };
-  }
-
-  const menus = $derived.by(() => [
-    { label: "文件", items: [
-      { label: "打开项目目录…", action: () => void addProject() },
-      { label: "搜索文件", ...shortcutMenu("files") },
-      { label: "恢复副本…", disabled: !selectedProjectId || recoveryBusy, action: () => {
-        const project = projects.find((candidate) => candidate.id === selectedProjectId);
-        if (!project || recoveryBusy || closingWindow) return;
-        recoveryModule ??= import("$lib/FileRecoveryPanel.svelte");
-        recoveryProject = { id: project.id, name: project.name };
-      } },
-      { label: "保存文件", ...shortcutMenu("save") },
-      { label: "文件另存为…", ...shortcutMenu("saveAs") },
-      { label: "新建任务", disabled: !canStart || activeAgent !== "pi", action: () => void startTask() },
-      { label: "新建终端任务", disabled: !canStart || activeAgent !== "pi", action: () => void startTask(selectedProjectId, "tui") },
-    ] },
-    { label: "编辑", items: [
-      { label: "搜索任务", ...shortcutMenu("tasks") },
-      { label: "重命名当前任务…", disabled: !activeTask || activeAgent !== "pi", action: () => { if (activeTask) void renameTask(activeTask); } },
-      { label: "聚焦对话输入", ...shortcutMenu("composer") },
-    ] },
-    { label: "视图", items: [
-      { label: "切换到对话模式", disabled: !activeTask || activeAgent !== "pi" || activeTask.interactionMode === "rpc" || switchingTasks.has(activeTask.id),
-        action: () => { if (activeTask) void switchTaskMode(activeTask, "rpc"); } },
-      { label: "切换到终端兼容模式", disabled: !activeTask || activeAgent !== "pi" || activeTask.interactionMode !== "rpc" || switchingTasks.has(activeTask.id),
-        action: () => { if (activeTask) void switchTaskMode(activeTask, "tui"); } },
-      { label: sidebarVisible ? "隐藏项目侧栏" : "显示项目侧栏", ...shortcutMenu("sidebar") },
-      { label: filesVisible ? "隐藏文件栏" : "显示文件栏", disabled: activeAgent !== "pi" || view !== "workspace", action: () => { filesVisible = !filesVisible; } },
-      { label: gitVisible ? "隐藏 Git 变更栏" : "显示 Git 变更栏", disabled: activeAgent !== "pi" || view !== "workspace", action: () => { gitVisible = !gitVisible; } },
-      { label: "Pi 工作区", action: () => void showPi() },
-      { label: "DSH 工作区", action: () => void showDsh() },
-      { label: "单任务布局", disabled: activeAgent !== "pi", action: () => changeLayout("single") },
-      { label: "双列布局", disabled: activeAgent !== "pi", action: () => changeLayout("split") },
-      { label: "网格布局", disabled: activeAgent !== "pi", action: () => changeLayout("grid") },
-    ] },
-    { label: "设置", items: [
-      { label: "应用设置", ...shortcutMenu("settings") },
-      { label: "外观", action: () => openSettingsCategory("appearance") },
-      { label: "模型与凭据", action: () => openSettingsCategory("models") },
-      { label: "运行时与更新", action: () => openSettingsCategory("runtime") },
-      { label: "Pi 扩展", action: () => openSettingsCategory("extensions") },
-      { label: "MCP 服务", action: () => openSettingsCategory("mcp") },
-      { label: "Skills 技能", action: () => openSettingsCategory("skills") },
-      { label: "高级与诊断", action: () => openSettingsCategory("advanced") },
-    ] },
-    { label: "帮助", items: [
-      { label: "检查应用更新", action: () => { openSettingsCategory("runtime"); void checkDeepPiUpdate(); } },
-      { label: "关于 DeepPi", action: () => { void dialogs.request({ kind: "alert", title: "DeepPi", message: "Pi Coding Agent 与 DeepSeek Harness 桌面工作台。", confirmLabel: "关闭" }); } },
-    ] },
-  ]);
 
   const piTasks = $derived(tasks.filter((task) => task.agent === "pi"));
   const selectedProject = $derived(
@@ -378,12 +395,25 @@
   function applyAppearance(next: AppSettings) {
     if (typeof document === "undefined") return;
     const root = document.documentElement;
+    const scheme = isLightColorMode(next.colorMode) ? "light" : "dark";
     root.dataset.colorMode = next.colorMode;
-    root.dataset.colorScheme = isLightColorMode(next.colorMode) ? "light" : "dark";
+    root.dataset.colorScheme = scheme;
     root.dataset.theme = next.theme;
-    root.style.setProperty("--app-font", cssFontFamily(next.appFont));
-    root.style.setProperty("--text-font", cssFontFamily(next.textFont));
-    root.style.setProperty("--code-font", cssFontFamily(next.codeFont));
+    setLocale(next.language);
+    // 同步 <html lang>：影响无障碍朗读、字体选择与 :lang() 选择器。
+    root.lang = next.language;
+    // 主题包 → 颜色令牌；字体在主题默认值之上叠加用户自定义（用户设置优先）。
+    const theme = resolveTheme(next.theme, next.customThemes ?? []);
+    for (const [name, value] of Object.entries(themeCssVariables(theme, scheme))) {
+      root.style.setProperty(name, value);
+    }
+    const appFont = cssAppFontFamily(next.appFontName, theme.typography?.appFont);
+    root.style.setProperty("--app-font", appFont);
+    root.style.setProperty("--text-font", appFont);
+    root.style.setProperty("--session-font", cssSessionFontFamily(next.sessionFontName, theme.typography?.sessionFont));
+    root.style.setProperty("--code-font", cssCodeFontFamily(next.codeFont, theme.typography?.codeFont));
+    root.style.setProperty("--app-font-size", `${next.appFontSize}px`);
+    root.style.setProperty("--session-font-size", `${next.sessionFontSize}px`);
   }
 
   $effect(() => {
@@ -422,7 +452,7 @@
         status: "error",
         version: null,
         notes: null,
-        error: String(error),
+        error: tm(String(error)),
       };
     }
   }
@@ -433,7 +463,7 @@
     try {
       await installAppUpdate(pendingAppUpdate);
     } catch (error) {
-      appUpdate = { ...appUpdate, status: "error", error: String(error) };
+      appUpdate = { ...appUpdate, status: "error", error: tm(String(error)) };
     }
   }
 
@@ -464,6 +494,22 @@
     await changeRuntime(update, false);
   }
 
+  /// “未激活”型 DSH 启动失败：把 DSH 运行时对齐到 DeepPi 验证过的版本。
+  async function alignDshRuntime() {
+    if (busyRuntime) return;
+    try {
+      await checkUpdates(true);
+      const update = updates.find((candidate) => candidate.id === "dsh");
+      if (!update?.latestVersion || !update.installable) {
+        showError(t("没有可安装的 DSH 运行时版本，请在“运行时与更新”里检查更新。"));
+        return;
+      }
+      await installRuntime(update);
+    } catch (error) {
+      showError(error);
+    }
+  }
+
   async function rollbackRuntime(update: RuntimeUpdate) {
     if (!update.canRollback) return;
     await changeRuntime(update, true);
@@ -471,7 +517,7 @@
 
   async function cancelRuntime() {
     try {
-      if (!(await runtimeRunner.cancel())) showError("当前操作尚未接受取消，或已进入提交阶段。");
+      if (!(await runtimeRunner.cancel())) showError(t("当前操作尚未接受取消，或已进入提交阶段。"));
     } catch (error) {
       showError(error);
     }
@@ -483,8 +529,8 @@
     let stoppedDsh = false;
     try {
       const confirmed = rollback
-        ? await confirmDialog("回滚组件", `恢复 ${update.name} 的上一版本吗？`, "回滚")
-        : await confirmDialog("更新组件", `下载并激活 ${update.name} ${update.latestVersion} 吗？当前运行时会保留。`, "更新");
+        ? await confirmDialog(t("回滚组件"), t("恢复 {name} 的上一版本吗？", { name: update.name }), t("回滚"))
+        : await confirmDialog(t("更新组件"), t("下载并激活 {name} {version} 吗？当前运行时会保留。", { name: update.name, version: String(update.latestVersion) }), t("更新"));
       if (!confirmed) return;
       const affectsDsh = update.id === "dsh" || update.id === "dshmarket";
       if (affectsDsh) {
@@ -510,6 +556,7 @@
   }
 
   onMount(() => {
+    loadPanelWidths();
     window.addEventListener("keydown", handleShortcut, true);
     if (!isTauri()) {
       startupPending = false;
@@ -540,8 +587,8 @@
           null;
       },
       error: (scope, error) => {
-        if (scope === "workspace") startupFailure = String(error);
-        else errorMessage = String(error);
+        if (scope === "workspace") startupFailure = tm(String(error));
+        else errorMessage = tm(String(error));
       },
     });
     void startup.ready.then((ready) => {
@@ -566,10 +613,10 @@
     const closeListener = appWindow.onCloseRequested(createWindowCloseHandler({
       behavior: () => nativeReady ? settings.closeBehavior : "exit",
       blocked: () => diagnosticsBusy || recoveryBusy || fileWorkspace.busy() || switchingTasks.size > 0 || gitIndexBusy || settingsPackageBusy || busyRuntime !== null,
-      blockedReason: () => diagnosticsBusy ? "诊断操作正在处理，请完成或取消后再关闭窗口" : recoveryBusy || fileWorkspace.busy() ? "项目文件正在处理，请完成后再关闭窗口" : settingsPackageBusy || busyRuntime !== null ? "组件操作正在处理，请完成或取消后再关闭窗口" : gitIndexBusy ? "Git 写入正在处理，请完成后再关闭窗口" : "任务正在切换模式，请完成后再关闭窗口",
+      blockedReason: () => diagnosticsBusy ? t("诊断操作正在处理，请完成或取消后再关闭窗口") : recoveryBusy || fileWorkspace.busy() ? t("项目文件正在处理，请完成后再关闭窗口") : settingsPackageBusy || busyRuntime !== null ? t("组件操作正在处理，请完成或取消后再关闭窗口") : gitIndexBusy ? t("Git 写入正在处理，请完成后再关闭窗口") : t("任务正在切换模式，请完成后再关闭窗口"),
       hasActiveTasks: () => tasks.some((task) => ["running", "waiting"].includes(task.status)),
       choose: closeChoiceDialog,
-      confirm: () => confirmDialog("退出 DeepPi", "仍有活动任务，停止任务并退出吗？"),
+      confirm: () => confirmDialog(t("退出 DeepPi"), t("仍有活动任务，停止任务并退出吗？")),
       remember: (behavior) => updateSettings({ ...settings, closeBehavior: behavior }),
       minimize: () => appWindow.minimize(),
       prepareExit: async () => {
@@ -640,12 +687,13 @@
   });
 
   function showError(error: unknown) {
-    errorMessage = String(error);
+    // 后端只回消息码（`@msg:` 协议），在这里按当前语言渲染。
+    errorMessage = tm(String(error));
     void dialogs.request({
       kind: "alert",
-      title: "操作失败",
+      title: t("操作失败"),
       message: errorMessage,
-      confirmLabel: "知道了",
+      confirmLabel: t("知道了"),
     });
   }
 
@@ -653,7 +701,7 @@
     dialogs.resolve(value);
   }
 
-  function confirmDialog(title: string, message: string, confirmLabel = "确认") {
+  function confirmDialog(title: string, message: string, confirmLabel = t("确认")) {
     return dialogs.request({ kind: "confirm", title, message, confirmLabel })
       .then((value) => value === true);
   }
@@ -661,11 +709,11 @@
   function closeChoiceDialog() {
     return dialogs.request({
       kind: "choice",
-      title: "关闭 DeepPi",
-      message: "选择点击窗口关闭按钮时的默认行为。这个选择会记住，也可以在设置中修改。",
+      title: t("关闭 DeepPi"),
+      message: t("选择点击窗口关闭按钮时的默认行为。这个选择会记住，也可以在设置中修改。"),
       choices: [
-        { value: "minimize", label: "最小化" },
-        { value: "exit", label: "退出应用" },
+        { value: "minimize", label: t("最小化") },
+        { value: "exit", label: t("退出应用") },
       ],
     }).then((value): CloseBehavior | null => value === "minimize" || value === "exit" ? value : null);
   }
@@ -681,8 +729,8 @@
       title,
       message,
       initialValue,
-      placeholder: "输入任务名称",
-      confirmLabel: "保存",
+      placeholder: t("输入任务名称"),
+      confirmLabel: t("保存"),
     }).then((value) => typeof value === "string" ? value.trim() : null);
   }
 
@@ -715,7 +763,7 @@
       const selection = await open({
         directory: true,
         multiple: false,
-        title: "选择 Pi 项目目录",
+        title: t("选择 Pi 项目目录"),
       });
       const path = Array.isArray(selection) ? selection[0] : selection;
       if (!path) return;
@@ -732,12 +780,12 @@
   }
 
   async function removeProject(project: Project) {
-    if (recoveryBusy) { showError("恢复副本正在处理，请完成后再移除项目。"); return; }
+    if (recoveryBusy) { showError(t("恢复副本正在处理，请完成后再移除项目。")); return; }
     if (
       !(await confirmDialog(
-        "移除项目",
-        `从工作区移除“${project.name}”吗？本机目录、任务和会话不会被删除。`,
-        "移除",
+        t("移除项目"),
+        t("从工作区移除“{name}”吗？本机目录、任务和会话不会被删除。", { name: project.name }),
+        t("移除"),
       ))
     ) {
       return;
@@ -778,7 +826,7 @@
       if (project && selectedProjectId !== project.id) selectProject(project);
     }
     if (!terminalTaskIds.includes(task.id)) {
-      showError("该任务没有活动终端，请先重启任务");
+      showError(t("该任务没有活动终端，请先重启任务"));
       return;
     }
     applyPaneSelection(
@@ -821,7 +869,7 @@
   /** 右键分割：把目标任务放进新窗格（向右/向下），布局自动升级到双列或四格。 */
   function splitTask(task: Task, direction: "right" | "down") {
     if (!terminalTaskIds.includes(task.id)) {
-      showError("该任务没有活动终端，请先重启任务");
+      showError(t("该任务没有活动终端，请先重启任务"));
       return;
     }
     if (layout === "single") {
@@ -847,7 +895,13 @@
     const component = runtimes.find((runtime) => runtime.id === id);
     return component?.currentVersion
       ? `${component.name} ${component.currentVersion}`
-      : `${id} 未安装`;
+      : t("{id} 未安装", { id });
+  }
+
+  /** 控制柱按钮的悬停提示：始终带可读说明，有运行时版本信息时追加在后面。 */
+  function railTitle(label: string, id: RuntimeComponent["id"]): string {
+    const runtime = runtimeTitle(id);
+    return runtime ? `${label} · ${runtime}` : label;
   }
 
   async function syncDshBounds() {
@@ -894,13 +948,13 @@
         height: Math.max(1, bounds.height),
       });
       dshWebview = await waitForDshWebview();
-      if (activeAgent !== "dsh" || menuOpen || dialogRequest) await dshWebview.hide();
+      if (activeAgent !== "dsh" || dialogRequest) await dshWebview.hide();
       else await dshWebview.setFocus();
       await syncDshBounds();
     } catch (error) {
       activeAgent = "pi";
-      dshHostError = String(error);
-      showError(`DSH 启动失败：${String(error)}`);
+      dshHostError = tm(String(error));
+      showError(t("DSH 启动失败：{error}", { error: tm(String(error)) }));
     } finally {
       isDshStarting = false;
     }
@@ -926,11 +980,15 @@
 
   function canLeaveSettings() {
     if (view === "settings" && diagnosticsBusy) {
-      showError("诊断操作正在处理，请先完成或取消操作");
+      showError(t("诊断操作正在处理，请先完成或取消操作"));
+      return false;
+    }
+    if (view === "settings" && dshBusy) {
+      showError(t("DSH 检测/修复操作正在处理，请先完成或取消操作"));
       return false;
     }
     if (view === "settings" && settingsPackageBusy) {
-      showError("扩展操作正在处理，请先完成或取消操作");
+      showError(t("扩展操作正在处理，请先完成或取消操作"));
       return false;
     }
     return true;
@@ -944,7 +1002,7 @@
   async function startTask(projectId: string | null = selectedProjectId, mode: "rpc" | "tui" = "rpc") {
     const project = projects.find((candidate) => candidate.id === projectId);
     if (!project) {
-      showError("请先添加并选择一个 Pi 项目目录");
+      showError(t("请先添加并选择一个 Pi 项目目录"));
       return;
     }
     if (isStarting || runningCount >= settings.maxConcurrentTasks) return;
@@ -955,8 +1013,8 @@
       if (
         hasProjectConflict(project.path, piTasks) &&
         !(await confirmDialog(
-          "确认并发写入",
-          "该项目已有活动任务，继续可能产生文件冲突。仍要创建任务吗？",
+          t("确认并发写入"),
+          t("该项目已有活动任务，继续可能产生文件冲突。仍要创建任务吗？"),
         ))
       ) {
         return;
@@ -996,7 +1054,7 @@
   }
 
   async function renameTask(task: Task) {
-    const title = await inputDialog("重命名任务", "修改任务在项目列表中的显示名称。", task.title);
+    const title = await inputDialog(t("重命名任务"), t("修改任务在项目列表中的显示名称。"), task.title);
     if (!title || title === task.title) return;
     try {
       await invoke("rename_task", { taskId: task.id, title });
@@ -1038,7 +1096,7 @@
   async function restartTask(task: Task, mode = task.interactionMode ?? "tui") {
     if (modeSwitcher.isBusy(task.id)) return;
     if (task.piEnvironment && task.piEnvironment !== "managed") {
-      showError("该任务来自旧版本机 Pi 环境，当前稳定版仅支持 DeepPi 托管任务，本机会话记录已保留。");
+      showError(t("该任务来自旧版本机 Pi 环境，当前稳定版仅支持 DeepPi 托管任务，本机会话记录已保留。"));
       return;
     }
     try {
@@ -1053,9 +1111,9 @@
     const candidates = tasks.filter((task) => task.agent === "pi" && ["running", "waiting"].includes(task.status));
     if (candidates.length === 0) return;
     const confirmed = await confirmDialog(
-      "重启 Pi 任务",
-      `重启 ${candidates.length} 个运行中的 Pi 任务吗？会话内容保留，正在切换中的任务将被跳过。`,
-      "重启",
+      t("重启 Pi 任务"),
+      t("重启 {count} 个运行中的 Pi 任务吗？会话内容保留，正在切换中的任务将被跳过。", { count: candidates.length }),
+      t("重启"),
     );
     if (!confirmed) return;
     restartBusy = "pi";
@@ -1112,7 +1170,7 @@
 
   async function deleteTask(task: Task) {
     if (modeSwitcher.isBusy(task.id)) return;
-    if (!(await confirmDialog("删除任务", `永久删除“${task.title}”的 DeepPi 任务记录吗？`))) return;
+    if (!(await confirmDialog(t("删除任务"), t("永久删除“{title}”的 DeepPi 任务记录吗？", { title: task.title })))) return;
     try {
       if (task.agent === "pi" && ["queued", "running", "waiting"].includes(task.status)) {
         await stopTask(task);
@@ -1129,37 +1187,60 @@
 <svelte:head><title>DeepPi</title></svelte:head>
 
 {#if startupPending || startupFailure}
-  <section class="startup-status" aria-label="工作区启动" aria-live="polite">
+  <section class="startup-status" aria-label={t("工作区启动")} aria-live="polite">
     {#if startupFailure}
-      <p role="alert">{startupFailure}</p>
-      <button type="button" onclick={() => window.location.reload()}><RotateCcw size={16} />重新加载</button>
+      <p role="alert">{tm(startupFailure)}</p>
+      <button type="button" onclick={() => window.location.reload()}><RotateCcw size={16} />{t("重新加载")}</button>
     {:else}
-      <p role="status">正在加载工作区…</p>
+      <p role="status">{t("正在加载工作区…")}</p>
     {/if}
   </section>
 {/if}
-<div class:dsh-mode={activeAgent === "dsh"} class:sidebar-hidden={!showSidebar} class:files-hidden={!showFiles} class:git-visible={showGit} class="app-shell" inert={closingWindow || startupPending || !!startupFailure} aria-busy={closingWindow || startupPending}>
-  <header class="topbar">
-    <div class="brand"><Bot size={18} strokeWidth={1.8} /><strong>DeepPi</strong></div>
-
-    <AppMenu {menus} onOpenChange={(open) => { menuOpen = open; }} />
-
-    {#if activeAgent === "pi"}
-      <div class="toolbar">
-        <button class:active={showSidebar} type="button" aria-label="切换工作区侧栏" title={showSidebar ? "折叠工作区" : "展开工作区"}
-          aria-pressed={showSidebar} onclick={() => { if (!canLeaveSettings()) return; view = "workspace"; sidebarVisible = !sidebarVisible; }}><PanelLeft size={16} /></button>
-        <button class:active={showFiles} type="button" aria-label="切换文件栏" title={showFiles ? "折叠文件栏" : "展开文件栏"}
-          aria-pressed={showFiles} onclick={() => { if (!canLeaveSettings()) return; view = "workspace"; filesVisible = !filesVisible; }}><PanelRight size={16} /></button>
-      </div>
-    {/if}
-  </header>
-
-  <nav class="activity-rail" aria-label="工作区导航">
-    <button type="button" class:active={activeAgent === "pi" && view === "workspace"} aria-label="Pi 工作区" title={runtimeTitle("pi")} onclick={showPi}><Bot size={21} /><span>Pi</span></button>
-    <button type="button" class:active={activeAgent === "dsh"} aria-label="DSH 工作区" title={runtimeTitle("dsh")} onclick={showDsh}><Globe size={21} /><span>DSH</span></button>
-    <button type="button" class="rail-settings" class:active={view !== "workspace"} aria-label="设置" aria-keyshortcuts={shortcutAria("settings")} title={`设置 (${shortcutLabel("settings")})`} onclick={openSettings}><Settings2 size={21} /></button>
+<div style={`--sidebar-w:${sidebarWidth ?? 260}px; --files-w:${filesWidth ?? 260}px; --git-w:${gitWidth ?? 300}px`} class:dsh-mode={activeAgent === "dsh"} class:sidebar-hidden={!showSidebar} class:files-hidden={!showFiles} class:files-visible={showFiles} class:git-visible={showGit} class="app-shell" inert={closingWindow || startupPending || !!startupFailure} aria-busy={closingWindow || startupPending}>
+  <nav class="command-rail" aria-label={t("工作区导航")}>
+    <div class="rail-brand" title="DeepPi" aria-hidden="true">π</div>
+    <div class="rail-divider"></div>
+    <button type="button" class="rail-item" class:selected={activeAgent === "pi" && view === "workspace"}
+      aria-label={t("Pi 工作区")} aria-pressed={activeAgent === "pi" && view === "workspace"}
+      title={railTitle(t("Pi 工作区"), "pi")} onclick={showPi}><Bot size={18} /></button>
+    <button type="button" class="rail-item" class:selected={activeAgent === "dsh"}
+      aria-label={t("DSH 工作区")} aria-pressed={activeAgent === "dsh"}
+      title={railTitle(t("DSH 工作区"), "dsh")} onclick={showDsh}><Globe size={18} /></button>
+    <button type="button" class="rail-item" class:selected={boardView && view === "workspace"}
+      aria-label={t("任务看板")} aria-pressed={boardView && view === "workspace"}
+      title={t("任务看板：总览所有任务状态")}
+      onclick={() => { if (!canLeaveSettings()) return; view = "workspace"; activeAgent = "pi"; boardView = !boardView; }}><LayoutGrid size={18} /></button>
+    <div class="rail-spacer"></div>
+    <button type="button" class="rail-item" class:selected={view !== "workspace"}
+      aria-label={t("设置")} aria-pressed={view !== "workspace"} aria-keyshortcuts={shortcutAria("settings")}
+      title={`${t("设置")} (${shortcutLabel("settings")})`} onclick={openSettings}><Settings2 size={18} /></button>
   </nav>
-  <aside class="project-sidebar" class:panel-hidden={!showSidebar} aria-label="项目侧栏">
+  <header class="topbar">
+    <div class="stage-crumbs">
+      {#if activeAgent === "pi" && selectedProject}
+        <span class="crumb-project"><span class="crumb-dot"></span>{selectedProject.name}</span>
+        <span class="crumb-sep">/</span>
+        <span class="crumb-task" title={activeTask?.title ?? ""}>{activeTask?.title ?? t("未选择任务")}</span>
+      {:else if activeAgent === "pi"}
+        <span class="crumb-task">{t("尚未选择项目")}</span>
+      {:else}
+        <span class="crumb-project"><span class="crumb-dot"></span>DeepSeek Harness</span>
+      {/if}
+    </div>
+
+    <div class="toolbar">
+      {#if activeAgent === "pi"}
+        <button type="button" aria-label={t("切换 Git 变更栏")} title={showGit ? t("隐藏 Git 变更栏") : t("显示 Git 变更栏")}
+          aria-pressed={showGit} onclick={() => { if (!canLeaveSettings()) return; gitVisible = !gitVisible; }}><GitBranch size={16} /></button>
+        <button type="button" aria-label={t("切换布局")} title={t("布局：{layout}（点击切换）", { layout: layout === "single" ? t("单任务") : layout === "split" ? t("双列") : t("网格") })}
+          onclick={() => changeLayout(layout === "single" ? "split" : layout === "split" ? "grid" : "single")}><LayoutGrid size={16} /></button>
+      {/if}
+    </div>
+  </header>
+  <aside class="project-sidebar" class:panel-hidden={!showSidebar} aria-label={t("项目侧栏")}>
+    <div class="panel-resize-handle resize-right" role="separator" aria-orientation="vertical" aria-label={t("拖拽调整项目侧栏宽度")} title={t("拖拽调整宽度")} onpointerdown={(event) => startPanelResize("sidebar", event)}></div>
+    <button type="button" class="panel-toggle" aria-label={t("隐藏项目侧栏")} aria-keyshortcuts={shortcutAria("sidebar")}
+      title={`${t("隐藏项目侧栏")} (${shortcutLabel("sidebar")})`} onclick={() => { sidebarVisible = false; }}><PanelLeftClose size={15} /></button>
     <TaskSidebar
       {projects}
       tasks={piTasks}
@@ -1180,29 +1261,61 @@
   </aside>
 
   <main class="workspace" class:settings-view={view === "settings"} bind:this={workspace}>
+    {#if boardView && activeAgent === "pi" && view === "workspace"}
+      <div class="board-view">
+        <TaskBoard
+          tasks={piTasks}
+          {projects}
+          {selectedProjectId}
+          {activeTaskId}
+          onOpen={(task) => { boardView = false; openTask(task); }}
+          onStop={stopTask}
+          onRestart={restartTask}
+          onArchive={archiveTask}
+          onRestore={restoreTask}
+          onDelete={deleteTask}
+          onNewTask={() => void startTask()}
+        />
+      </div>
+    {/if}
+    {#if activeAgent === "pi" && view === "workspace" && !sidebarVisible}
+      <button type="button" class="panel-toggle workspace-toggle sidebar-toggle" aria-label={t("展开项目侧栏")}
+        aria-keyshortcuts={shortcutAria("sidebar")} title={`${t("展开项目侧栏")} (${shortcutLabel("sidebar")})`}
+        onclick={() => { sidebarVisible = true; }}><PanelLeftOpen size={15} /></button>
+    {/if}
+    {#if activeAgent === "pi" && view === "workspace" && !filesVisible}
+      <button type="button" class="panel-toggle workspace-toggle files-toggle" aria-label={t("展开文件栏")} title={t("展开文件栏")}
+        onclick={() => { filesVisible = true; }}><PanelRightOpen size={15} /></button>
+    {/if}
     {#if activeAgent === "dsh"}
       <div class="dsh-placeholder" aria-live="polite">
         {#if isDshStarting}
-          <span>正在启动 DSH</span>
+          <span>{t("正在启动 DSH")}</span>
         {:else if dshHostError}
           <p class="dsh-error" role="alert">
-            <strong>DSH 启动失败</strong>
-            <span>{dshHostError}</span>
+            <strong>{t("DSH 启动失败")}</strong>
+            <span>{tm(dshHostError)}</span>
             {#if /plugin tree failed to load|does not provide an export/.test(dshHostError)}
-              <small>提示：某个 DSH 插件与当前 DSH 版本不兼容。请在 DSH 的插件市场里禁用或卸载刚安装的插件后重启。</small>
+              <small>{t("提示：某个 DSH 插件与当前 DSH 版本不兼容。可以到 设置 → DSH 服务 点“修复”处理。")}</small>
             {/if}
           </p>
-          <button type="button" class="start-button" onclick={showDsh} disabled={isDshStarting}>
-            <RotateCcw size={16} />重启 DSH
-          </button>
+          <div class="dsh-error-actions">
+            <button type="button" class="start-button" onclick={showDsh} disabled={isDshStarting}>
+              <RotateCcw size={16} />{t("重启 DSH")}
+            </button>
+            <button type="button" class="start-button" title={t("打开 设置 → DSH 服务，查看失败原因并修复")}
+              onclick={() => openSettingsCategory("dsh")}>
+              <Wrench size={16} />{t("修复")}
+            </button>
+          </div>
         {/if}
       </div>
     {:else if view === "settings"}
       <PiSettings
         saving={settingsSaving}
-        closeBlocked={settingsPackageBusy || diagnosticsBusy}
+        closeBlocked={settingsPackageBusy || diagnosticsBusy || dshBusy}
         onDiagnosticsBusy={(busy) => { diagnosticsBusy = busy; }}
-        confirmDiagnosticsClear={() => confirmDialog("清空诊断记录", "清空本次应用运行的 Pi RPC 诊断记录？不会删除任务和会话。")}
+        confirmDiagnosticsClear={() => confirmDialog(t("清空诊断记录"), t("清空本次应用运行的 Pi RPC 诊断记录？不会删除任务和会话。"))}
         category={settingsCategory}
         onCategoryChange={(category) => { settingsCategory = category; }}
         settings={settings}
@@ -1237,29 +1350,41 @@
           <PiMarketplace embedded projectPath={selectedProject?.path ?? null} confirm={confirmDialog} onClose={closeSettings} onError={showError} onBusyChange={(busy) => { settingsPackageBusy = busy; }} />
         {/snippet}
         {#snippet mcp()}
-          <PiMcpSkillsSettings mode="mcp" confirm={confirmDialog} onError={showError} projectPath={selectedProject?.path ?? null} />
+          <PiMcpSkillsSettings mode="mcp" confirm={confirmDialog} onError={showError} projectPath={selectedProject?.path ?? null} onBusyChange={(busy) => { settingsPackageBusy = busy; }} />
         {/snippet}
         {#snippet skills()}
-          <PiMcpSkillsSettings mode="skills" confirm={confirmDialog} onError={showError} projectPath={selectedProject?.path ?? null} />
+          <PiMcpSkillsSettings mode="skills" confirm={confirmDialog} onError={showError} projectPath={selectedProject?.path ?? null} onBusyChange={(busy) => { settingsPackageBusy = busy; }} />
+        {/snippet}
+        {#snippet dsh()}
+          <DshSettings
+            {dshRunning}
+            {restartBusy}
+            {busyRuntime}
+            onRestartDsh={() => void restartDsh()}
+            onUpdateDshRuntime={() => void alignDshRuntime()}
+            confirm={confirmDialog}
+            onError={showError}
+            onBusyChange={(busy) => { dshBusy = busy; }}
+          />
         {/snippet}
       </PiSettings>
     {:else if !selectedProject}
-      <div class="empty-state">
+      <div class="empty-state" class:panel-hidden={boardView}>
         <Bot size={32} strokeWidth={1.4} />
-        <h1>工作区</h1>
+        <h1>{t("工作区")}</h1>
         <button type="button" class="start-button" onclick={addProject}>
-          <FolderPlus size={16} />添加项目目录
+          <FolderPlus size={16} />{t("添加项目目录")}
         </button>
       </div>
     {:else if terminalTasks.length === 0}
-      <div class="empty-state">
+      <div class="empty-state" class:panel-hidden={boardView}>
         <Bot size={32} strokeWidth={1.4} />
         <h1>{selectedProject.name}</h1>
         <button type="button" class="start-button" onclick={() => void startTask()} disabled={!canStart}>
-          <Plus size={16} />新建任务
+          <Plus size={16} />{t("新建任务")}
         </button>
       </div>
-    {:else}
+    {:else if !boardView}
       <TaskTabs
         tasks={terminalTasks}
         {activeTaskId}
@@ -1275,7 +1400,7 @@
         onSplit={splitTask}
       />
     {/if}
-      <div class="workspace-content" class:panel-hidden={activeAgent !== "pi" || view !== "workspace" || terminalTasks.length === 0 || !selectedProject}>
+      <div class="workspace-content" class:panel-hidden={boardView || activeAgent !== "pi" || view !== "workspace" || terminalTasks.length === 0 || !selectedProject}>
         <div
           class:single={layout === "single"}
           class:split={layout === "split"}
@@ -1300,12 +1425,13 @@
                   if (task.status === "running" && !busy && task.projectId === selectedProjectId) filesRefreshToken++;
                   if (["running", "waiting"].includes(task.status)) task.status = busy ? "running" : "waiting";
                 }}
+              onOpenModelSettings={() => openSettingsCategory("models")}
               />
             {:else}
             {#if terminalModule}
             {#await terminalModule}
               <section class="terminal-pane" class:panel-hidden={activeAgent !== "pi" || view !== "workspace" || inspectingFile || task.projectId !== selectedProjectId || !paneTaskIds.includes(task.id)}>
-                <p role="status">正在加载终端…</p>
+                <p role="status">{t("正在加载终端…")}</p>
               </section>
             {:then terminal}
             <terminal.default
@@ -1315,6 +1441,8 @@
               title={task.title}
               status={task.status}
               codeFont={settings.codeFont}
+              sessionFontName={settings.sessionFontName}
+              sessionFontSize={settings.sessionFontSize}
               colorMode={settings.colorMode}
               visible={activeAgent === "pi" && view === "workspace" && !inspectingFile && task.projectId === selectedProjectId && paneTaskIds.includes(task.id)}
               active={task.id === activeTaskId}
@@ -1323,8 +1451,8 @@
             />
             {:catch}
               <section class="terminal-pane" class:panel-hidden={activeAgent !== "pi" || view !== "workspace" || inspectingFile || task.projectId !== selectedProjectId || !paneTaskIds.includes(task.id)}>
-                <p role="alert">终端组件加载失败</p>
-                <button type="button" title="重新加载终端组件" aria-label="重新加载终端组件" onclick={loadTerminalModule}><RotateCcw size={16} /></button>
+                <p role="alert">{t("终端组件加载失败")}</p>
+                <button type="button" title={t("重新加载终端组件")} aria-label={t("重新加载终端组件")} onclick={loadTerminalModule}><RotateCcw size={16} /></button>
               </section>
             {/await}
             {/if}
@@ -1342,7 +1470,7 @@
           onSelect={(path) => openFile(path)} onHide={() => { openedFile = null; }}
           requestDialog={(request) => dialogs.request(request)} />
       {:catch error}
-        <p role="alert">编辑器加载失败：{String(error)}</p>
+        <p role="alert">{t("编辑器加载失败：{error}", { error: tm(String(error)) })}</p>
       {/await}
     {/if}
     {#if openedDiff && openedDiff.projectId === selectedProjectId && activeAgent === "pi" && view === "workspace"}
@@ -1360,20 +1488,25 @@
         {/key}
       {:catch error}
         <section class="recovery-error" role="alert">
-          <p>恢复副本界面加载失败：{String(error)}</p>
-          <button onclick={() => { recoveryProject = null; recoveryModule = null; }}>关闭</button>
+          <p>{t("恢复副本界面加载失败：{error}", { error: tm(String(error)) })}</p>
+          <button onclick={() => { recoveryProject = null; recoveryModule = null; }}>{t("关闭")}</button>
         </section>
       {/await}
     {/if}
   </main>
-  <aside class="file-panel" class:panel-hidden={!showFiles} aria-label="文件侧栏">
+  <aside class="file-panel" class:panel-hidden={!showFiles} aria-label={t("文件侧栏")}>
+    <div class="panel-resize-handle resize-left" role="separator" aria-orientation="vertical" aria-label={t("拖拽调整文件栏宽度")} title={t("拖拽调整宽度")} onpointerdown={(event) => startPanelResize("files", event)}></div>
+    <button type="button" class="panel-toggle" aria-label={t("隐藏文件栏")} title={t("隐藏文件栏")}
+      onclick={() => { filesVisible = false; }}><PanelRightClose size={15} /></button>
     <div class="file-project-selector">
-      <select aria-label="文件所属项目" value={selectedProjectId ?? ""}
+      <select aria-label={t("文件所属项目")} value={selectedProjectId ?? ""}
         onchange={(event) => { const project = projects.find((item) => item.id === event.currentTarget.value); if (project) selectProject(project); }}>
-        {#if !projects.length}<option value="">未选择项目</option>{/if}
+        {#if !projects.length}<option value="">{t("未选择项目")}</option>{/if}
         {#each projects as project (project.id)}<option value={project.id}>{project.name}</option>{/each}
       </select>
-      <button type="button" aria-label="添加项目目录" title="添加项目目录" onclick={addProject}><FolderPlus size={16} /></button>
+      <button type="button" aria-label={t("添加项目目录")} title={t("添加项目目录")} onclick={addProject}><FolderPlus size={16} /></button>
+      <button type="button" aria-label={t("恢复副本")} title={t("恢复副本…")} disabled={!selectedProjectId || recoveryBusy}
+        onclick={() => { recoveryModule ??= import("$lib/FileRecoveryPanel.svelte"); recoveryProject = selectedProject ? { id: selectedProject.id, name: selectedProject.name } : null; }}><History size={16} /></button>
     </div>
     {#if fileSidebarVisited}
       <FileSidebar project={selectedProject} onOpen={openFile}
@@ -1384,6 +1517,7 @@
   </aside>
   <GitSidebar projectId={selectedProjectId}
     visible={showGit} refreshToken={filesRefreshToken + gitWatchRefreshToken}
+    onResizeStart={(event) => startPanelResize("git", event)}
     selected={openedDiff?.projectId === selectedProjectId ? openedDiff : null} onOpen={openGitDiff}
     onBusyChange={(busy) => { gitIndexBusy = busy; }}
     onChanged={(projectId, path) => {

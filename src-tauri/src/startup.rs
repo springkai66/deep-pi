@@ -3,6 +3,7 @@ use std::{
     time::Duration,
 };
 
+use crate::message::msg;
 use tauri::{AppHandle, Manager, State};
 
 #[derive(Default)]
@@ -36,7 +37,7 @@ impl StartupState {
             .map_err(|_| "Initialization state unavailable")?;
         result
             .clone()
-            .unwrap_or_else(|| Err("初始化仍在进行，请稍后重试".into()))
+            .unwrap_or_else(|| Err(msg("app.startup.still_initializing")))
     }
 }
 

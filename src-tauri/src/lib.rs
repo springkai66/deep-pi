@@ -5,11 +5,13 @@ mod app_paths;
 mod bridge;
 mod credentials;
 mod diagnostics;
+mod dialog_text;
 mod dsh;
 mod dsh_api;
 mod durable_file;
 mod external_editor;
 mod file_recovery;
+mod fonts;
 mod git_commit;
 mod git_diff;
 mod git_index;
@@ -21,6 +23,7 @@ mod git_sync;
 #[cfg(all(test, windows))]
 mod git_test_support;
 mod market;
+mod message;
 mod native_pi;
 mod operation;
 mod package;
@@ -28,6 +31,7 @@ mod process_runner;
 mod project_edit;
 mod project_files;
 mod project_watch;
+mod prompt_enhance;
 mod provider;
 mod pty;
 mod recovery;
@@ -42,6 +46,7 @@ mod settings;
 mod snapshot;
 mod startup;
 mod task;
+mod theme;
 
 pub fn credential_helper(provider_id: &str) -> Result<(), String> {
     credentials::credential_helper(provider_id)
@@ -81,6 +86,7 @@ pub fn run() {
         .manage(dsh::DshManager::default())
         .manage(market::MarketCache::default())
         .manage(market::ModelCatalogCache::default())
+        .manage(market::McpRegistryCache::default())
         .manage(runtime::UpdateCache::default())
         .manage(runtime::RuntimeOperationLock::default())
         .manage(operation::OperationManager::default())
@@ -114,7 +120,7 @@ pub fn run() {
                     let install_dir = std::env::current_exe()
                         .ok()
                         .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
-                        .ok_or_else(|| "无法确定 DeepPi 安装目录".to_string())?;
+                        .ok_or_else(|| crate::message::msg("app.install_dir_unknown"))?;
                     let runtimes = app_paths::managed_runtimes_root(&install_dir, &project_root);
                     let paths = app_paths::AppPaths::from_roots_with_runtimes(
                         roaming,
@@ -145,7 +151,7 @@ pub fn run() {
                     Ok::<(), String>(())
                 })
                 .await
-                .unwrap_or_else(|_| Err("应用初始化工作线程失败".into()));
+                .unwrap_or_else(|_| Err(crate::message::msg("app.init_thread_failed")));
                 handle.state::<startup::StartupState>().finish(result);
             }));
             Ok(())
@@ -156,7 +162,9 @@ pub fn run() {
             if invoke.message.command() != "await_startup"
                 && !startup::is_ready(invoke.message.webview_ref().state())
             {
-                invoke.resolver.reject("应用正在初始化，请稍后重试");
+                invoke
+                    .resolver
+                    .reject(crate::message::msg("app.startup.not_ready"));
                 return true;
             }
             let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
@@ -198,6 +206,8 @@ pub fn run() {
                 dsh::create_dsh_webview,
                 dsh::start_dsh,
                 dsh::stop_dsh,
+                dsh::dsh_diagnose,
+                dsh::dsh_repair,
                 package::list_pi_packages,
                 package::package_operation,
                 agent_config::list_mcp_servers,
@@ -220,6 +230,7 @@ pub fn run() {
                 market::pi_package_metadata,
                 market::search_pi_models,
                 market::search_pi_packages,
+                market::search_mcp_registry,
                 pty::default_working_directory,
                 pty::acknowledge_pi_output,
                 pty::start_pi_task,
@@ -234,8 +245,12 @@ pub fn run() {
                 runtime::clear_runtime_update_cache,
                 runtime::install_runtime,
                 runtime::rollback_runtime,
+                fonts::list_system_fonts,
+                prompt_enhance::enhance_prompt,
                 settings::get_settings,
                 settings::save_settings,
+                theme::theme_export,
+                theme::theme_import,
                 task::add_project,
                 task::archive_task,
                 task::delete_task,

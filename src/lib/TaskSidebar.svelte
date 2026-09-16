@@ -20,6 +20,7 @@
   import { statusLabels, type Task } from "$lib/task";
   import { matchesSearch } from "$lib/navigation";
   import { shortcutAria } from "$lib/shortcuts";
+  import { t } from "$lib/i18n.svelte";
 
   interface Props {
     projects: Project[];
@@ -204,35 +205,35 @@
   }
 </script>
 
-<aside class="task-sidebar" aria-label="工作区">
+<aside class="task-sidebar" aria-label={t("工作区")}>
   <div class="task-search" role="search">
     <Search size={14} aria-hidden="true" />
     <input bind:this={searchInput} bind:value={searchText} type="search"
-      aria-label="搜索任务" aria-keyshortcuts={shortcutAria("tasks")} placeholder="搜索任务"
+      aria-label={t("搜索任务")} aria-keyshortcuts={shortcutAria("tasks")} placeholder={t("搜索任务")}
       onkeydown={searchKeydown}
       oncompositionstart={() => { composing = true; }}
       oncompositionend={() => { composing = false; query = searchText; }}
       oninput={(event) => { if (!composing) query = event.currentTarget.value; }} />
     {#if searchText}
-      <button type="button" title="清空搜索" aria-label="清空搜索"
+      <button type="button" title={t("清空搜索")} aria-label={t("清空搜索")}
         onclick={() => { searchText = query = ""; searchInput?.focus(); }}><X size={14} /></button>
     {/if}
   </div>
   {#if query.trim()}
-    <div class="task-search-results" bind:this={searchResults} role="group" aria-label="任务搜索结果">
-      <p role="status">{searchMatches.length ? `${searchMatches.length} 个任务` : "没有匹配的任务"}</p>
+    <div class="task-search-results" bind:this={searchResults} role="group" aria-label={t("任务搜索结果")}>
+      <p role="status">{searchMatches.length ? t("{count} 个任务", { count: searchMatches.length }) : t("没有匹配的任务")}</p>
       {#each searchMatches as task (task.id)}
         <button type="button" class="search-result" onclick={() => onOpen(task)} onkeydown={searchKeydown}>
           <strong>{task.title}</strong>
-          <small>{projects.find((project) => project.id === task.projectId)?.name ?? task.projectPath} · {task.archivedAt !== null ? "归档" : statusLabels[task.status]}</small>
+          <small>{projects.find((project) => project.id === task.projectId)?.name ?? task.projectPath} · {task.archivedAt !== null ? t("归档") : t(statusLabels[task.status])}</small>
         </button>
       {/each}
     </div>
   {:else}
   <section class="projects-section">
     <header class="projects-header">
-      <span>工作区</span>
-      <button type="button" aria-label="添加项目目录" title="添加项目目录" onclick={onAddProject}>
+      <span>{t("工作区")}</span>
+      <button type="button" aria-label={t("添加项目目录")} title={t("添加项目目录")} onclick={onAddProject}>
         <FolderPlus size={15} />
       </button>
     </header>
@@ -240,7 +241,7 @@
     {#if projects.length === 0}
       <button class="add-project-empty" type="button" onclick={onAddProject}>
         <FolderPlus size={16} />
-        <span>添加项目目录</span>
+        <span>{t("添加项目目录")}</span>
       </button>
     {:else}
       {#each projects as project (project.id)}
@@ -265,8 +266,8 @@
             <button
               class="project-add"
               type="button"
-              aria-label={`在 ${project.name} 中新建 Session`}
-              title="新建 Session"
+              aria-label={t("在 {name} 中新建 Session", { name: project.name })}
+              title={t("新建 Session")}
               onclick={() => onAddSession(project)}
             >
               <Plus size={15} />
@@ -275,7 +276,7 @@
 
           {#if projectExpanded(project.id)}
             <section class="project-task-section">
-              <header><span>进行中</span><span>{activeTasks.length}</span></header>
+              <header><span>{t("进行中")}</span><span>{activeTasks.length}</span></header>
               {#each activeTasks as task (task.id)}
                 <div class="task-row" role="presentation" oncontextmenu={(event) => showSessionMenu(event, task)}>
                   {#if task.status === "running"}
@@ -285,14 +286,14 @@
                   {/if}
                   <button class="task-copy" type="button" onclick={() => onOpen(task)}>
                     <strong>{task.title}</strong>
-                    <span>{statusLabels[task.status]}</span>
+                    <span>{t(statusLabels[task.status])}</span>
                   </button>
                 </div>
               {/each}
             </section>
 
             <section class="project-task-section">
-              <header><span>已完成</span><span>{completedTasks.length}</span></header>
+              <header><span>{t("已完成")}</span><span>{completedTasks.length}</span></header>
               {#each completedTasks as task (task.id)}
                 <div class="task-row" role="presentation" oncontextmenu={(event) => showSessionMenu(event, task)}>
                   {#if task.status === "running"}
@@ -302,7 +303,7 @@
                   {/if}
                   <button class="task-copy" type="button" onclick={() => onOpen(task)}>
                     <strong>{task.title}</strong>
-                    <span>{statusLabels[task.status]}</span>
+                    <span>{t(statusLabels[task.status])}</span>
                   </button>
                 </div>
               {/each}
@@ -314,7 +315,7 @@
   </section>
 
   <section class="task-section archived-section">
-    <header><span>归档</span><span>{archivedTasks.length}</span></header>
+    <header><span>{t("归档")}</span><span>{archivedTasks.length}</span></header>
     {#each archivedTasks as task (task.id)}
       <div class="task-row" role="presentation" oncontextmenu={(event) => showSessionMenu(event, task)}>
         {#if task.status === "running"}
@@ -324,7 +325,7 @@
         {/if}
         <button class="task-copy" type="button" onclick={() => onOpen(task)}>
           <strong>{task.title}</strong>
-          <span>{statusLabels[task.status]}</span>
+          <span>{t(statusLabels[task.status])}</span>
         </button>
       </div>
     {/each}
@@ -338,13 +339,13 @@
       class="context-menu"
       role="menu"
       tabindex="-1"
-      aria-label="项目菜单"
+      aria-label={t("项目菜单")}
       style={`left: ${projectMenu.x}px; top: ${projectMenu.y}px`}
       onclick={(event) => event.stopPropagation()}
       onkeydown={handleProjectMenuKeydown}
     >
       <button type="button" role="menuitem" onclick={chooseRemoveProject}>
-        <Trash2 size={14} />从工作区移除
+        <Trash2 size={14} />{t("从工作区移除")}
       </button>
     </div>
   {/if}
@@ -355,34 +356,34 @@
       class="context-menu"
       role="menu"
       tabindex="-1"
-      aria-label="Session 菜单"
+      aria-label={t("Session 菜单")}
       style={`left: ${sessionMenu.x}px; top: ${sessionMenu.y}px`}
       onclick={(event) => event.stopPropagation()}
       onkeydown={handleSessionMenuKeydown}
     >
       <button type="button" role="menuitem" onclick={() => chooseSessionAction("rename")}>
-        <Pencil size={14} />重命名
+        <Pencil size={14} />{t("重命名")}
       </button>
       {#if activeStatuses.includes(sessionMenu.task.status)}
         <button type="button" role="menuitem" onclick={() => chooseSessionAction("stop")}>
-          <Square size={14} />停止
+          <Square size={14} />{t("停止")}
         </button>
       {:else if sessionMenu.task.archivedAt === null}
         <button type="button" role="menuitem" onclick={() => chooseSessionAction("restart")}>
-          <RotateCcw size={14} />重启
+          <RotateCcw size={14} />{t("重启")}
         </button>
       {/if}
       {#if sessionMenu.task.archivedAt === null}
         <button type="button" role="menuitem" onclick={() => chooseSessionAction("archive")}>
-          <Archive size={14} />归档
+          <Archive size={14} />{t("归档")}
         </button>
       {:else}
         <button type="button" role="menuitem" onclick={() => chooseSessionAction("restore")}>
-          <ArchiveRestore size={14} />恢复
+          <ArchiveRestore size={14} />{t("恢复")}
         </button>
       {/if}
       <button type="button" role="menuitem" onclick={() => chooseSessionAction("remove")}>
-        <Trash2 size={14} />移除 Session
+        <Trash2 size={14} />{t("移除 Session")}
       </button>
     </div>
   {/if}

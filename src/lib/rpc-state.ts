@@ -1,3 +1,4 @@
+import { t } from "./i18n.svelte";
 export interface RpcEvent {
   sequence: number;
   payload: Record<string, unknown>;
@@ -51,8 +52,8 @@ export function contentText(content: unknown): string {
     const node = record(part);
     if (node.type === "text" && typeof node.text === "string") return node.text;
     if (node.type === "thinking" && typeof node.thinking === "string") return node.thinking;
-    if (node.type === "image") return "[图片]";
-    if (node.type === "toolCall") return `${String(node.name ?? "工具")}\n${JSON.stringify(node.arguments ?? {}, null, 2)}`;
+    if (node.type === "image") return t("[图片]");
+    if (node.type === "toolCall") return `${String(node.name ?? t("工具"))}\n${JSON.stringify(node.arguments ?? {}, null, 2)}`;
     return "";
   }).filter(Boolean).join("\n");
 }
@@ -118,7 +119,7 @@ export function applyRpcEvent(previous: Conversation, event: RpcEvent): Conversa
       [id, { ...tool, running: false, isError: tool.isError || tool.running }]));
   }
   else if (type === "rpc_error" || type === "extension_error") {
-    state.error = typeof payload.error === "string" ? payload.error : "RPC 运行失败";
+    state.error = typeof payload.error === "string" ? payload.error : t("RPC 运行失败");
   } else if (type === "queue_update") {
     state.queue = [...(Array.isArray(payload.steering) ? payload.steering : []),
       ...(Array.isArray(payload.followUp) ? payload.followUp : [])].filter((item): item is string => typeof item === "string");
@@ -141,7 +142,7 @@ export function applyRpcEvent(previous: Conversation, event: RpcEvent): Conversa
   } else if (type === "tool_execution_start" || type === "tool_execution_update" || type === "tool_execution_end") {
     const id = typeof payload.toolCallId === "string" ? payload.toolCallId : "";
     if (!id) return state;
-    const existing = previous.tools[id] ?? { id, name: String(payload.toolName ?? "工具"), args: payload.args, result: null, running: true, isError: false };
+    const existing = previous.tools[id] ?? { id, name: String(payload.toolName ?? t("工具")), args: payload.args, result: null, running: true, isError: false };
     state.tools = { ...previous.tools, [id]: {
       ...existing,
       result: type === "tool_execution_update" ? payload.partialResult : type === "tool_execution_end" ? payload.result : existing.result,

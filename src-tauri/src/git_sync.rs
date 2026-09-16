@@ -1,4 +1,6 @@
+use crate::message::msg;
 use crate::{
+    dialog_text::ConfirmDialog,
     git_operation::run_git_command_with_budget,
     git_push::{check_destination, isolated_command, verify_remote, PushConfig, PushPreview},
     git_repository::GitRepository,
@@ -56,14 +58,14 @@ fn mapped_refs(specs: &[String], target: &str) -> Result<Vec<String>, String> {
     let mut excluded = false;
     for spec in specs {
         if spec.chars().any(char::is_whitespace) || spec.chars().any(char::is_control) {
-            return Err("不支持的 fetch 引用映射".into());
+            return Err(msg("git.sync.fetch_mapping_unsupported"));
         }
         if let Some(negative) = spec.strip_prefix('^') {
             if !negative.starts_with("refs/")
                 || negative.contains(':')
                 || negative.matches('*').count() > 1
             {
-                return Err("负 fetch 引用映射无效".into());
+                return Err(msg("git.sync.negative_mapping_invalid"));
             }
             excluded |= pattern_match(negative, target).is_some();
             continue;
@@ -74,7 +76,7 @@ fn mapped_refs(specs: &[String], target: &str) -> Result<Vec<String>, String> {
             || source.matches('*').count() > 1
             || source.matches('*').count() != destination.matches('*').count()
         {
-            return Err("不支持或不完整的 fetch 引用映射".into());
+            return Err(msg("git.sync.fetch_mapping_incomplete"));
         }
         if let Some(matched) = pattern_match(source, target) {
             if destination.is_empty() {
@@ -82,13 +84,13 @@ fn mapped_refs(specs: &[String], target: &str) -> Result<Vec<String>, String> {
             }
             let reference = destination.replace('*', matched);
             if !reference.starts_with("refs/remotes/") {
-                return Err("fetch 映射不是远程跟踪引用，不能从此入口改写本地分支或标签".into());
+                return Err(msg("git.sync.mapping_not_remote_tracking"));
             }
             if !refs.contains(&reference) {
                 refs.push(reference);
             }
             if refs.len() > 64 {
-                return Err("远程跟踪映射超过 64 个".into());
+                return Err(msg("git.sync.too_many_mappings"));
             }
         }
     }
@@ -99,22 +101,22 @@ fn mapped_refs(specs: &[String], target: &str) -> Result<Vec<String>, String> {
 fn read_text(repo: &GitRepository, args: &[&str], optional: bool) -> Result<String, String> {
     let output = repo.budget.run(repo.command().args(args))?;
     if output.truncated {
-        return Err("Git 同步配置或引用输出超限".into());
+        return Err(msg("git.sync.config_output_truncated"));
     }
     if optional && output.status.code() == Some(1) {
         return Ok(String::new());
     }
     if !output.status.success() {
-        return Err("无法读取 Git 同步配置或引用".into());
+        return Err(msg("git.sync.config_read_failed"));
     }
-    String::from_utf8(output.stdout).map_err(|_| "Git 同步配置或引用不是 UTF-8".into())
+    String::from_utf8(output.stdout).map_err(|_| msg("git.sync.config_encoding"))
 }
 
 fn mapping(repo: &GitRepository, target: &PushPreview) -> Result<Vec<String>, String> {
     let urls = read_text(repo, &["remote", "get-url", "--all", &target.remote], false)?;
     // Git fetch uses the first fetch URL, whereas push may have multiple destinations.
     if urls.lines().next() != Some(target.destination.as_str()) {
-        return Err("所选推送目的地与该远程的拉取地址不同，不能更新它的跟踪引用".into());
+        return Err(msg("git.sync.destination_mismatch"));
     }
     let specs = read_text(
         repo,
@@ -130,7 +132,7 @@ fn mapping(repo: &GitRepository, target: &PushPreview) -> Result<Vec<String>, St
         &target.target_ref,
     )?;
     if references.is_empty() {
-        return Err("目标分支没有可用的远程跟踪映射，可能被负 refspec 排除".into());
+        return Err(msg("git.sync.no_mapping"));
     }
     for reference in &references {
         read_text(repo, &["check-ref-format", reference], false)?;
@@ -141,7 +143,7 @@ fn mapping(repo: &GitRepository, target: &PushPreview) -> Result<Vec<String>, St
 fn direct_ref(repo: &GitRepository, reference: &str) -> Result<Option<String>, String> {
     let symbolic = read_text(repo, &["symbolic-ref", "--quiet", reference], true)?;
     if !symbolic.is_empty() {
-        return Err("跟踪引用已是符号引用，未改写其目标分支".into());
+        return Err(msg("git.sync.symbolic_reference"));
     }
     let oid = read_text(repo, &["rev-parse", "--verify", "--quiet", reference], true)?;
     let oid = oid.trim_end_matches(['\n', '\r']);
@@ -149,7 +151,7 @@ fn direct_ref(repo: &GitRepository, reference: &str) -> Result<Option<String>, S
         return Ok(None);
     }
     if !matches!(oid.len(), 40 | 64) || !oid.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err("跟踪引用的对象 ID 无效".into());
+        return Err(msg("git.sync.invalid_object_id"));
     }
     Ok(Some(oid.into()))
 }
@@ -168,7 +170,7 @@ fn prepare(repo: &GitRepository, target: &PushPreview) -> Result<SyncPreview, St
     let references = tracking_refs(repo, target)?;
     let oid = verify_remote(repo, target)?
         .remote_oid
-        .ok_or("远程查询未返回目标分支，不会删除本地跟踪引用")?;
+        .ok_or(msg("git.sync.remote_target_missing"))?;
     Ok(SyncPreview { oid, references })
 }
 
@@ -184,12 +186,14 @@ fn acknowledgement(
         }
         let remaining = deadline
             .checked_duration_since(Instant::now())
-            .ok_or("跟踪引用事务超时")?;
+            .ok_or(msg("git.sync.transaction_timeout"))?;
         match receiver.recv_timeout(remaining.min(Duration::from_millis(20))) {
             Ok(line) if line.trim_end() == expected => return Ok(()),
-            Ok(_) => return Err("跟踪引用事务响应异常".into()),
+            Ok(_) => return Err(msg("git.sync.transaction_response")),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => return Err("跟踪引用事务提前退出".into()),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(msg("git.sync.transaction_exited"))
+            }
         }
     }
 }
@@ -255,7 +259,7 @@ fn publish(
         acknowledgement(&receiver, "prepare: ok", deadline, Some(&repo.budget.token))?;
         // Under Git's prepared locks, reject a symbolic ref even if its resolved OID matched CAS.
         if tracking_refs(repo, target)? != preview.references {
-            return Err("跟踪引用或映射已变化，事务已中止".into());
+            return Err(msg("git.sync.references_changed"));
         }
         repo.budget.check()?;
         repo.budget.token.commit()?;
@@ -281,7 +285,7 @@ fn publish(
         match child.try_wait() {
             Ok(Some(status)) => break Ok(status),
             Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
-            Ok(None) => break Err("跟踪引用事务未及时退出".to_string()),
+            Ok(None) => break Err(msg("git.sync.transaction_not_exited")),
             Err(error) => break Err(error.to_string()),
         }
     };
@@ -292,7 +296,9 @@ fn publish(
     }
     let _ = reader.join();
     if !attempted {
-        return Err(operation.err().unwrap_or_else(|| "未发布跟踪引用".into()));
+        return Err(operation
+            .err()
+            .unwrap_or_else(|| msg("git.sync.reference_not_published")));
     }
     let outcome = if operation.is_ok() && exit.is_ok_and(|status| status.success()) {
         SyncOutcome::Synced
@@ -316,7 +322,7 @@ fn synchronize(
     expected: &SyncPreview,
 ) -> Result<SyncResult, String> {
     if prepare(repo, target)? != *expected {
-        return Err("远程目标、映射或本地跟踪引用已变化，请重新确认同步".into());
+        return Err(msg("git.sync.preview_changed"));
     }
     let _local = if Path::new(&target.destination).is_absolute() {
         Some(GuardedPath::pin(Path::new(&target.destination), true)?)
@@ -345,7 +351,7 @@ fn synchronize(
         Some(&repo.budget.token),
     )?;
     if !output.status.success() || output.truncated {
-        return Err("获取所选提交对象失败或输出超限，未发布跟踪引用".into());
+        return Err(msg("git.sync.fetch_failed"));
     }
     let kind = read_text(
         repo,
@@ -353,9 +359,24 @@ fn synchronize(
         false,
     )?;
     if kind.trim() != "commit" {
-        return Err("远程目标不是提交对象，未发布跟踪引用".into());
+        return Err(msg("git.sync.not_a_commit"));
     }
     publish(repo, target, expected)
+}
+
+/// 本地跟踪引用清单：缺少旧 OID 的引用用前端按当前语言传入的「新引用」词汇标注。
+fn tracking_reference_list(dialog: &ConfirmDialog, references: &[TrackingRef]) -> String {
+    references
+        .iter()
+        .map(|value| {
+            let old = value
+                .old_oid
+                .as_deref()
+                .unwrap_or_else(|| dialog.term("new_ref"));
+            format!("{}: {}", value.reference, old)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[tauri::command]
@@ -365,28 +386,44 @@ pub async fn project_git_sync_tracking(
     project_id: String,
     operation_id: String,
     expected: PushPreview,
+    dialog: ConfirmDialog,
 ) -> Result<Option<SyncResult>, String> {
     if webview.label() != "main" {
-        return Err("同步远程跟踪引用需要主窗口".into());
+        return Err(msg("git.sync.window_required"));
     }
+    dialog.validate()?;
     // 确认弹窗在阻塞线程内仍需 AppHandle，因此保留一份再移交。
     let dialog_app = app.clone();
     run_git_command_with_budget(
         app,
         project_id,
         operation_id,
-        false,
+        None,
         Duration::from_secs(180),
         move |repo| {
             let preview = prepare(repo, &expected)?;
-            let refs = preview.references.iter().map(|value| format!("{}: {}", value.reference,
-                value.old_oid.as_deref().unwrap_or("(new)"))).collect::<Vec<_>>().join("\n");
-            let confirmed = dialog_app.dialog().message(format!(
-                "工作树：{}\n远程：{}\n目的地：{}\n目标分支：{}\n查询提交：{}\n\n本地跟踪引用：\n{}\n\n下载此提交的可达对象，并将以上引用更新到查询提交，包括远程回退。\n不合并、不变基本地分支，不修改工作区、索引、标签或上游设置；不运行客户端 hooks。\n远程查询未返回目标时不删除本地引用。使用现有凭据，不交互登录。",
-                repo.worktree.path.display(), expected.remote, expected.destination, expected.target_ref, preview.oid, refs,
-            )).title("确认同步远程跟踪引用")
-                .buttons(MessageDialogButtons::OkCancelCustom("同步".into(), "取消".into())).blocking_show();
-            if !confirmed { return Ok(None); }
+            let confirmed = dialog_app
+                .dialog()
+                .message(dialog.render(&[
+                    ("worktree", repo.worktree.path.display().to_string()),
+                    ("remote", expected.remote.clone()),
+                    ("destination", expected.destination.clone()),
+                    ("branch", expected.target_ref.clone()),
+                    ("query", preview.oid.clone()),
+                    (
+                        "references",
+                        tracking_reference_list(&dialog, &preview.references),
+                    ),
+                ]))
+                .title(dialog.title.clone())
+                .buttons(MessageDialogButtons::OkCancelCustom(
+                    dialog.confirm_label.clone(),
+                    dialog.cancel_label.clone(),
+                ))
+                .blocking_show();
+            if !confirmed {
+                return Ok(None);
+            }
             synchronize(repo, &expected, &preview).map(Some)
         },
     )
@@ -496,10 +533,14 @@ mod tests {
             target.destination.as_str(),
         ]);
         let repo = GitRepository::open(&fixture.root).unwrap();
-        assert!(prepare(&repo, &target).unwrap_err().contains("拉取地址"));
+        assert!(prepare(&repo, &target)
+            .unwrap_err()
+            .contains("git.sync.destination_mismatch"));
         fixture.git(&["config", "remote.origin.url", target.destination.as_str()]);
         fixture.git(&["config", "--add", "remote.origin.fetch", "^refs/heads/main"]);
-        assert!(prepare(&repo, &target).unwrap_err().contains("映射"));
+        assert!(prepare(&repo, &target)
+            .unwrap_err()
+            .contains("git.sync.no_mapping"));
     }
 
     #[test]
@@ -582,7 +623,7 @@ mod tests {
         ]);
         assert!(publish(&repo, &target, &preview)
             .unwrap_err()
-            .contains("符号引用"));
+            .contains("git.sync.symbolic_reference"));
         assert_eq!(
             git_text(&fixture, &["symbolic-ref", "refs/remotes/origin/main"]),
             "refs/heads/main\n"
@@ -634,7 +675,9 @@ mod tests {
             "refs/heads/main",
         ]);
         let repo = GitRepository::open(&fixture.root).unwrap();
-        assert!(prepare(&repo, &target).unwrap_err().contains("未返回"));
+        assert!(prepare(&repo, &target)
+            .unwrap_err()
+            .contains("git.sync.remote_target_missing"));
         assert_eq!(
             git_text(&fixture, &["rev-parse", "refs/remotes/origin/main"]),
             old
@@ -663,5 +706,40 @@ mod tests {
         assert_eq!(fs::read(repo.git_dir().join("HEAD")).unwrap(), linked_head);
         assert!(!repo.git_dir().join("FETCH_HEAD").exists());
         assert!(!fixture.root.join(".git/FETCH_HEAD").exists());
+    }
+}
+
+/// 纯逻辑对话框测试：不调用 Git、不依赖临时仓库，任何平台都能编译执行。
+#[cfg(test)]
+mod dialog_tests {
+    use super::*;
+    use crate::dialog_text::ConfirmDialog;
+
+    #[test]
+    fn marks_missing_tracking_refs_with_the_frontend_term() {
+        let mut dialog = ConfirmDialog {
+            title: "sync title".into(),
+            message: "{references}".into(),
+            confirm_label: "ok".into(),
+            cancel_label: "cancel".into(),
+            terms: std::collections::BTreeMap::from([("new_ref".to_owned(), "(new)".to_owned())]),
+        };
+        let oid = "a".repeat(40);
+        let references = [
+            TrackingRef {
+                reference: "refs/remotes/origin/main".into(),
+                old_oid: Some(oid.clone()),
+            },
+            TrackingRef {
+                reference: "refs/remotes/review/current".into(),
+                old_oid: None,
+            },
+        ];
+        assert_eq!(
+            tracking_reference_list(&dialog, &references),
+            format!("refs/remotes/origin/main: {oid}\nrefs/remotes/review/current: (new)")
+        );
+        dialog.terms.clear();
+        assert!(tracking_reference_list(&dialog, &references).ends_with(": new_ref"));
     }
 }

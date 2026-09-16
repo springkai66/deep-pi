@@ -1,5 +1,6 @@
 <script lang="ts">
   import { tick } from "svelte";
+  import { t } from "$lib/i18n.svelte";
 
   export interface MenuItem {
     label: string;
@@ -64,7 +65,7 @@
   onresize={() => close()}
 />
 
-<nav class="app-menu" aria-label="应用菜单" bind:this={root}>
+<nav class="app-menu" aria-label={t("应用菜单")} bind:this={root}>
   {#each menus as menu, index}
     <button class="menu-trigger" class:active={openIndex === index}
       type="button" aria-haspopup="menu" aria-expanded={openIndex === index}

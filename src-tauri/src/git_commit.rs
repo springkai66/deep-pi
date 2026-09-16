@@ -1,6 +1,7 @@
+use crate::message::msg;
 use crate::{
-    git_index::IndexTransaction, git_operation::run_git_command, git_repository::GitRepository,
-    project_files::GuardedPath,
+    dialog_text::ConfirmDialog, git_index::IndexTransaction, git_operation::run_git_command,
+    git_repository::GitRepository, project_files::GuardedPath,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -58,12 +59,12 @@ fn output_text(
     }
     String::from_utf8(output.stdout)
         .map(|text| text.trim_end_matches(['\r', '\n']).into())
-        .map_err(|_| "Git 返回了不支持的编码".into())
+        .map_err(|_| msg("git.commit.unsupported_encoding"))
 }
 
 fn oid(text: String) -> Result<String, String> {
     if !matches!(text.len(), 40 | 64) || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err("Git 对象 ID 格式异常".into());
+        return Err(msg("git.commit.invalid_oid"));
     }
     Ok(text)
 }
@@ -78,12 +79,7 @@ fn ensure_normal_commit(repo: &GitRepository) -> Result<(), String> {
         "sequencer",
     ] {
         match fs::symlink_metadata(repo.git_dir().join(name)) {
-            Ok(_) => {
-                return Err(
-                    "仓库正在 merge、rebase 或其他序列操作中；请先在外部 Git 工具中完成该流程"
-                        .into(),
-                )
-            }
+            Ok(_) => return Err(msg("git.commit.sequence_in_progress")),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.to_string()),
         }
@@ -96,25 +92,26 @@ pub(crate) fn head_state(repo: &GitRepository) -> Result<(String, Option<String>
         .budget
         .run(command(repo).args(["symbolic-ref", "--quiet", "HEAD"]))?;
     if symbolic.truncated {
-        return Err("Git HEAD 超过读取上限".into());
+        return Err(msg("git.commit.head_too_large"));
     }
     let reference = if symbolic.status.success() {
-        let value = String::from_utf8(symbolic.stdout).map_err(|_| "Git 分支名称不是有效 UTF-8")?;
+        let value =
+            String::from_utf8(symbolic.stdout).map_err(|_| msg("git.commit.branch_encoding"))?;
         let value = value.trim_end_matches(['\r', '\n']).to_owned();
         if !value.starts_with("refs/heads/") || value.chars().any(char::is_whitespace) {
-            return Err("不支持的 HEAD 引用，未执行提交".into());
+            return Err(msg("git.commit.unsupported_head"));
         }
         value
     } else if symbolic.status.code() == Some(1) {
         "HEAD".into()
     } else {
-        return Err("无法读取 Git HEAD".into());
+        return Err(msg("git.commit.head_read_failed"));
     };
     let resolved =
         repo.budget
             .run(command(repo).args(["rev-parse", "--verify", "--quiet", "HEAD"]))?;
     if resolved.truncated {
-        return Err("Git HEAD 超过读取上限".into());
+        return Err(msg("git.commit.head_too_large"));
     }
     let head = if resolved.status.success() {
         Some(oid(String::from_utf8(resolved.stdout)
@@ -124,7 +121,7 @@ pub(crate) fn head_state(repo: &GitRepository) -> Result<(String, Option<String>
     } else if resolved.status.code() == Some(1) && reference != "HEAD" {
         None
     } else {
-        return Err("无法解析当前提交".into());
+        return Err(msg("git.commit.head_parse_failed"));
     };
     Ok((reference, head))
 }
@@ -133,13 +130,13 @@ fn ident(repo: &GitRepository, variable: &str) -> Result<String, String> {
     let text = output_text(
         repo,
         command(repo).args(["var", variable]),
-        "无法确定 Git 提交身份，请配置 user.name 和 user.email",
+        &msg("git.commit.identity_missing"),
     )?;
     text.rsplitn(3, ' ')
         .nth(2)
         .filter(|value| !value.is_empty())
         .map(String::from)
-        .ok_or_else(|| "Git 身份格式异常".into())
+        .ok_or_else(|| msg("git.commit.identity_invalid"))
 }
 
 fn snapshot(repo: &GitRepository, index: &IndexTransaction) -> Result<CommitPreview, String> {
@@ -151,7 +148,7 @@ fn snapshot(repo: &GitRepository, index: &IndexTransaction) -> Result<CommitPrev
             .command(repo)
             .env("GIT_NO_REPLACE_OBJECTS", "1")
             .arg("write-tree"),
-        "无法生成暂存树，请先解决索引冲突",
+        &msg("git.commit.tree_failed"),
     )?)?;
     let mut diff = index.command(repo);
     diff.env("GIT_NO_REPLACE_OBJECTS", "1").args([
@@ -171,22 +168,22 @@ fn snapshot(repo: &GitRepository, index: &IndexTransaction) -> Result<CommitPrev
     diff.arg("--");
     let output = repo.budget.run(&mut diff)?;
     if !output.status.success() || output.truncated {
-        return Err("无法完整读取暂存范围，未准备提交".into());
+        return Err(msg("git.commit.staged_range_failed"));
     }
-    let text = std::str::from_utf8(&output.stdout).map_err(|_| "暂存路径不是有效 UTF-8")?;
+    let text = std::str::from_utf8(&output.stdout).map_err(|_| msg("git.commit.paths_encoding"))?;
     if !text.is_empty() && !text.ends_with('\0') {
-        return Err("暂存路径列表不完整".into());
+        return Err(msg("git.commit.paths_incomplete"));
     }
     let mut paths = Vec::new();
     for path in text.split_terminator('\0') {
         let relative = repo
             .to_project_path(path)
-            .ok_or("存在项目范围以外的暂存文件，请从完整仓库项目中提交")?;
+            .ok_or(msg("git.commit.paths_outside_scope"))?;
         repo.to_repo_path(relative)?;
         paths.push(relative.into());
     }
     if paths.is_empty() {
-        return Err("没有可提交的暂存变更".into());
+        return Err(msg("git.commit.no_staged"));
     }
     let signing = repo.budget.run(command(repo).args([
         "config",
@@ -200,15 +197,15 @@ fn snapshot(repo: &GitRepository, index: &IndexTransaction) -> Result<CommitPrev
         match signing.stdout.as_slice() {
             b"true\n" => true,
             b"false\n" => false,
-            _ => return Err("Git 签名配置异常".into()),
+            _ => return Err(msg("git.commit.signing_invalid")),
         }
     } else {
-        return Err("无法读取 Git 签名配置".into());
+        return Err(msg("git.commit.signing_read_failed"));
     };
     let author = ident(repo, "GIT_AUTHOR_IDENT")?;
     let committer = ident(repo, "GIT_COMMITTER_IDENT")?;
     if head_state(repo)? != (reference.clone(), head.clone()) {
-        return Err("准备期间 HEAD 已变化，请重新准备提交".into());
+        return Err(msg("git.commit.head_changed"));
     }
     Ok(CommitPreview {
         reference,
@@ -227,7 +224,7 @@ fn prepare_commit(repo: &GitRepository) -> Result<CommitPreview, String> {
 
 fn validate_message(message: &str) -> Result<(), String> {
     if message.trim().is_empty() || message.len() > 64 * 1024 || message.contains('\0') {
-        return Err("提交说明不能为空、不能包含 NUL，且不得超过 64 KiB".into());
+        return Err(msg("git.commit.message_invalid"));
     }
     Ok(())
 }
@@ -267,7 +264,7 @@ fn publish_commit(
         None
     };
     if head_state(repo)? != (preview.reference.clone(), preview.head.clone()) {
-        return Err("发布前 HEAD 已变化，未更新引用，请重新准备提交".into());
+        return Err(msg("git.commit.head_changed_before_publish"));
     }
     repo.budget.check()?;
     repo.budget.token.commit()?;
@@ -292,12 +289,14 @@ fn response(
         }
         let remaining = deadline
             .checked_duration_since(Instant::now())
-            .ok_or("Git 引用事务等待超时")?;
+            .ok_or(msg("git.commit.transaction_timeout"))?;
         match receiver.recv_timeout(remaining.min(Duration::from_millis(20))) {
             Ok(line) if line.trim_end() == expected => return Ok(()),
-            Ok(_) => return Err("Git 引用事务响应异常".into()),
+            Ok(_) => return Err(msg("git.commit.transaction_response")),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => return Err("Git 引用事务提前退出".into()),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(msg("git.commit.transaction_exited"))
+            }
         }
     }
 }
@@ -309,7 +308,10 @@ fn publish_detached(
     preview: &CommitPreview,
     new_oid: String,
 ) -> Result<CommitResult, String> {
-    let old = preview.head.as_deref().ok_or("分离 HEAD 没有原始提交")?;
+    let old = preview
+        .head
+        .as_deref()
+        .ok_or(msg("git.commit.detached_head_missing"))?;
     let mut command = command(repo);
     command
         .args([
@@ -358,7 +360,7 @@ fn publish_detached(
             .read_to_string(&mut text)
             .map_err(|error| error.to_string())?;
         if text.trim() != old {
-            return Err("HEAD 类型或内容已变化，引用事务已中止".into());
+            return Err(msg("git.commit.head_changed_abort"));
         }
         drop(head);
         repo.budget.check()?;
@@ -385,7 +387,7 @@ fn publish_detached(
         match child.try_wait() {
             Ok(Some(status)) => break Ok(status),
             Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
-            Ok(None) => break Err("Git 引用事务未及时退出".to_string()),
+            Ok(None) => break Err(msg("git.commit.transaction_not_exited")),
             Err(error) => break Err(error.to_string()),
         }
     };
@@ -396,7 +398,9 @@ fn publish_detached(
     }
     let _ = reader.join();
     if !attempted {
-        return Err(operation.err().unwrap_or_else(|| "未发布引用".into()));
+        return Err(operation
+            .err()
+            .unwrap_or_else(|| msg("git.commit.reference_not_published")));
     }
     let result = operation
         .and(exit)
@@ -441,7 +445,7 @@ fn reconcile_publication(
         return Ok(CommitResult {
             outcome: CommitOutcome::Committed,
             oid: new_oid,
-            detail: "命令异常后已核实引用更新成功".into(),
+            detail: msg("git.commit.detail_verified_after_error"),
         });
     }
     let outcome = if result.is_ok() && observed.is_ok() {
@@ -449,7 +453,11 @@ fn reconcile_publication(
     } else {
         CommitOutcome::Unknown
     };
-    Ok(CommitResult { outcome, oid: new_oid, detail: "引用更新未确认成功；可能存在分支变化、引用锁或 Git 版本不支持。请刷新并核对提交 ID，不会自动重试".into() })
+    Ok(CommitResult {
+        outcome,
+        oid: new_oid,
+        detail: msg("git.commit.detail_unconfirmed"),
+    })
 }
 
 fn commit_staged(
@@ -461,7 +469,7 @@ fn commit_staged(
     let index = IndexTransaction::begin(repo)?;
     let preview = snapshot(repo, &index)?;
     if &preview != expected {
-        return Err("暂存内容、分支或提交身份已变化，请重新准备并确认提交范围".into());
+        return Err(msg("git.commit.staged_changed"));
     }
     let input = index.input_file("commit-message", message.as_bytes())?;
     let mut command = command(repo);
@@ -481,10 +489,25 @@ fn commit_staged(
     let new_oid = oid(output_text(
         repo,
         &mut command,
-        "未能创建提交对象，请检查 Git 身份和签名工具；未更新分支",
+        &msg("git.commit.object_failed"),
     )?)?;
     ensure_normal_commit(repo)?;
     publish_commit(repo, &preview, new_oid)
+}
+
+/// 暂存范围摘要：最多列出 12 条路径，超出部分用前端按当前语言传入的词汇模板。
+fn commit_scope(dialog: &ConfirmDialog, paths: &[String]) -> String {
+    let mut scope = paths
+        .iter()
+        .take(12)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
+    if paths.len() > 12 {
+        scope.push('\n');
+        scope.push_str(&dialog.render_term("more_paths", &[("count", paths.len().to_string())]));
+    }
+    scope
 }
 
 #[tauri::command]
@@ -495,9 +518,9 @@ pub async fn project_git_prepare_commit(
     operation_id: String,
 ) -> Result<CommitPreview, String> {
     if webview.label() != "main" {
-        return Err("准备提交需要主窗口".into());
+        return Err(msg("git.commit.prepare_window_required"));
     }
-    run_git_command(app, project_id, operation_id, false, prepare_commit).await
+    run_git_command(app, project_id, operation_id, None, prepare_commit).await
 }
 
 #[tauri::command]
@@ -507,30 +530,52 @@ pub async fn project_git_commit(
     project_id: String,
     operation_id: String,
     expected: CommitPreview,
+    dialog: ConfirmDialog,
     message: String,
 ) -> Result<Option<CommitResult>, String> {
     if webview.label() != "main" {
-        return Err("Git 提交需要主窗口".into());
+        return Err(msg("git.commit.window_required"));
     }
+    dialog.validate()?;
     validate_message(&message)?;
     // 确认弹窗在阻塞线程内仍需 AppHandle，因此保留一份再移交。
     let dialog_app = app.clone();
-    run_git_command(app, project_id, operation_id, false, move |repo| {
+    run_git_command(app, project_id, operation_id, None, move |repo| {
         if prepare_commit(repo)? != expected {
-            return Err("提交范围已变化，请重新准备".into());
-        }
-        let mut scope = expected.paths.iter().take(12).cloned().collect::<Vec<_>>().join("\n");
-        if expected.paths.len() > 12 {
-            scope.push_str(&format!("\n…共 {} 个路径，完整范围已在应用中列出", expected.paths.len()));
+            return Err(msg("git.commit.scope_changed"));
         }
         let summary: String = message.chars().take(600).collect();
-        let confirmed = dialog_app.dialog().message(format!(
-            "工作树：{}\n目标：{}\n作者：{}\n签名：{}\n暂存树：{}\n\n{}\n\n提交说明摘要：\n{}\n\n本次不运行 Git hooks，也不会推送。",
-            repo.worktree.path.display(), expected.reference, expected.author,
-            if expected.sign { "启用" } else { "关闭" }, expected.tree, scope, summary,
-        )).title("确认提交暂存变更")
-            .buttons(MessageDialogButtons::OkCancelCustom("提交".into(), "取消".into())).blocking_show();
-        if !confirmed { return Ok(None); }
+        let confirmed = dialog_app
+            .dialog()
+            .message(
+                dialog.render(&[
+                    ("worktree", repo.worktree.path.display().to_string()),
+                    ("target", expected.reference.clone()),
+                    ("author", expected.author.clone()),
+                    (
+                        "signature",
+                        dialog
+                            .term(if expected.sign {
+                                "signature_on"
+                            } else {
+                                "signature_off"
+                            })
+                            .to_owned(),
+                    ),
+                    ("tree", expected.tree.clone()),
+                    ("paths", commit_scope(&dialog, &expected.paths)),
+                    ("summary", summary),
+                ]),
+            )
+            .title(dialog.title.clone())
+            .buttons(MessageDialogButtons::OkCancelCustom(
+                dialog.confirm_label.clone(),
+                dialog.cancel_label.clone(),
+            ))
+            .blocking_show();
+        if !confirmed {
+            return Ok(None);
+        }
         commit_staged(repo, &expected, &message).map(Some)
     })
     .await
@@ -601,7 +646,9 @@ mod tests {
         fs::write(fixture.root.join("outside.txt"), "outside\n").unwrap();
         fixture.git(&["add", "--", "nested/inside.txt", "outside.txt"]);
         let repo = GitRepository::open(&fixture.root.join("nested")).unwrap();
-        assert!(prepare_commit(&repo).unwrap_err().contains("项目范围"));
+        assert!(prepare_commit(&repo)
+            .unwrap_err()
+            .contains("git.commit.paths_outside_scope"));
     }
 
     #[test]
@@ -617,7 +664,9 @@ mod tests {
         assert!(prepare_commit(&repo).is_err());
         fs::remove_file(fixture.root.join(".git/MERGE_HEAD")).unwrap();
         commit_staged(&repo, &preview, "base").unwrap();
-        assert!(prepare_commit(&repo).unwrap_err().contains("暂存"));
+        assert!(prepare_commit(&repo)
+            .unwrap_err()
+            .contains("git.commit.no_staged"));
     }
 
     #[test]
@@ -768,5 +817,41 @@ mod tests {
         );
         assert_eq!(head_state(&repo).unwrap().0, "refs/heads/main");
         assert!(!repo.git_dir().join("HEAD.lock").exists());
+    }
+}
+
+/// 纯逻辑对话框测试：不调用 Git、不依赖临时仓库，任何平台都能编译执行。
+#[cfg(test)]
+mod dialog_tests {
+    use super::*;
+    use crate::dialog_text::ConfirmDialog;
+
+    fn scope_dialog(more_paths: &str) -> ConfirmDialog {
+        ConfirmDialog {
+            title: "commit title".into(),
+            message: "{paths}".into(),
+            confirm_label: "ok".into(),
+            cancel_label: "cancel".into(),
+            terms: std::collections::BTreeMap::from([(
+                "more_paths".to_owned(),
+                more_paths.to_owned(),
+            )]),
+        }
+    }
+
+    #[test]
+    fn lists_at_most_twelve_paths_and_renders_the_overflow_term() {
+        let dialog = scope_dialog("and {count} more");
+        let listed = (0..12)
+            .map(|index| format!("path-{index}.txt"))
+            .collect::<Vec<_>>();
+        assert_eq!(commit_scope(&dialog, &listed), listed.join("\n"));
+
+        let mut thirteen = listed.clone();
+        thirteen.push("path-12.txt".into());
+        assert_eq!(
+            commit_scope(&dialog, &thirteen),
+            format!("{}\nand 13 more", listed.join("\n"))
+        );
     }
 }

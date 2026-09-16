@@ -23,6 +23,7 @@
     ProviderModelSummary,
     ProviderRecord,
   } from "$lib/provider";
+  import { t, tm } from "$lib/i18n.svelte";
 
   interface Props {
     confirm: (title: string, message: string, confirmLabel?: string) => Promise<boolean>;
@@ -160,7 +161,9 @@
   let savedSnapshot = $state<string | null>(null);
   let autofillMessage = $state("");
   let autofillModelId = $state<string | null>(null);
-
+  let manualAddVisible = $state(false);
+  let manualModelId = $state("");
+  let manualModelName = $state("");
   const isNewProvider = $derived(!providers.some((provider) => provider.id === draft.id));
   const isCustomProvider = $derived(providerPreset === "custom");
   const catalogProvider = $derived(
@@ -345,7 +348,7 @@
       } else {
         await refreshCredentialStatus();
       }
-      if (showStatus) statusMessage = "Provider 已保存";
+      if (showStatus) statusMessage = t("Provider 已保存；模型变更将在重启任务后出现在对话窗口");
       savedSnapshot = draftSnapshot();
       return saved;
     } catch (error) {
@@ -358,11 +361,11 @@
 
   async function saveCredential(showStatus = true) {
     if (!draft.id) {
-      onError("请先保存 Provider");
+      onError(t("请先保存 Provider"));
       return;
     }
     if (!apiKey.trim()) {
-      onError("API Key 不能为空");
+      onError(t("API Key 不能为空"));
       return;
     }
     try {
@@ -374,20 +377,20 @@
       nativeAuthConfigured = false;
       authType = "api_key";
       credentialConfigured = status.configured;
-      if (showStatus) statusMessage = "API Key 已保存到 Windows Credential Manager";
+      if (showStatus) statusMessage = t("API Key 已保存到 Windows Credential Manager");
     } catch (error) {
       onError(error);
     }
   }
 
   async function deleteCredential() {
-    if (!draft.id || !(await confirm("删除 API Key", `删除 ${draft.name || draft.id} 的 Windows 凭据吗？`, "删除"))) return;
+    if (!draft.id || !(await confirm(t("删除 API Key"), t("删除 {name} 的 Windows 凭据吗？", { name: draft.name || draft.id }), t("删除")))) return;
     try {
       await invoke("delete_provider_credential", { request: { providerId: draft.id } });
       apiKeyConfigured = false;
       credentialConfigured = nativeAuthConfigured;
       if (!nativeAuthConfigured) authType = null;
-      statusMessage = "API Key 已删除";
+      statusMessage = t("API Key 已删除");
     } catch (error) {
       onError(error);
     }
@@ -395,10 +398,10 @@
 
   async function testConnection() {
     if (!draft.id) {
-      onError("请先保存 Provider");
+      onError(t("请先保存 Provider"));
       return;
     }
-    connectionMessage = "正在测试…";
+    connectionMessage = t("正在测试…");
     try {
       const saved = await saveProvider(false);
       if (!saved) return;
@@ -406,23 +409,23 @@
         request: { providerId: saved.id },
       });
       connectionMessage = result.reachable
-        ? `可达 · HTTP ${result.status}`
-        : `不可达 · HTTP ${result.status}（检查 Base URL 与 API Key）`;
+        ? t("可达 · HTTP {status}", { status: result.status })
+        : t("不可达 · HTTP {status}（检查 Base URL 与 API Key）", { status: result.status });
     } catch (error) {
-      connectionMessage = "连接失败";
+      connectionMessage = t("连接失败");
       onError(error);
     }
   }
 
   async function removeProvider() {
     if (!draft.id || isNewProvider) return;
-    if (!(await confirm("删除 Provider", `删除 ${draft.name || draft.id} 及其模型配置吗？`, "删除"))) return;
+    if (!(await confirm(t("删除 Provider"), t("删除 {name} 及其模型配置吗？", { name: draft.name || draft.id }), t("删除")))) return;
     try {
       await invoke("delete_pi_provider", { request: { id: draft.id } });
       await invoke("delete_provider_credential", { request: { providerId: draft.id } });
       providers = providers.filter((provider) => provider.id !== draft.id);
       newProvider();
-      statusMessage = "Provider 已删除";
+      statusMessage = t("Provider 已删除");
     } catch (error) {
       onError(error);
     }
@@ -445,7 +448,7 @@
     const rows: ModelRow[] = configured.map((model) => ({
       id: model.id,
       name: model.name,
-      sub: `${model.id} · ${formatContext(model.contextWindow)}${model.reasoning ? " · 推理" : ""}${model.cost ? ` · ${formatCost(model.cost.input)}/${formatCost(model.cost.output)}` : ""}`,
+      sub: `${model.id} · ${formatContext(model.contextWindow)}${model.reasoning ? ` · ${t("推理")}` : ""}${model.cost ? ` · ${formatCost(model.cost.input)}/${formatCost(model.cost.output)}` : ""}`,
       configured: true,
       summary: null,
     }));
@@ -466,7 +469,7 @@
   async function refreshProviderModels(provider: ProviderRecord) {
     ensureDraft(provider);
     if (!draft.id || !draft.baseUrl) {
-      onError("请先选择 Provider 或填写 Base URL");
+      onError(t("请先选择 Provider 或填写 Base URL"));
       return;
     }
     isFetchingProviderModels = true;
@@ -480,7 +483,7 @@
       fetchedModels = { ...fetchedModels, [saved.id]: models };
       showAllModels = { ...showAllModels, [saved.id]: true };
       expanded = { ...expanded, [saved.id]: true };
-      statusMessage = `已拉取 ${models.length} 个模型`;
+      statusMessage = t("已拉取 {count} 个模型", { count: models.length });
     } catch (error) {
       onError(error);
     } finally {
@@ -511,6 +514,37 @@
 
   function upsertModel(model: ConfiguredModel) {
     draft.models = [model, ...draft.models.filter((candidate) => candidate.id !== model.id)];
+  }
+
+  /// 手动添加模型：供应商 /models 接口不可用时，用户可以直接录入模型并保存。
+  function addManualModel(provider: ProviderRecord) {
+    const id = manualModelId.trim();
+    if (!id) {
+      onError(t("请输入模型 ID"));
+      return;
+    }
+    ensureDraft(provider);
+    if (draft.models.some((candidate) => candidate.id === id)) {
+      onError(t("模型 {id} 已存在", { id }));
+      return;
+    }
+    const model: ConfiguredModel = {
+      id,
+      name: manualModelName.trim() || id,
+      reasoning: false,
+      input: ["text"],
+      contextWindow: 128000,
+      maxTokens: 8192,
+      thinkingLevels: [],
+      cost: null,
+      api: null,
+    };
+    upsertModel(model);
+    manualModelId = "";
+    manualModelName = "";
+    statusMessage = t("模型 {name} 已添加，记得保存 Provider", { name: model.name });
+    selectedModelId = id;
+    detailMode = "model";
   }
 
   function modelFromProfile(profile: PiModelProfile, fallback?: ProviderModelSummary): ConfiguredModel {
@@ -548,12 +582,12 @@
           request: { path: official.path, provider: official.provider, modelId: official.id },
         });
         upsertModel(modelFromProfile(profile, summary));
-        statusMessage = `${profile.name} 已从 pi.dev/models 补全并填入`;
+        statusMessage = t("{name} 已从 pi.dev/models 补全并填入", { name: profile.name });
       } else {
         upsertModel(summaryToConfigured(summary));
         statusMessage = catalogUnavailable
-          ? `${summary.name} 已填入，官方模型目录暂不可用`
-          : `${summary.name} 已填入，pi.dev/models 暂无对应详情`;
+          ? t("{name} 已填入，官方模型目录暂不可用", { name: summary.name })
+          : t("{name} 已填入，pi.dev/models 暂无对应详情", { name: summary.name });
       }
     } catch (error) {
       onError(error);
@@ -570,7 +604,7 @@
         selectedModelId = null;
         detailMode = "provider";
       }
-      statusMessage = `${row.name} 已取消选择`;
+      statusMessage = t("{name} 已取消选择", { name: row.name });
       return;
     }
     if (!row.summary) return;
@@ -622,8 +656,8 @@
     try {
       const official = await officialSummaryFor(model.id);
       if (!official) {
-        autofillMessage = "目录暂无详情";
-        statusMessage = "官方模型目录暂无该模型详情";
+        autofillMessage = t("目录暂无详情");
+        statusMessage = t("官方模型目录暂无该模型详情");
         return;
       }
       const profile = await invoke<PiModelProfile>("pi_model_profile", {
@@ -640,8 +674,8 @@
       model.cost = merged.cost;
       model.api = merged.api;
       autofillModelId = model.id;
-      autofillMessage = "已自动填入";
-      statusMessage = `${model.id} 已自动填入官方参数`;
+      autofillMessage = t("已自动填入");
+      statusMessage = t("{id} 已自动填入官方参数", { id: model.id });
     } catch (error) {
       onError(error);
     } finally {
@@ -653,11 +687,11 @@
     const model = editingModel;
     if (!model || !draft.id) return;
     const id = model.id;
-    modelTest = { ...modelTest, [id]: { ok: false, text: "正在测试…" } };
+    modelTest = { ...modelTest, [id]: { ok: false, text: t("正在测试…") } };
     try {
       const saved = await saveProvider(false);
       if (!saved) {
-        modelTest = { ...modelTest, [id]: { ok: false, text: "Provider 保存失败" } };
+        modelTest = { ...modelTest, [id]: { ok: false, text: t("Provider 保存失败") } };
         return;
       }
       const result = await invoke<{ ok: boolean; status: number | null; latencyMs: number | null; error: string | null }>(
@@ -667,16 +701,16 @@
       modelTest = {
         ...modelTest,
         [id]: result.ok
-          ? { ok: true, text: `连通 · HTTP ${result.status} · ${result.latencyMs ?? 0}ms` }
-          : { ok: false, text: result.error ?? "连接失败" },
+          ? { ok: true, text: t("连通 · HTTP {status} · {latency}ms", { status: result.status ?? "", latency: result.latencyMs ?? 0 }) }
+          : { ok: false, text: result.error ?? t("连接失败") },
       };
     } catch (error) {
-      modelTest = { ...modelTest, [id]: { ok: false, text: String(error) } };
+      modelTest = { ...modelTest, [id]: { ok: false, text: tm(String(error)) } };
     }
   }
 
   function formatContext(value: number | null) {
-    if (value === null) return "未知";
+    if (value === null) return t("未知");
     return value >= 1_000_000 ? `${(value / 1_000_000).toFixed(1)}M` : `${Math.round(value / 1_000)}K`;
   }
 
@@ -686,35 +720,35 @@
   }
 </script>
 
-<section class="provider-page" class:embedded aria-label="Pi Provider 和模型配置">
+<section class="provider-page" class:embedded aria-label={t("Pi Provider 和模型配置")}>
   <header class="provider-header">
     {#if !embedded}<div class="provider-title">
-      <button class="icon-button" type="button" aria-label="返回工作区" title="返回" onclick={onClose}><X size={17} /></button>
+      <button class="icon-button" type="button" aria-label={t("返回工作区")} title={t("返回")} onclick={onClose}><X size={17} /></button>
       <Server size={18} />
-      <h1>Provider 与模型</h1>
+      <h1>{t("Provider 与模型")}</h1>
     </div>{/if}
     <div class="header-actions">
-      <button type="button" class="quiet-button" onclick={newProvider}><Plus size={14} />新建 Provider</button>
+      <button type="button" class="quiet-button" onclick={newProvider}><Plus size={14} />{t("新建 Provider")}</button>
       {#if savedSnapshot !== null && !draftDirty}
-        <span class="saved-note" role="status">已保存</span>
+        <span class="saved-note" role="status">{t("已保存")}</span>
       {/if}
       <button type="button" class="primary-button" disabled={!saveReady}
-        title={saveReady ? "" : "没有未保存的修改"}
-        onclick={() => void saveProvider()}><Save size={14} />保存</button>
+        title={saveReady ? "" : t("没有未保存的修改")}
+        onclick={() => void saveProvider()}><Save size={14} />{t("保存")}</button>
     </div>
   </header>
 
   <div class="provider-layout">
-    <aside class="provider-list" aria-label="Provider 列表">
+    <aside class="provider-list" aria-label={t("Provider 列表")}>
       <div class="section-heading"><span>Provider</span><span>{providers.length}</span></div>
       {#if providers.length === 0}
-        <p class="empty">还没有 Provider</p>
+        <p class="empty">{t("还没有 Provider")}</p>
       {:else}
         {#each providers as provider (provider.id)}
           <div class="provider-entry">
             <div class="provider-row" class:selected={provider.id === draft.id && detailMode === "provider"}>
               <button class="provider-expand" type="button" aria-expanded={!!expanded[provider.id]}
-                aria-label={`展开 ${provider.name || provider.id} 的模型`} title="展开模型列表"
+                aria-label={t("展开 {name} 的模型", { name: provider.name || provider.id })} title={t("展开模型列表")}
                 onclick={() => toggleExpanded(provider.id)}>
                 {#if expanded[provider.id]}<ChevronDown size={14} />{:else}<ChevronRight size={14} />{/if}
               </button>
@@ -730,17 +764,32 @@
                     disabled={isFetchingProviderModels || busyModel !== null || (provider.id === draft.id && (!draft.id || !draft.baseUrl))}
                     onclick={() => void refreshProviderModels(provider)}>
                     {#if isFetchingProviderModels && provider.id === draft.id}<span class="spin"><RefreshCw size={13} /></span>{:else}<RefreshCw size={13} />{/if}
-                    拉取所有模型
+                    {t("拉取所有模型")}
+                  </button>
+                  <button type="button" class="quiet-button compact"
+                    disabled={busyModel !== null}
+                    title={t("手动录入一个模型，不依赖供应商的 /models 接口")}
+                    onclick={() => { if (provider.id !== draft.id) selectProvider(provider); manualAddVisible = !manualAddVisible; }}>
+                    {t("手动添加")}
                   </button>
                 </div>
+                {#if provider.id === draft.id && manualAddVisible}
+                  <div class="manual-model-form">
+                    <input bind:value={manualModelId} placeholder={t("模型 ID（如 deepseek-chat）")} aria-label={t("手动添加模型的 ID")} autocomplete="off" />
+                    <input bind:value={manualModelName} placeholder={t("显示名称（可选）")} aria-label={t("手动添加模型的显示名称")} autocomplete="off" />
+                    <button type="button" class="quiet-button compact" disabled={!manualModelId.trim()} onclick={() => addManualModel(provider)}>
+                      {t("添加")}
+                    </button>
+                  </div>
+                {/if}
                 {#if modelRows(provider).length === 0}
-                  <p class="empty">暂无模型</p>
+                  <p class="empty">{t("暂无模型")}</p>
                 {:else}
                   {#each modelRows(provider) as row (row.id)}
                     <div class="model-row"
                       class:selected={detailMode === "model" && selectedModelId === row.id && provider.id === draft.id}>
                       <input type="checkbox" checked={row.configured} disabled={busyModel === row.id}
-                        aria-label={`选择 ${row.name}`} title={row.configured ? "取消选择" : "选择模型"}
+                        aria-label={t("选择 {name}", { name: row.name })} title={row.configured ? t("取消选择") : t("选择模型")}
                         onchange={() => void toggleModel(provider, row)} />
                       <button type="button" class="model-open" onclick={() => openModelDetail(provider, row)}>
                         <strong>{row.name}</strong>
@@ -760,7 +809,7 @@
       {#if detailMode === "model" && editingModel}
         <section class="editor-section model-detail-section">
           <div class="section-heading">
-            <span>模型 · {editingModel.id}</span>
+            <span>{t("模型 · {id}", { id: editingModel.id })}</span>
             <span class="section-actions">
               {#if autofillMessage && autofillModelId === editingModel.id}
                 <span class="saved-note" role="status">{autofillMessage}</span>
@@ -768,36 +817,36 @@
               <button type="button" class="quiet-button compact" disabled={busyModel === editingModel.id}
                 onclick={() => void autofillModel()}>
                 {#if busyModel === editingModel.id}<span class="spin"><RefreshCw size={13} /></span>{:else}<Zap size={13} />{/if}
-                自动填入
+                {t("自动填入")}
               </button>
               <button type="button" class="quiet-button compact" disabled={!draft.id || busyModel === editingModel.id}
                 onclick={() => void testModelConnection()}>
                 {#if busyModel === editingModel.id}<span class="spin"><RefreshCw size={13} /></span>{:else}<Check size={13} />{/if}
-                测试连通
+                {t("测试连通")}
               </button>
-              <button class="danger-icon" type="button" aria-label="移除模型" title="移除模型"
+              <button class="danger-icon" type="button" aria-label={t("移除模型")} title={t("移除模型")}
                 onclick={() => { const id = editingModel.id; draft.models = draft.models.filter((candidate) => candidate.id !== id); selectedModelId = null; detailMode = "provider"; }}>
                 <Trash2 size={14} />
               </button>
             </span>
           </div>
           <div class="form-grid">
-            <label>名称<input value={editingModel.name}
+            <label>{t("名称")}<input value={editingModel.name}
               oninput={(event) => { editingModel.name = event.currentTarget.value; }} /></label>
-            <label>模型 ID<input value={editingModel.id} disabled /></label>
-            <label>API 类型（留空继承 Provider）
+            <label>{t("模型 ID")}<input value={editingModel.id} disabled /></label>
+            <label>{t("API 类型（留空继承 Provider）")}
               <select
                 value={editingModel.api ?? ""}
                 onchange={(event) => { editingModel.api = event.currentTarget.value === "" ? null : event.currentTarget.value; }}>
-                <option value="">继承 Provider（{draft.api}）</option>
+                <option value="">{t("继承 Provider（{api}）", { api: draft.api })}</option>
                 {#each API_OPTIONS as option (option.value)}
                   <option value={option.value}>{option.label}</option>
                 {/each}
               </select>
             </label>
-            <label>总上下文窗口（tokens）<input inputmode="numeric" value={editingModel.contextWindow}
+            <label>{t("总上下文窗口（tokens）")}<input inputmode="numeric" value={editingModel.contextWindow}
               oninput={(event) => setNumberField(editingModel, "contextWindow", event.currentTarget.value)} /></label>
-            <label>最大输出（tokens）<input inputmode="numeric" value={editingModel.maxTokens}
+            <label>{t("最大输出（tokens）")}<input inputmode="numeric" value={editingModel.maxTokens}
               oninput={(event) => setNumberField(editingModel, "maxTokens", event.currentTarget.value)} /></label>
           </div>
           <label class="check-line">
@@ -809,7 +858,7 @@
                 }
                 if (!event.currentTarget.checked) editingModel.thinkingLevels = [];
               }} />
-            支持推理
+            {t("支持推理")}
           </label>
           {#if editingModel.reasoning}
             <div class="level-row">
@@ -824,37 +873,37 @@
           {/if}
           {#if editingModel.cost}
             <div class="form-grid cost-grid">
-              <label>输入价格（$/M）<input inputmode="decimal" value={costValue(editingModel, "input")}
+              <label>{t("输入价格（$/M）")}<input inputmode="decimal" value={costValue(editingModel, "input")}
                 oninput={(event) => setCostField(editingModel, "input", event.currentTarget.value)} /></label>
-              <label>输出价格（$/M）<input inputmode="decimal" value={costValue(editingModel, "output")}
+              <label>{t("输出价格（$/M）")}<input inputmode="decimal" value={costValue(editingModel, "output")}
                 oninput={(event) => setCostField(editingModel, "output", event.currentTarget.value)} /></label>
-              <label>缓存读（$/M）<input inputmode="decimal" value={costValue(editingModel, "cacheRead")}
+              <label>{t("缓存读（$/M）")}<input inputmode="decimal" value={costValue(editingModel, "cacheRead")}
                 oninput={(event) => setCostField(editingModel, "cacheRead", event.currentTarget.value)} /></label>
-              <label>缓存写（$/M）<input inputmode="decimal" value={costValue(editingModel, "cacheWrite")}
+              <label>{t("缓存写（$/M）")}<input inputmode="decimal" value={costValue(editingModel, "cacheWrite")}
                 oninput={(event) => setCostField(editingModel, "cacheWrite", event.currentTarget.value)} /></label>
             </div>
           {/if}
           {#if modelTest[editingModel.id]}
-            <p class="status" class:ok={modelTest[editingModel.id].ok} role="status">{modelTest[editingModel.id].text}</p>
+            <p class="status" class:ok={modelTest[editingModel.id].ok} role="status">{tm(modelTest[editingModel.id].text)}</p>
           {/if}
         </section>
       {:else}
         <section class="editor-section">
           <div class="section-heading"><span>Provider</span><span class="section-actions">
-            {#if !isNewProvider}<button class="danger-icon" type="button" aria-label="删除 Provider" title="删除 Provider" onclick={() => void removeProvider()}><Trash2 size={14} /></button>{/if}
+            {#if !isNewProvider}<button class="danger-icon" type="button" aria-label={t("删除 Provider")} title={t("删除 Provider")} onclick={() => void removeProvider()}><Trash2 size={14} /></button>{/if}
           </span></div>
           <div class="form-grid">
-            <label>Provider 预设
+            <label>{t("Provider 预设")}
               <select bind:value={providerPreset} onchange={(event) => applyProviderPreset(event.currentTarget.value)}>
-                <option value="custom">Custom 自定义</option>
+                <option value="custom">{t("Custom 自定义")}</option>
                 {#each PROVIDER_PRESETS as preset (preset.key)}
                   <option value={preset.key}>{preset.label}</option>
                 {/each}
               </select>
             </label>
-            <label>标识<input bind:value={draft.id} disabled={!isCustomProvider || !isNewProvider} placeholder="my-provider" autocomplete="off" /></label>
-            <label>名称<input bind:value={draft.name} disabled={!isCustomProvider} placeholder="自定义 Provider" autocomplete="off" /></label>
-            <label>API 类型
+            <label>{t("标识")}<input bind:value={draft.id} disabled={!isCustomProvider || !isNewProvider} placeholder="my-provider" autocomplete="off" /></label>
+            <label>{t("名称")}<input bind:value={draft.name} disabled={!isCustomProvider} placeholder={t("自定义 Provider")} autocomplete="off" /></label>
+            <label>{t("API 类型")}
               <select bind:value={draft.api} disabled={!isCustomProvider}>
                 {#each API_OPTIONS as option (option.value)}
                   <option value={option.value}>{option.label}</option>
@@ -867,19 +916,19 @@
 
         <section class="editor-section request-section">
           <div class="section-heading">
-            <span>请求选项</span>
-            <button type="button" class="quiet-button compact" onclick={addHeader}><Plus size={13} />添加 Header</button>
+            <span>{t("请求选项")}</span>
+            <button type="button" class="quiet-button compact" onclick={addHeader}><Plus size={13} />{t("添加 Header")}</button>
           </div>
-          <label>代理<input bind:value={draft.proxy} placeholder="http://127.0.0.1:7890" autocomplete="url" /></label>
+          <label>{t("代理")}<input bind:value={draft.proxy} placeholder="http://127.0.0.1:7890" autocomplete="url" /></label>
           {#if headerEntries.length === 0}
-            <p class="empty">没有自定义 Header。</p>
+            <p class="empty">{t("没有自定义 Header。")}</p>
           {:else}
             <div class="header-list">
               {#each headerEntries as header, index (index)}
                 <div class="header-row">
-                  <input bind:value={header.name} aria-label={`Header ${index + 1} 名称`} placeholder="Header 名称" oninput={syncDraftHeaders} />
-                  <input bind:value={header.value} aria-label={`Header ${index + 1} 值`} placeholder="Header 值" oninput={syncDraftHeaders} />
-                  <button class="danger-icon" type="button" aria-label={`移除 Header ${index + 1}`} title="移除 Header" onclick={() => removeHeader(index)}><Trash2 size={14} /></button>
+                  <input bind:value={header.name} aria-label={t("Header {index} 名称", { index: index + 1 })} placeholder={t("Header 名称")} oninput={syncDraftHeaders} />
+                  <input bind:value={header.value} aria-label={t("Header {index} 值", { index: index + 1 })} placeholder={t("Header 值")} oninput={syncDraftHeaders} />
+                  <button class="danger-icon" type="button" aria-label={t("移除 Header {index}", { index: index + 1 })} title={t("移除 Header")} onclick={() => removeHeader(index)}><Trash2 size={14} /></button>
                 </div>
               {/each}
             </div>
@@ -887,13 +936,13 @@
         </section>
 
         <section class="editor-section credential-section">
-          <div class="section-heading"><span>Credential Manager</span><span class:configured={credentialConfigured} class="credential-state">{authType === "oauth" ? "Pi OAuth" : nativeAuthConfigured && apiKeyConfigured ? "Pi 登录 + API Key" : credentialConfigured ? "API Key" : "未配置"}</span></div>
+          <div class="section-heading"><span>Credential Manager</span><span class:configured={credentialConfigured} class="credential-state">{authType === "oauth" ? "Pi OAuth" : nativeAuthConfigured && apiKeyConfigured ? t("Pi 登录 + API Key") : credentialConfigured ? "API Key" : t("未配置")}</span></div>
           <div class="credential-row">
             <KeyRound size={16} />
-            <input type="password" bind:value={apiKey} placeholder={credentialConfigured ? "输入新 Key 以替换" : "API Key"} autocomplete="new-password" />
-            <button type="button" class="quiet-button" disabled={!draft.id || !apiKey.trim()} onclick={() => void saveCredential()}><Save size={14} />保存 Key</button>
-            <button type="button" class="danger-icon" aria-label="删除 API Key" title="删除 API Key" disabled={!credentialConfigured} onclick={() => void deleteCredential()}><Trash2 size={14} /></button>
-            <button type="button" class="quiet-button" disabled={!draft.id || !draft.baseUrl} onclick={() => void testConnection()}><Check size={14} />测试连接</button>
+            <input type="password" bind:value={apiKey} placeholder={credentialConfigured ? t("输入新 Key 以替换") : "API Key"} autocomplete="new-password" />
+            <button type="button" class="quiet-button" disabled={!draft.id || !apiKey.trim()} onclick={() => void saveCredential()}><Save size={14} />{t("保存 Key")}</button>
+            <button type="button" class="danger-icon" aria-label={t("删除 API Key")} title={t("删除 API Key")} disabled={!credentialConfigured} onclick={() => void deleteCredential()}><Trash2 size={14} /></button>
+            <button type="button" class="quiet-button" disabled={!draft.id || !draft.baseUrl} onclick={() => void testConnection()}><Check size={14} />{t("测试连接")}</button>
           </div>
           {#if connectionMessage}<p class="status" role="status">{connectionMessage}</p>{/if}
         </section>
@@ -921,10 +970,10 @@
   .section-heading { min-height: 28px; color: #aeb8b0; font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
   .provider-entry { margin-bottom: 2px; }
   .provider-row { width: 100%; gap: 4px; padding: 2px; border: 1px solid transparent; border-radius: 4px; color: #bfc8c1; }
-  .provider-row:hover, .provider-row.selected { border-color: #3b5646; background: #202922; color: #f4f7f5; }
+  .provider-row:hover, .provider-row.selected { border-color: var(--border-strong); background: var(--surface-hover); color: var(--text-strong); }
   .provider-expand, .provider-open { display: flex; align-items: center; border: 0; background: transparent; color: inherit; cursor: pointer; }
   .provider-expand { width: 22px; height: 30px; flex-shrink: 0; justify-content: center; border-radius: 3px; }
-  .provider-expand:hover { color: #f4f7f5; background: #2b352d; }
+  .provider-expand:hover { color: var(--text-strong); background: var(--surface-hover); }
   .provider-open { flex: 1; min-width: 0; gap: 8px; padding: 4px; text-align: left; }
   .provider-copy { min-width: 0; display: grid; gap: 2px; }
   strong { overflow: hidden; color: #f4f7f5; font-size: 12px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
@@ -932,8 +981,10 @@
   .model-count { min-width: 18px; color: #8fd6ad; font-size: 11px; text-align: right; flex-shrink: 0; }
   .provider-models { margin: 2px 0 8px 26px; display: grid; gap: 2px; }
   .models-toolbar { justify-content: flex-end; min-height: 26px; }
+  .manual-model-form { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 4px 0 8px; }
+  .manual-model-form input { flex: 1 1 150px; min-width: 0; height: 28px; padding: 2px 8px; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--surface); color: var(--text); font: inherit; font-size: 12px; }
   .model-row { display: flex; align-items: center; gap: 6px; padding: 2px; border: 1px solid transparent; border-radius: 4px; }
-  .model-row:hover, .model-row.selected { border-color: #3b5646; background: #202922; }
+  .model-row:hover, .model-row.selected { border-color: var(--border-strong); background: var(--surface-hover); }
   .model-row input[type="checkbox"] { width: 14px; height: 14px; flex-shrink: 0; accent-color: #8fd6ad; cursor: pointer; }
   .model-open { flex: 1; min-width: 0; display: grid; gap: 2px; padding: 4px; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
   .editor-section + .editor-section { border-top: 1px solid #303832; margin-top: 14px; padding-top: 12px; }
@@ -949,7 +1000,7 @@
   .check-inline { display: inline-flex; align-items: center; gap: 4px; color: #c5cec7; font-size: 11px; }
   button { font: inherit; }
   .icon-button, .danger-icon, .quiet-button, .primary-button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; border-radius: 4px; cursor: pointer; }
-  .icon-button, .danger-icon { width: 30px; height: 30px; border: 1px solid transparent; color: #aeb7b0; background: transparent; }
+  .icon-button, .danger-icon { width: 30px; height: 30px; padding: 0; border: 1px solid transparent; color: #aeb7b0; background: transparent; }
   .icon-button:hover, .danger-icon:hover:not(:disabled) { border-color: #465048; color: #f4f7f5; background: #252b27; }
   .danger-icon { color: #d88989; }
   .quiet-button, .primary-button { min-height: 30px; padding: 0 9px; border: 1px solid #39433c; color: #c5cec7; background: #202721; font-size: 11px; }

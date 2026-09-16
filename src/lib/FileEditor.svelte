@@ -3,12 +3,13 @@
   import { ExternalLink, Save, CopyPlus, RefreshCw, X, GitCompareArrows, FileText } from "@lucide/svelte";
   import { onDestroy, onMount, untrack } from "svelte";
   import { documentDirty, type FileDocument, type FileWorkspace } from "./file-workspace";
-  import { newlineMode } from "./editor-document";
+  import { newlineLabel } from "./editor-document";
   import type { FilePreview } from "./files";
   import type { DialogRequest, DialogValue } from "./dialog";
   import CodeEditor from "./CodeEditor.svelte";
   import { createFileComparison, comparisonSources, comparisonStale, type ComparisonState, type ComparisonSourceKind } from "./file-comparison";
   import { shortcutLabel, shortcutAria } from "./shortcuts";
+  import { t, tm } from "$lib/i18n.svelte";
 
   let { documents, controller, projectId, path, visible, line, column, refreshToken,
     editorConfigured, onConfigureEditor, onSelect, onHide, requestDialog, invokeCommand = invoke }: {
@@ -59,8 +60,8 @@
     if (!doc || doc.saving || doc.locked) return;
     let target: string | undefined;
     if (asNew) {
-      const result = await requestDialog({ kind: "input", title: "另存为", message: "输入当前项目内的新文件路径。已有文件不会被覆盖。",
-        initialValue: doc.path, confirmLabel: "另存", maxLength: 4096 });
+      const result = await requestDialog({ kind: "input", title: t("另存为"), message: t("输入当前项目内的新文件路径。已有文件不会被覆盖。"),
+        initialValue: doc.path, confirmLabel: t("另存"), maxLength: 4096 });
       if (typeof result !== "string" || !result) return;
       target = result;
     }
@@ -94,8 +95,8 @@
     launching = true;
     try {
       await invokeCommand("open_project_in_editor", { projectId, relativePath: path, line: line ?? null, column: column ?? null });
-      notice = "已发送到外部编辑器；内置草稿未自动写入磁盘。";
-    } catch (error) { notice = String(error); }
+      notice = t("已发送到外部编辑器；内置草稿未自动写入磁盘。");
+    } catch (error) { notice = tm(String(error)); }
     finally { launching = false; }
   }
   function tabKey(event: KeyboardEvent, index: number) {
@@ -109,34 +110,34 @@
   }
 </script>
 
-<section class="file-editor" class:hidden={!visible} aria-label="文件编辑">
-  <div class="file-tabs" role="tablist" aria-label="已打开文件">
+<section class="file-editor" class:hidden={!visible} aria-label={t("文件编辑")}>
+  <div class="file-tabs" role="tablist" aria-label={t("已打开文件")}>
     {#each tabs as doc, index (doc.id)}
       <div class="file-tab" class:active={doc.id === current?.id}>
         <button type="button" role="tab" aria-selected={doc.id === current?.id} tabindex={doc.id === current?.id ? 0 : -1}
           title={doc.path} onclick={() => onSelect(doc.path)} onkeydown={(event) => tabKey(event, index)}>
-          <FileText size={14} /><span>{doc.path.split("/").pop()}</span>{#if documentDirty(doc)}<span aria-label="未保存">*</span>{/if}
+          <FileText size={14} /><span>{doc.path.split("/").pop()}</span>{#if documentDirty(doc)}<span aria-label={t("未保存")}>*</span>{/if}
         </button>
-        <button type="button" class="icon" title={`关闭 ${doc.path}`} aria-label={`关闭 ${doc.path}`} disabled={doc.saving || doc.locked} onclick={() => void close(doc.id)}><X size={14} /></button>
+        <button type="button" class="icon" title={t("关闭 {path}", { path: doc.path })} aria-label={t("关闭 {path}", { path: doc.path })} disabled={doc.saving || doc.locked} onclick={() => void close(doc.id)}><X size={14} /></button>
       </div>
     {/each}
   </div>
   <header>
     <strong title={path}>{path}</strong>
-    <button type="button" class="icon" title={`保存 (${shortcutLabel("save")})`} aria-label="保存文件" aria-keyshortcuts={shortcutAria("save")} disabled={!current?.state || current.saving || current.locked} onclick={() => void save()}><Save size={16} /></button>
-    <button type="button" class="icon" title={`另存为 (${shortcutLabel("saveAs")})`} aria-label="另存为" aria-keyshortcuts={shortcutAria("saveAs")} disabled={!current?.state || current.saving || current.locked} onclick={() => void save(true)}><CopyPlus size={16} /></button>
-    <button type="button" class="icon" title="比较磁盘或恢复副本" aria-label="比较磁盘文件" disabled={!current?.state || comparison.status === "loading"} onclick={() => void compare()}><GitCompareArrows size={16} /></button>
-    <button type="button" class="icon" title="重新载入" aria-label="重新载入文件" disabled={!current || current.loading || current.saving} onclick={() => current && void controller.reload(current.id)}><RefreshCw size={16} /></button>
-    <button type="button" class="icon" title={editorConfigured ? "外部编辑器" : "配置外部编辑器"} aria-label="外部编辑器" disabled={launching} onclick={() => void external()}><ExternalLink size={16} /></button>
-    <button type="button" class="icon" title="返回任务" aria-label="隐藏文件编辑器" onclick={onHide}><X size={16} /></button>
+    <button type="button" class="icon" title={t("保存 ({shortcut})", { shortcut: shortcutLabel("save") })} aria-label={t("保存文件")} aria-keyshortcuts={shortcutAria("save")} disabled={!current?.state || current.saving || current.locked} onclick={() => void save()}><Save size={16} /></button>
+    <button type="button" class="icon" title={t("另存为 ({shortcut})", { shortcut: shortcutLabel("saveAs") })} aria-label={t("另存为")} aria-keyshortcuts={shortcutAria("saveAs")} disabled={!current?.state || current.saving || current.locked} onclick={() => void save(true)}><CopyPlus size={16} /></button>
+    <button type="button" class="icon" title={t("比较磁盘或恢复副本")} aria-label={t("比较磁盘文件")} disabled={!current?.state || comparison.status === "loading"} onclick={() => void compare()}><GitCompareArrows size={16} /></button>
+    <button type="button" class="icon" title={t("重新载入")} aria-label={t("重新载入文件")} disabled={!current || current.loading || current.saving} onclick={() => current && void controller.reload(current.id)}><RefreshCw size={16} /></button>
+    <button type="button" class="icon" title={editorConfigured ? t("外部编辑器") : t("配置外部编辑器")} aria-label={t("外部编辑器")} disabled={launching} onclick={() => void external()}><ExternalLink size={16} /></button>
+    <button type="button" class="icon" title={t("返回任务")} aria-label={t("隐藏文件编辑器")} onclick={onHide}><X size={16} /></button>
   </header>
-  {#if notice}<p role="status">{notice}</p>{/if}
-  {#if current?.error}<p role="alert">{current.error}</p>{/if}
+  {#if notice}<p role="status">{tm(notice)}</p>{/if}
+  {#if current?.error}<p role="alert">{tm(current.error)}</p>{/if}
   {#if current?.issue}
     <div class="save-result" role={current.issue.outcome === "saved" ? "status" : "alert"}>
-      <span>{current.issue.detail}</span>
-      {#if current.issue.recoveryPath}<span>恢复路径：{current.issue.recoveryPath}</span>{/if}
-      {#if current.issue.pendingPath}<span>待写内容路径：{current.issue.pendingPath}</span>{/if}
+      <span>{tm(current.issue.detail)}</span>
+      {#if current.issue.recoveryPath}<span>{t("恢复路径：{path}", { path: current.issue.recoveryPath })}</span>{/if}
+      {#if current.issue.pendingPath}<span>{t("待写内容路径：{path}", { path: current.issue.pendingPath })}</span>{/if}
     </div>
   {/if}
   {#if current?.state}
@@ -151,37 +152,37 @@
       {#if comparing}
         <div class="comparison">
           <div class="comparison-source">
-            <label for="comparison-source">比较来源</label>
+            <label for="comparison-source">{t("比较来源")}</label>
             <select id="comparison-source" bind:value={comparisonKind} onchange={() => void compare()}>
-              {#each sources as source}<option value={source.kind}>{source.label}</option>{/each}
+              {#each sources as source}<option value={source.kind}>{t(source.label)}</option>{/each}
             </select>
             {#if comparison.status !== "ready"}
-              <button type="button" class="icon" aria-label="关闭比较" title="关闭比较" onclick={closeComparison}><X size={14} /></button>
+              <button type="button" class="icon" aria-label={t("关闭比较")} title={t("关闭比较")} onclick={closeComparison}><X size={14} /></button>
             {/if}
           </div>
-          {#if comparison.status === "loading"}<p role="status">正在读取比较来源…</p>
+          {#if comparison.status === "loading"}<p role="status">{t("正在读取比较来源…")}</p>
           {:else if comparison.status === "error"}
-            <p role="alert">{comparison.error}</p>
-            <button type="button" class="comparison-retry" onclick={() => void compare()}><RefreshCw size={14} />重新读取</button>
+            <p role="alert">{tm(comparison.error)}</p>
+            <button type="button" class="comparison-retry" onclick={() => void compare()}><RefreshCw size={14} />{t("重新读取")}</button>
           {:else if comparison.snapshot && comparisonModule}
             {#await comparisonModule}
-              <p role="status">正在加载差异组件…</p>
-              <button type="button" class="comparison-retry" onclick={closeComparison}>返回编辑</button>
+              <p role="status">{t("正在加载差异组件…")}</p>
+              <button type="button" class="comparison-retry" onclick={closeComparison}>{t("返回编辑")}</button>
             {:then module}
               {#key comparison.snapshot.sequence}
                 <module.default snapshot={comparison.snapshot} stale={staleComparison} {visible} onClose={closeComparison} onRefresh={() => void compare()} />
               {/key}
             {:catch error}
-              <p role="alert">差异组件加载失败：{String(error)}</p>
-              <button type="button" class="comparison-retry" onclick={() => { comparisonModule = import("./FileComparison.svelte"); }}>重新加载</button>
-              <button type="button" class="comparison-retry" onclick={closeComparison}>返回编辑</button>
+              <p role="alert">{t("差异组件加载失败：{error}", { error: tm(String(error)) })}</p>
+              <button type="button" class="comparison-retry" onclick={() => { comparisonModule = import("./FileComparison.svelte"); }}>{t("重新加载")}</button>
+              <button type="button" class="comparison-retry" onclick={closeComparison}>{t("返回编辑")}</button>
             {/await}
           {/if}
         </div>
       {/if}
     </div>
-    <footer><span>UTF-8 · {newlineMode(current.state.sliceDoc())}</span><span>{current.saving ? "保存中" : documentDirty(current) ? "未保存" : "已保存"}</span></footer>
-  {:else if current?.loading}<p role="status">正在读取文件…</p>
+    <footer><span>UTF-8 · {newlineLabel(current.state.sliceDoc())}</span><span>{current.saving ? t("保存中") : documentDirty(current) ? t("未保存") : t("已保存")}</span></footer>
+  {:else if current?.loading}<p role="status">{t("正在读取文件…")}</p>
   {/if}
 </section>
 

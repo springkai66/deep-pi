@@ -15,6 +15,7 @@ use tauri::{AppHandle, Manager};
 use uuid::Uuid;
 
 use crate::dsh_api::DshSessionSummary;
+use crate::message::msg;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -298,7 +299,7 @@ impl TaskStore {
     pub fn add_project(&self, path: &str) -> Result<ProjectRecord, String> {
         let input = Path::new(path);
         if !input.is_dir() {
-            return Err("项目目录不存在".into());
+            return Err(msg("task.project_missing"));
         }
         let canonical = fs::canonicalize(input)
             .map_err(|error| format!("failed to resolve project directory: {error}"))?;
@@ -309,8 +310,8 @@ impl TaskStore {
             .file_name()
             .and_then(|value| value.to_str())
             .filter(|value| !value.is_empty())
-            .unwrap_or("项目")
-            .to_owned();
+            .map(str::to_owned)
+            .unwrap_or_else(|| msg("task.project_default_name"));
         let timestamp = now_millis()?;
         let connection = self
             .connection
@@ -769,15 +770,15 @@ impl TaskStore {
     }
 
     pub fn restart(&self, id: &str) -> Result<TaskRecord, String> {
-        let task = self.get(id)?.ok_or_else(|| "未找到该任务".to_string())?;
+        let task = self.get(id)?.ok_or_else(|| msg("task.not_found"))?;
         if task.status.is_active() {
-            return Err("任务已在运行".into());
+            return Err(msg("task.already_running"));
         }
         if task.archived_at.is_some() {
-            return Err("归档的任务需要先恢复才能重启".into());
+            return Err(msg("task.archived_restore_first"));
         }
         if !crate::native_pi::valid_session_id(&task.session_id) {
-            return Err("任务的 Pi 会话 ID 无效".into());
+            return Err(msg("task.session_id_invalid"));
         }
         let affected = self
             .connection
@@ -811,7 +812,7 @@ impl TaskStore {
 
     pub fn set_active_status(&self, id: &str, status: TaskStatus) -> Result<bool, String> {
         if !matches!(status, TaskStatus::Running | TaskStatus::Waiting) {
-            return Err("桥接状态必须是运行中或等待输入".into());
+            return Err(msg("task.bridge_status_invalid"));
         }
         self.connection
             .lock()
@@ -827,7 +828,7 @@ impl TaskStore {
 
     pub fn finish_if_active(&self, id: &str, status: TaskStatus) -> Result<(), String> {
         if !status.is_terminal() {
-            return Err("结束的任务状态必须是终态".into());
+            return Err(msg("task.finish_status_invalid"));
         }
         self.connection
             .lock()
@@ -843,9 +844,9 @@ impl TaskStore {
     }
 
     pub fn archive(&self, id: &str) -> Result<(), String> {
-        let task = self.get(id)?.ok_or_else(|| "未找到该任务".to_string())?;
+        let task = self.get(id)?.ok_or_else(|| msg("task.not_found"))?;
         if task.status.is_active() {
-            return Err("请先停止正在运行的任务，再归档".into());
+            return Err(msg("task.stop_before_archive"));
         }
         let affected = self
             .connection
@@ -873,9 +874,9 @@ impl TaskStore {
     }
 
     pub fn delete(&self, id: &str) -> Result<(), String> {
-        let task = self.get(id)?.ok_or_else(|| "未找到该任务".to_string())?;
+        let task = self.get(id)?.ok_or_else(|| msg("task.not_found"))?;
         if task.agent == "pi" && task.status.is_active() {
-            return Err("请先停止正在运行的 Pi 任务，再删除".into());
+            return Err(msg("task.stop_before_delete"));
         }
         let mut connection = self
             .connection
@@ -973,7 +974,7 @@ fn clean_display_path(raw: &str) -> String {
 fn validate_title(title: &str) -> Result<&str, String> {
     let title = title.trim();
     if title.is_empty() || title.chars().count() > 200 {
-        Err("任务标题长度必须在 1 到 200 个字符之间".into())
+        Err(msg("task.title_length"))
     } else {
         Ok(title)
     }
@@ -1024,7 +1025,7 @@ fn now_millis() -> Result<i64, String> {
 
 fn ensure_updated(affected: usize) -> Result<(), String> {
     if affected == 0 {
-        Err("未找到该任务".into())
+        Err(msg("task.not_found"))
     } else {
         Ok(())
     }

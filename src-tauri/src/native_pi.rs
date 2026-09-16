@@ -17,7 +17,7 @@ use std::{
 
 #[cfg(test)]
 use crate::task::TaskStore;
-use crate::{app_paths::AppPaths, snapshot::reject_link};
+use crate::{app_paths::AppPaths, message::msg, snapshot::reject_link};
 
 const CONFIG_BYTES: u64 = 1024 * 1024;
 const WINDOW_BYTES: u64 = 64 * 1024;
@@ -86,18 +86,19 @@ fn bounded_json(path: &Path) -> Result<Value, String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(serde_json::json!({}))
         }
-        Err(_) => return Err("无法读取本机 Pi 配置".into()),
+        Err(_) => return Err(msg("native.config.read_failed")),
     };
     let mut bytes = Vec::new();
     file.take(CONFIG_BYTES + 1)
         .read_to_end(&mut bytes)
-        .map_err(|_| "无法读取本机 Pi 配置")?;
+        .map_err(|_| msg("native.config.read_failed"))?;
     if bytes.len() as u64 > CONFIG_BYTES {
-        return Err("本机 Pi 配置超过 1 MiB".into());
+        return Err(msg("native.config.too_large"));
     }
-    let value: Value = serde_json::from_slice(&bytes).map_err(|_| "本机 Pi 配置不是有效 JSON")?;
+    let value: Value =
+        serde_json::from_slice(&bytes).map_err(|_| msg("native.config.invalid_json"))?;
     if !value.is_object() {
-        return Err("本机 Pi 配置必须是 JSON 对象".into());
+        return Err(msg("native.config.not_object"));
     }
     Ok(value)
 }
@@ -173,44 +174,47 @@ fn provider_metadata(home: &Path) -> Result<Vec<NativeProvider>, String> {
 
 fn parse_session(path: &Path) -> Result<NativeSession, String> {
     reject_link(path)?;
-    let mut file = File::open(path).map_err(|_| "无法读取本机 Pi 会话")?;
-    let before = file.metadata().map_err(|_| "无法读取本机会话元数据")?;
+    let mut file = File::open(path).map_err(|_| msg("native.session.open_failed"))?;
+    let before = file
+        .metadata()
+        .map_err(|_| msg("native.session.metadata_failed"))?;
     if !before.is_file() {
-        return Err("不是会话文件".into());
+        return Err(msg("native.session.not_a_file"));
     }
     let mut head = Vec::new();
     (&mut file)
         .take(WINDOW_BYTES)
         .read_to_end(&mut head)
-        .map_err(|_| "无法读取会话头")?;
+        .map_err(|_| msg("native.session.head_read_failed"))?;
     let end = head
         .iter()
         .position(|byte| *byte == b'\n')
-        .ok_or("会话头不完整或超过上限")?;
-    let header: Value = serde_json::from_slice(&head[..end]).map_err(|_| "会话头无效")?;
+        .ok_or(msg("native.session.head_incomplete"))?;
+    let header: Value =
+        serde_json::from_slice(&head[..end]).map_err(|_| msg("native.session.head_invalid"))?;
     if header["type"] != "session" || !matches!(header["version"].as_u64().unwrap_or(1), 1..=3) {
-        return Err("不支持的 Pi 会话格式".into());
+        return Err(msg("native.session.unsupported_format"));
     }
     let id = header["id"]
         .as_str()
         .filter(|id| valid_session_id(id))
-        .ok_or("会话 ID 无效")?;
+        .ok_or(msg("native.session.id_invalid"))?;
     let cwd = header["cwd"]
         .as_str()
         .filter(|cwd| cwd.len() <= 4096 && Path::new(cwd).is_absolute())
-        .ok_or("会话项目目录无效")?;
+        .ok_or(msg("native.session.cwd_invalid"))?;
     let mut title = id.to_owned();
     let tail_start = before.len().saturating_sub(WINDOW_BYTES);
     let tail = if tail_start == 0 {
         head
     } else {
         file.seek(SeekFrom::Start(tail_start))
-            .map_err(|_| "无法读取会话尾")?;
+            .map_err(|_| msg("native.session.tail_read_failed"))?;
         let mut tail = Vec::new();
         (&mut file)
             .take(WINDOW_BYTES)
             .read_to_end(&mut tail)
-            .map_err(|_| "无法读取会话尾")?;
+            .map_err(|_| msg("native.session.tail_read_failed"))?;
         tail
     };
     // Only complete JSONL records are candidates, including when the last append is partial.
@@ -240,23 +244,25 @@ fn parse_session(path: &Path) -> Result<NativeSession, String> {
             }
         }
     }
-    let after = file.metadata().map_err(|_| "无法检查会话元数据")?;
+    let after = file
+        .metadata()
+        .map_err(|_| msg("native_pi.session_metadata_unreadable"))?;
     if before.len() != after.len() || before.modified().ok() != after.modified().ok() {
-        return Err("会话正在写入，稍后重试".into());
+        return Err(msg("native.session.write_in_progress"));
     }
     let timestamp = before
         .created()
         .or_else(|_| before.modified())
         .unwrap_or(SystemTime::now())
         .duration_since(UNIX_EPOCH)
-        .map_err(|_| "会话时间无效")?
+        .map_err(|_| msg("native.session.time_invalid"))?
         .as_millis();
     Ok(NativeSession {
         id: id.to_owned(),
         title,
         cwd: cwd.to_owned(),
         file: path.to_string_lossy().into_owned(),
-        timestamp: i64::try_from(timestamp).map_err(|_| "会话时间超出范围")?,
+        timestamp: i64::try_from(timestamp).map_err(|_| msg("native.session.time_out_of_range"))?,
     })
 }
 
@@ -385,7 +391,7 @@ fn session_roots(
             std::env::var_os("USERPROFILE")
                 .or_else(|| std::env::var_os("HOME"))
                 .map(|home| PathBuf::from(home).join(suffix))
-                .ok_or("无法解析本机会话目录")?
+                .ok_or(msg("native.session.home_unresolved"))?
         } else {
             PathBuf::from(custom)
         };
@@ -402,12 +408,14 @@ fn session_roots(
 pub fn validate_resume(file: &str, id: &str, cwd: &str) -> Result<(), String> {
     let session = parse_session(Path::new(file))?;
     if session.id != id {
-        return Err("会话文件已被替换，ID 不匹配".into());
+        return Err(msg("native.session.id_mismatch"));
     }
-    let expected = fs::canonicalize(cwd).map_err(|_| "任务项目目录不可用")?;
-    let actual = fs::canonicalize(session.cwd).map_err(|_| "会话项目目录不可用")?;
+    let expected =
+        fs::canonicalize(cwd).map_err(|_| msg("native.session.task_project_unavailable"))?;
+    let actual =
+        fs::canonicalize(session.cwd).map_err(|_| msg("native.session.project_unavailable"))?;
     if actual != expected {
-        return Err("会话文件所属项目已变化".into());
+        return Err(msg("native.session.project_changed"));
     }
     Ok(())
 }
@@ -440,7 +448,7 @@ pub fn validate_reported_session(
     file: &str,
 ) -> Result<(), String> {
     if id != task.session_id {
-        return Err("Pi 返回的会话 ID 与任务不一致".into());
+        return Err(msg("native.session.reported_id_mismatch"));
     }
     let path = Path::new(file);
     if !path.is_absolute()
@@ -451,12 +459,12 @@ pub fn validate_reported_session(
             .components()
             .any(|part| matches!(part, std::path::Component::ParentDir))
     {
-        return Err("Pi 返回的会话文件路径无效".into());
+        return Err(msg("native.session.reported_path_invalid"));
     }
     reject_link(path)?;
     if let Some(expected) = &task.session_file {
         if session_key("", expected) != session_key("", file) {
-            return Err("Pi 返回的会话文件与已绑定文件不一致".into());
+            return Err(msg("native.session.reported_file_mismatch"));
         }
         return Ok(());
     }
@@ -476,13 +484,14 @@ pub fn validate_reported_session(
             project.join(directory)
         });
     }
-    let parent = path.parent().ok_or("会话路径缺少父目录")?;
-    let parent = fs::canonicalize(parent).map_err(|_| "会话目录不可用")?;
+    let parent = path.parent().ok_or(msg("native.session.parent_missing"))?;
+    let parent =
+        fs::canonicalize(parent).map_err(|_| msg("native.session.directory_unavailable"))?;
     if !roots
         .iter()
         .any(|root| fs::canonicalize(root).is_ok_and(|root| parent.starts_with(root)))
     {
-        return Err("Pi 会话文件不在已配置的会话目录中".into());
+        return Err(msg("native.session.outside_configured_roots"));
     }
     Ok(())
 }
@@ -731,7 +740,7 @@ mod tests {
         assert_eq!(task.pi_environment, "native");
         assert!(store.get(&task.id).unwrap().is_some());
         let error = paths.task_pi_home(&task).unwrap_err();
-        assert!(error.contains("仅支持 DeepPi 托管任务"), "{error}");
+        assert!(error.contains("managed.native_task_unsupported"), "{error}");
         // 登记文件仍然保留并用于身份校验；换成其他会话文件会被拒绝。
         assert!(
             validate_reported_session(&paths, &task, &task.session_id, file.to_str().unwrap())

@@ -1,5 +1,6 @@
 import type { FilePreview } from "./files";
 import type { FileDocument } from "./file-workspace";
+import { t, tm } from "./i18n.svelte";
 import type { Text } from "@codemirror/state";
 
 export type ComparisonSourceKind = "disk" | "target" | "recovery" | "pending";
@@ -47,7 +48,7 @@ export function comparisonStale(snapshot: ComparisonSnapshot, doc: FileDocument 
 
 function validateText(content: string) {
   if (content.includes("\0") || new TextEncoder().encode(content).length > 2 * 1024 * 1024) {
-    throw new Error("只能比较不含 NUL、最大 2 MiB 的 UTF-8 文本。");
+    throw new Error(t("只能比较不含 NUL、最大 2 MiB 的 UTF-8 文本。"));
   }
 }
 
@@ -66,14 +67,14 @@ export function createFileComparison(
       publish({ status: "loading", snapshot: null, error: "" });
       try {
         const source = comparisonSources(doc).find((entry) => entry.kind === kind);
-        if (!source || !doc.state) throw new Error("比较来源不可用，请重新选择。");
+        if (!source || !doc.state) throw new Error(t("比较来源不可用，请重新选择。"));
         const draft = doc.state.sliceDoc();
         validateText(draft);
         const baselineVersion = doc.version;
         const observedDiskVersion = doc.disk?.version ?? null;
         const loaded = await read(doc.projectId, source.path);
         if (current !== sequence) return;
-        if (loaded.path !== source.path) throw new Error("读取结果与比较路径不一致。");
+        if (loaded.path !== source.path) throw new Error(t("读取结果与比较路径不一致。"));
         validateText(loaded.content);
         publish({ status: "ready", error: "", snapshot: {
           sequence: current, documentId: doc.id, projectId: doc.projectId, path: doc.path,
@@ -81,7 +82,7 @@ export function createFileComparison(
           source: { ...source, content: loaded.content, version: loaded.version },
         } });
       } catch (error) {
-        if (current === sequence) publish({ status: "error", snapshot: null, error: String(error) });
+        if (current === sequence) publish({ status: "error", snapshot: null, error: tm(String(error)) });
       }
     },
   };

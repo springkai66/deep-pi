@@ -4,6 +4,7 @@
   import { onDestroy, onMount, tick, untrack } from "svelte";
   import { sourceOffset } from "./search";
   import type { FilePreview } from "./files";
+  import { t, tm } from "$lib/i18n.svelte";
 
   let { projectId, path, line, column, editorConfigured, refreshToken: externalRefreshToken, onConfigureEditor, onClose }: {
     projectId: string; path: string; line?: number; column?: number;
@@ -47,7 +48,7 @@
           }
         }
       })
-      .catch((cause) => { if (current === generation) error = String(cause); })
+      .catch((cause) => { if (current === generation) error = tm(String(cause)); })
       .finally(() => { if (current === generation) loading = false; });
     return () => { generation++; };
   });
@@ -64,8 +65,8 @@
     launching = true;
     try {
       await invoke("open_project_in_editor", { projectId, relativePath: path, line: line ?? null, column: column ?? null });
-      if (current === generation) editorNotice = "已发送到外部编辑器";
-    } catch (cause) { if (current === generation) editorNotice = String(cause); }
+      if (current === generation) editorNotice = t("已发送到外部编辑器");
+    } catch (cause) { if (current === generation) editorNotice = tm(String(cause)); }
     finally { launching = false; }
   }
   $effect(() => {
@@ -93,26 +94,26 @@
   });
 </script>
 
-<section class="file-preview" aria-label="文件预览">
+<section class="file-preview" aria-label={t("文件预览")}>
   <header>
     <FileText size={16} />
     <strong title={path}>{path}</strong>
-    <span>只读</span>
-    <button type="button" disabled={launching} title={editorConfigured ? "在外部编辑器中打开" : "配置外部编辑器"}
-      aria-label={editorConfigured ? "在外部编辑器中打开" : "配置外部编辑器"} onclick={() => void openEditor()}><ExternalLink size={15} /></button>
-    <button type="button" disabled={loading} title="重新读取" aria-label="重新读取文件" onclick={() => { refreshToken++; }}><RefreshCw size={15} /></button>
-    <button type="button" title="关闭预览" aria-label="关闭文件预览" onclick={onClose}><X size={16} /></button>
+    <span>{t("只读")}</span>
+    <button type="button" disabled={launching} title={editorConfigured ? t("在外部编辑器中打开") : t("配置外部编辑器")}
+      aria-label={editorConfigured ? t("在外部编辑器中打开") : t("配置外部编辑器")} onclick={() => void openEditor()}><ExternalLink size={15} /></button>
+    <button type="button" disabled={loading} title={t("重新读取")} aria-label={t("重新读取文件")} onclick={() => { refreshToken++; }}><RefreshCw size={15} /></button>
+    <button type="button" title={t("关闭预览")} aria-label={t("关闭文件预览")} onclick={onClose}><X size={16} /></button>
   </header>
-  {#if editorNotice}<p role="status">{editorNotice}</p>{/if}
+  {#if editorNotice}<p role="status">{tm(editorNotice)}</p>{/if}
   {#if loading}
-    <p role="status">正在读取文件…</p>
+    <p role="status">{t("正在读取文件…")}</p>
   {:else if error}
-    <p role="alert">{error}</p>
+    <p role="alert">{tm(error)}</p>
   {:else if preview}
     <div class="preview-code" bind:this={viewport} tabindex="0" role="textbox" aria-readonly="true" aria-multiline="true" aria-label={path}>
       <pre><code bind:this={code}>{preview.content}</code></pre>
     </div>
-    <footer>UTF-8 · {preview.size.toLocaleString()} 字节{#if line} · {line}:{column ?? 1}{/if}</footer>
+    <footer>UTF-8 · {t("{size} 字节", { size: preview.size.toLocaleString() })}{#if line} · {line}:{column ?? 1}{/if}</footer>
   {/if}
 </section>
 
@@ -122,7 +123,7 @@
   header :global(svg) { flex-shrink: 0; }
   strong { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
   header span, footer { color: var(--text-muted); font-size: 11px; }
-  button { display: grid; place-items: center; flex-shrink: 0; width: 28px; height: 28px; border: 0; border-radius: 4px; background: transparent; color: var(--text); cursor: pointer; }
+  button { display: grid; place-items: center; flex-shrink: 0; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--text); cursor: pointer; }
   button:hover { background: var(--surface-hover); }
   button:disabled { opacity: .4; cursor: default; }
   .preview-code { flex: 1; min-height: 0; overflow: auto; }

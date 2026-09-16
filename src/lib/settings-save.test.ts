@@ -10,12 +10,12 @@ describe("settings persistence", () => {
     const saver = createSettingsSaver(save, vi.fn(), vi.fn());
     saver.enqueue({ ...DEFAULT_APP_SETTINGS, colorMode: "light" });
     saver.enqueue({ ...DEFAULT_APP_SETTINGS, colorMode: "dark" });
-    saver.enqueue({ ...DEFAULT_APP_SETTINGS, colorMode: "dark", appFont: "yahei" });
+    saver.enqueue({ ...DEFAULT_APP_SETTINGS, colorMode: "dark", appFontName: "Microsoft YaHei UI" });
     expect(save).toHaveBeenCalledTimes(1);
     finish();
     await saver.flush();
     expect(save).toHaveBeenCalledTimes(2);
-    expect(save.mock.calls[1][0]).toMatchObject({ colorMode: "dark", appFont: "yahei" });
+    expect(save.mock.calls[1][0]).toMatchObject({ colorMode: "dark", appFontName: "Microsoft YaHei UI" });
   });
   it("copies mutable nested update preferences before asynchronous saving", async () => {
     const save = vi.fn(async (_settings: AppSettings) => {});

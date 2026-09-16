@@ -1,7 +1,8 @@
 import { EditorState, type EditorStateConfig } from "@codemirror/state";
 import { EditorView, drawSelection, lineNumbers, highlightSpecialChars, keymap } from "@codemirror/view";
 import type { DirectMergeConfig } from "@codemirror/merge";
-import { newlineMode } from "./editor-document";
+import { newlineLabel } from "./editor-document";
+import { t } from "./i18n.svelte";
 import { shortcutKeymap } from "./shortcuts";
 
 const normalized = (content: string) => content.replace(/\r\n?/g, "\n");
@@ -10,8 +11,8 @@ export function diffMetadata(source: string, draft: string) {
   return {
     equal: source === draft,
     newlineOnly: source !== draft && normalized(source) === normalized(draft),
-    sourceNewline: newlineMode(source),
-    draftNewline: newlineMode(draft),
+    sourceNewline: newlineLabel(source),
+    draftNewline: newlineLabel(draft),
     sourceBom: source.startsWith("\uFEFF"),
     draftBom: draft.startsWith("\uFEFF"),
   };
@@ -48,8 +49,8 @@ function readOnlySide(content: string, label: string, navigate?: (direction: 1 |
 
 export function createDiffConfig(source: string, draft: string, navigate?: (direction: 1 | -1) => void): DirectMergeConfig {
   return {
-    a: readOnlySide(source, "来源文件内容（只读）", navigate),
-    b: readOnlySide(draft, "草稿快照（只读）", navigate),
+    a: readOnlySide(source, t("来源文件内容（只读）"), navigate),
+    b: readOnlySide(draft, t("草稿快照（只读）"), navigate),
     highlightChanges: true, gutter: true,
     diffConfig: { scanLimit: 500, timeout: 100 },
   };

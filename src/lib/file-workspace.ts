@@ -1,3 +1,4 @@
+import { t, tm } from "./i18n.svelte";
 import type { EditorState, Text } from "@codemirror/state";
 import type { FilePreview } from "./files";
 
@@ -74,7 +75,7 @@ export function createFileWorkspace(ports: WorkspacePorts) {
         patch(id, { disk, loading: false, issue: disk.version !== current.version ? {
           outcome: "conflict", version: null, recoveryPath: current.issue?.recoveryPath ?? null,
           pendingPath: current.issue?.pendingPath ?? null, target: current.path,
-          detail: "磁盘文件已变化，当前草稿已保留。请比较或重新载入。",
+          detail: t("磁盘文件已变化，当前草稿已保留。请比较或重新载入。"),
         } : current.issue });
         return;
       }
@@ -85,7 +86,7 @@ export function createFileWorkspace(ports: WorkspacePorts) {
       const state = createDocumentState(disk.content);
       patch(id, { state, baseline: state.doc, version: disk.version, disk, issue: null, loading: false, revision: current.revision + 1 });
     } catch (error) {
-      if (documents.get(id)?.generation === generation) patch(id, { loading: false, error: String(error) });
+      if (documents.get(id)?.generation === generation) patch(id, { loading: false, error: tm(String(error)) });
     } finally { drainRefresh(id); }
   }
 
@@ -101,16 +102,16 @@ export function createFileWorkspace(ports: WorkspacePorts) {
     const target = key(initial.projectId, path);
     const saveAs = targetPath !== undefined;
     if (reserved.has(target) || saveAs && documents.has(target)) {
-      patch(id, { error: "目标文件已打开或正在保存，请选择其他文件名。" });
+      patch(id, { error: t("目标文件已打开或正在保存，请选择其他文件名。") });
       return null;
     }
     if (!saveAs && initial.issue?.target === path && initial.issue.outcome !== "saved") {
-      patch(id, { error: "上次保存或磁盘状态尚未核对，请先比较、重载或另存。" });
+      patch(id, { error: t("上次保存或磁盘状态尚未核对，请先比较、重载或另存。") });
       return null;
     }
     const content = initial.state.sliceDoc();
     if (new TextEncoder().encode(content).length > 2 * 1024 * 1024 || content.includes("\0")) {
-      patch(id, { error: "仅支持不含 NUL、最大 2 MiB 的 UTF-8 文本。" });
+      patch(id, { error: t("仅支持不含 NUL、最大 2 MiB 的 UTF-8 文本。") });
       return null;
     }
     reserved.add(target);
@@ -133,7 +134,7 @@ export function createFileWorkspace(ports: WorkspacePorts) {
       return target;
     } catch (error) {
       patch(id, { issue: { outcome: "unknown", version: null, recoveryPath: null, pendingPath: null,
-        target: path, detail: `保存结果未确认：${String(error)}。草稿已保留，请先核对磁盘。` } });
+        target: path, detail: t("保存结果未确认：{error}。草稿已保留，请先核对磁盘。", { error: tm(String(error)) }) } });
       return null;
     } finally {
       reserved.delete(target);
@@ -169,12 +170,12 @@ export function createFileWorkspace(ports: WorkspacePorts) {
     id: key,
     busy: () => reserved.size > 0 || removing.size > 0,
     async open(projectId: string, path: string) {
-      if (exiting) throw new Error("窗口正在退出，请等待当前关闭操作完成。");
-      if (removing.has(projectId)) throw new Error("项目正在移除，请稍后操作。");
+      if (exiting) throw new Error(t("窗口正在退出，请等待当前关闭操作完成。"));
+      if (removing.has(projectId)) throw new Error(t("项目正在移除，请稍后操作。"));
       const id = key(projectId, path);
-      if (reserved.has(id) && !documents.has(id)) throw new Error("目标文件正在保存，请稍后打开。");
+      if (reserved.has(id) && !documents.has(id)) throw new Error(t("目标文件正在保存，请稍后打开。"));
       if (!documents.has(id)) {
-        if (documents.size >= 32) throw new Error("最多同时打开 32 个文件，请先关闭部分标签。");
+        if (documents.size >= 32) throw new Error(t("最多同时打开 32 个文件，请先关闭部分标签。"));
         documents.set(id, { id, projectId, path, state: null, baseline: null, version: null,
           loading: false, saving: false, locked: false, error: "", issue: null, disk: null, generation: ++generationCounter, revision: 0, scroll: { top: 0, left: 0 } });
         publish();
@@ -234,7 +235,7 @@ export function createFileWorkspace(ports: WorkspacePorts) {
     },
     async removeProject(projectId: string, remove: () => Promise<unknown>) {
       if (exiting || removing.has(projectId) || [...documents.values()].some((doc) => doc.projectId === projectId && doc.saving)) {
-        throw new Error("项目文件正在处理，请稍后移除。");
+        throw new Error(t("项目文件正在处理，请稍后移除。"));
       }
       removing.add(projectId);
       for (const [id, doc] of documents) if (doc.projectId === projectId) {

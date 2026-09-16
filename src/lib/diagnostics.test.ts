@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { createDiagnosticsController, type DiagnosticReport, type DiagnosticsState } from "./diagnostics";
 import { createWindowCloseHandler } from "./window-close";
+import { appMessageText } from "./app-messages";
+import { getLocale } from "./i18n.svelte";
 
 const report: DiagnosticReport = {
   schemaVersion: 1, snapshotId: "snapshot", appVersion: "0.1.0", os: "windows", arch: "x86_64",
@@ -26,7 +28,11 @@ describe("diagnostics controller", () => {
     await f.controller.refresh();
     f.invoke.mockResolvedValueOnce(false);
     await f.controller.export();
-    expect(f.invoke).toHaveBeenLastCalledWith("diagnostics_export", { snapshotId: "snapshot" });
+    expect(f.invoke).toHaveBeenLastCalledWith("diagnostics_export", {
+      snapshotId: "snapshot",
+      // 原生保存对话框的标题由前端按当前语言传入；断言与实际调用完全一致。
+      dialogTitle: appMessageText("diagnostics.export_dialog_title", getLocale()),
+    });
     expect(f.state().status).toBe("已取消导出");
     expect(f.state().report).toEqual(report);
     expect(f.busy).toHaveBeenLastCalledWith(false);

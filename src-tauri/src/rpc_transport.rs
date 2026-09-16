@@ -12,6 +12,7 @@ use std::{
 };
 
 use crate::diagnostics::{DiagnosticCode, Diagnostics};
+use crate::message::{message_code, msg};
 use crate::rpc_history::{history_response_id, HistorySnapshot, MAX_HISTORY_BYTES};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -419,7 +420,7 @@ impl RpcTransport {
             })();
             if let Err(error) = result {
                 if !reader_state.requested_stop.load(Ordering::Acquire) {
-                    let code = match error.as_str() {
+                    let code = match message_code(&error).unwrap_or(error.as_str()) {
                         "Cannot read RPC output" => DiagnosticCode::OutputReadFailed,
                         "RPC frame exceeded the size limit" => DiagnosticCode::FrameTooLarge,
                         "Invalid RPC JSON frame" | "RPC frame must be an object" => {
@@ -429,9 +430,9 @@ impl RpcTransport {
                         "Cannot spool RPC history"
                         | "Cannot read spooled RPC history"
                         | "Cannot read RPC history"
-                        | "历史响应格式无效或单条消息超过上限"
-                        | "历史响应存在多余内容"
-                        | "无法创建临时历史快照" => DiagnosticCode::HistoryFailed,
+                        | "rpc.history.response_invalid"
+                        | "rpc.history.response_trailing_content"
+                        | "rpc.history.spool_failed" => DiagnosticCode::HistoryFailed,
                         _ => DiagnosticCode::OutputInvalid,
                     };
                     reader_state
@@ -541,9 +542,12 @@ impl RpcTransport {
         let _permit = self
             .history_gate
             .try_lock()
-            .map_err(|_| "历史快照正在读取，请稍后重试")?;
+            .map_err(|_| msg("rpc.history.read_in_progress"))?;
         let reply = self.request_mode(json!({"type":"get_messages"}), timeout, true)?;
-        Ok((reply.history.ok_or("历史快照响应缺失")?, reply.sequence))
+        Ok((
+            reply.history.ok_or(msg("rpc.history.response_missing"))?,
+            reply.sequence,
+        ))
     }
 
     fn request_mode(

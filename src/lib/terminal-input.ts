@@ -1,3 +1,4 @@
+import { t } from "./i18n.svelte";
 interface InputPorts {
   currentRun(): string | null | undefined;
   write(run: string, data: string): Promise<unknown>;
@@ -34,7 +35,7 @@ export function createTerminalInput(ports: InputPorts, limit = 1024 * 1024) {
       const run = ports.currentRun();
       if (disposed || !run || !data) return;
       const size = new TextEncoder().encode(data).length;
-      if (bytes + size > limit) { ports.error(new Error("终端输入队列已满，请等待当前输入完成")); return; }
+      if (bytes + size > limit) { ports.error(new Error(t("终端输入队列已满，请等待当前输入完成"))); return; }
       pending.push({ run, data, bytes: size });
       bytes += size;
       void drain();

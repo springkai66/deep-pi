@@ -1,3 +1,4 @@
+import { t } from "./i18n.svelte";
 import { asMessage, record, type Conversation, type RpcMessage } from "./rpc-state";
 
 export interface RpcHistoryPage {
@@ -13,17 +14,17 @@ export function validateHistoryPage(value: unknown): RpcHistoryPage {
   const page = record(value);
   if (typeof page.snapshotId !== "string" || !page.snapshotId || page.snapshotId.length > 128
     || ![page.eventSequence, page.start, page.end, page.total].every((item) => typeof item === "number" && Number.isSafeInteger(item) && item >= 0)
-    || !Array.isArray(page.messages) || page.messages.length > 100) throw new Error("历史分页响应格式无效");
+    || !Array.isArray(page.messages) || page.messages.length > 100) throw new Error(t("历史分页响应格式无效"));
   const { start, end, total } = page as unknown as RpcHistoryPage;
-  if (start > end || end > total || end - start !== page.messages.length) throw new Error("历史分页范围无效");
+  if (start > end || end > total || end - start !== page.messages.length) throw new Error(t("历史分页范围无效"));
   const messages = page.messages.map(asMessage);
-  if (messages.some((message) => message === null)) throw new Error("历史分页包含无效消息");
+  if (messages.some((message) => message === null)) throw new Error(t("历史分页包含无效消息"));
   return { snapshotId: page.snapshotId, eventSequence: page.eventSequence as number,
     start, end, total, messages: messages as RpcMessage[] };
 }
 
 export function prependRpcHistory(conversation: Conversation, page: RpcHistoryPage, offset: number): Conversation {
-  if (page.end !== offset || page.start >= page.end) throw new Error("历史分页已过期或不连续");
+  if (page.end !== offset || page.start >= page.end) throw new Error(t("历史分页已过期或不连续"));
   return { ...conversation, messages: [...page.messages, ...conversation.messages] };
 }
 
@@ -47,7 +48,7 @@ export function createRpcHistorySession(
       let page: RpcHistoryPage;
       try {
         page = validateHistoryPage(response);
-        if (page.end !== page.total) throw new Error("初始历史分页不是最新快照");
+        if (page.end !== page.total) throw new Error(t("初始历史分页不是最新快照"));
       } catch (cause) {
         const id = record(response).snapshotId;
         if (typeof id === "string") await release(id);
@@ -71,7 +72,7 @@ export function createRpcHistorySession(
       const page = validateHistoryPage(response);
       if (page.snapshotId !== expected.snapshotId || page.eventSequence !== expected.eventSequence
         || page.total !== expected.total || page.end !== expected.start || page.start >= page.end) {
-        throw new Error("历史分页与当前快照不一致");
+        throw new Error(t("历史分页与当前快照不一致"));
       }
       current = page;
       return page;

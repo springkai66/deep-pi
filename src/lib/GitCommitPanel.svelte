@@ -3,11 +3,16 @@
   import { Eye, GitCommitHorizontal } from "@lucide/svelte";
   import { onDestroy, untrack } from "svelte";
   import { createCommitController, validCommitMessage, type CommitPorts, type CommitState } from "./git-commit";
+  import { t, tm, getLocale } from "$lib/i18n.svelte";
+  import { appConfirmDialog } from "./app-messages";
 
   let { projectId, visible, blocked, stagedCount, refreshToken, onBusyChange, onCommitted,
     ports = {
       prepare: (projectId, operationId) => invoke("project_git_prepare_commit", { projectId, operationId }),
-      commit: (projectId, expected, message, operationId) => invoke("project_git_commit", { projectId, expected, message, operationId }),
+      commit: (projectId, expected, message, operationId) => invoke("project_git_commit", {
+        projectId, expected, message, operationId,
+        dialog: appConfirmDialog("git.commit.dialog", getLocale(), ["signature_on", "signature_off", "more_paths"]),
+      }),
     },
   }: {
     projectId: string | null; visible: boolean; blocked: boolean; stagedCount: number; refreshToken: number;
@@ -27,34 +32,34 @@
 </script>
 
 {#if visible}
-  <section class="commit-panel" aria-label="Git 提交" aria-busy={state.busy}>
-    <label for="git-commit-message">提交说明</label>
+  <section class="commit-panel" aria-label={t("Git 提交")} aria-busy={state.busy}>
+    <label for="git-commit-message">{t("提交说明")}</label>
     <textarea id="git-commit-message" rows="3" maxlength="65536" value={state.message}
       disabled={state.busy || blocked} oninput={(event) => controller.setMessage(event.currentTarget.value)}></textarea>
     <div class="commit-actions">
       <button type="button" disabled={state.busy || blocked || !stagedCount}
-        onclick={() => controller.prepare()}><Eye size={14} />审阅暂存</button>
+        onclick={() => controller.prepare()}><Eye size={14} />{t("审阅暂存")}</button>
       <button type="button" disabled={state.busy || blocked || !state.preview || !validCommitMessage(state.message)}
-        onclick={() => controller.submit()}><GitCommitHorizontal size={14} />提交</button>
+        onclick={() => controller.submit()}><GitCommitHorizontal size={14} />{t("提交")}</button>
     </div>
-    {#if state.busy}<p role="status">{state.phase === "preparing" ? "正在准备提交范围…" : "正在提交…"}</p>{/if}
-    {#if state.error}<p role="alert">{state.error}</p>{/if}
+    {#if state.busy}<p role="status">{state.phase === "preparing" ? t("正在准备提交范围…") : t("正在提交…")}</p>{/if}
+    {#if state.error}<p role="alert">{tm(state.error)}</p>{/if}
     {#if state.preview}
       <div class="commit-scope">
-        <strong>{state.preview.paths.length} 个暂存路径</strong>
-        <span title={state.preview.reference}>{state.preview.reference === "HEAD" ? "分离 HEAD" : state.preview.reference.replace(/^refs\/heads\//, "")}</span>
+        <strong>{t("{count} 个暂存路径", { count: state.preview.paths.length })}</strong>
+        <span title={state.preview.reference}>{state.preview.reference === "HEAD" ? t("分离 HEAD") : state.preview.reference.replace(/^refs\/heads\//, "")}</span>
         <span title={state.preview.author}>{state.preview.author}</span>
-        <span>{state.preview.sign ? "签名提交" : "未启用签名"}</span>
-        <ul aria-label="本次提交范围">
+        <span>{state.preview.sign ? t("签名提交") : t("未启用签名")}</span>
+        <ul aria-label={t("本次提交范围")}>
           {#each state.preview.paths as path (path)}<li title={path}>{path}</li>{/each}
         </ul>
       </div>
     {/if}
     {#if state.result}
       <p role={state.result.outcome === "committed" ? "status" : "alert"}>
-        {state.result.outcome === "committed" ? "已提交" : state.result.outcome === "notCommitted" ? "未提交" : "提交结果待核实"}
+        {state.result.outcome === "committed" ? t("已提交") : state.result.outcome === "notCommitted" ? t("未提交") : t("提交结果待核实")}
         <code title={state.result.oid}>{state.result.oid.slice(0, 12)}</code>
-        {#if state.result.detail}<span>{state.result.detail}</span>{/if}
+        {#if state.result.detail}<span>{tm(state.result.detail)}</span>{/if}
       </p>
     {/if}
   </section>

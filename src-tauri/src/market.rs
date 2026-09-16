@@ -4,6 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::message::msg;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{State, Url};
@@ -15,6 +16,8 @@ const CACHE_TTL: Duration = Duration::from_secs(600);
 const PI_PACKAGES_URL: &str = "https://pi.dev/packages";
 const PI_MODELS_URL: &str = "https://pi.dev/models";
 const NPM_REGISTRY_URL: &str = "https://registry.npmjs.org";
+const MCP_REGISTRY_URL: &str = "https://registry.modelcontextprotocol.io/v0/servers";
+const MAX_MCP_RESULTS: usize = 24;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -113,10 +116,50 @@ impl ModelCatalogCache {
     }
 }
 
+#[derive(Default)]
+pub struct McpRegistryCache {
+    entries: Mutex<HashMap<String, (Instant, Vec<McpRegistryEntry>)>>,
+}
+
+impl McpRegistryCache {
+    fn get(&self, key: &str) -> Option<Vec<McpRegistryEntry>> {
+        let entries = self.entries.lock().ok()?;
+        let (created, models) = entries.get(key)?;
+        (created.elapsed() < CACHE_TTL).then(|| models.clone())
+    }
+
+    fn insert(&self, key: String, models: Vec<McpRegistryEntry>) {
+        if let Ok(mut entries) = self.entries.lock() {
+            entries.retain(|_, (created, _)| created.elapsed() < CACHE_TTL);
+            entries.insert(key, (Instant::now(), models));
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpRegistryEntry {
+    pub name: String,
+    pub description: String,
+    pub version: Option<String>,
+    pub repository: Option<String>,
+    pub remote_url: Option<String>,
+    pub package: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpRegistryRequest {
+    query: String,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PackageRequest {
     query: String,
+    /// 目录类型过滤（如 "skill"）。为空时不过滤。
+    #[serde(default)]
+    types: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -505,6 +548,112 @@ pub fn fetch_pi_packages(query: &str) -> Result<Vec<PiPackage>, String> {
     Ok(parse_pi_packages(&read_response(response.body_mut())?))
 }
 
+fn registry_string(object: &Value, key: &str) -> Option<String> {
+    object
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+pub fn parse_mcp_registry(body: &str) -> Vec<McpRegistryEntry> {
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return Vec::new();
+    };
+    let Some(servers) = value.get("servers").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut entries = Vec::new();
+    for wrapper in servers {
+        if entries.len() >= MAX_MCP_RESULTS {
+            break;
+        }
+        let Some(server) = wrapper.get("server") else {
+            continue;
+        };
+        let Some(name) = registry_string(server, "name") else {
+            continue;
+        };
+        if name.len() > 200 {
+            continue;
+        }
+        let repository = server
+            .get("repository")
+            .and_then(|repo| registry_string(repo, "url"));
+        let remote_url = server
+            .get("remotes")
+            .and_then(Value::as_array)
+            .and_then(|remotes| {
+                remotes.iter().find_map(|remote| {
+                    remote
+                        .get("url")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_owned)
+                })
+            });
+        let package = server
+            .get("packages")
+            .and_then(Value::as_array)
+            .and_then(|packages| {
+                packages.iter().find_map(|package| {
+                    let identifier = registry_string(package, "identifier")?;
+                    (identifier.len() <= 214).then_some(identifier)
+                })
+            });
+        entries.push(McpRegistryEntry {
+            name,
+            description: registry_string(server, "description").unwrap_or_default(),
+            version: registry_string(server, "version"),
+            repository,
+            remote_url,
+            package,
+        });
+    }
+    entries
+}
+
+fn fetch_mcp_registry(query: &str) -> Result<Vec<McpRegistryEntry>, String> {
+    let query = query.trim();
+    if query.len() > MAX_QUERY_LENGTH || query.chars().any(char::is_control) {
+        return Err(msg("market.mcp_query_invalid"));
+    }
+    let mut url = Url::parse(MCP_REGISTRY_URL)
+        .map_err(|error| format!("invalid MCP registry URL: {error}"))?;
+    if !query.is_empty() {
+        url.query_pairs_mut().append_pair("search", query);
+    }
+    url.query_pairs_mut()
+        .append_pair("limit", &MAX_MCP_RESULTS.to_string());
+    let mut response = http_agent()
+        .get(url.as_str())
+        .call()
+        .map_err(|error| format!("MCP registry request failed: {error}"))?;
+    Ok(parse_mcp_registry(&read_response(response.body_mut())?))
+}
+
+#[tauri::command]
+pub async fn search_mcp_registry(
+    app: tauri::AppHandle,
+    request: McpRegistryRequest,
+) -> Result<Vec<McpRegistryEntry>, String> {
+    use tauri::Manager;
+    tauri::async_runtime::spawn_blocking(move || {
+        let cache = app.state::<McpRegistryCache>();
+        let query = request.query.trim().to_owned();
+        if let Some(entries) = cache.get(&query) {
+            return Ok(entries);
+        }
+        let entries = fetch_mcp_registry(&query)?;
+        cache.insert(query, entries.clone());
+        Ok(entries)
+    })
+    .await
+    .map_err(|error| format!("MCP registry worker failed: {error}"))?
+}
+
 pub fn fetch_package_metadata(name: &str) -> Result<PackageMetadata, String> {
     validate_package_name(name)?;
     let encoded = name.replace('/', "%2f");
@@ -663,16 +812,41 @@ pub async fn search_pi_packages(
         .map_err(|error| format!("package search worker failed: {error}"))?
 }
 
+fn filter_packages_by_types(packages: Vec<PiPackage>, types: &[String]) -> Vec<PiPackage> {
+    if types.is_empty() {
+        return packages;
+    }
+    let wanted: Vec<String> = types
+        .iter()
+        .map(|kind| kind.trim().to_ascii_lowercase())
+        .filter(|kind| !kind.is_empty())
+        .collect();
+    if wanted.is_empty() {
+        return packages;
+    }
+    packages
+        .into_iter()
+        .filter(|package| {
+            package.types.iter().any(|kind| {
+                wanted
+                    .iter()
+                    .any(|candidate| candidate == &kind.to_ascii_lowercase())
+            })
+        })
+        .collect()
+}
+
 fn search_pi_packages_inner(
     cache: State<'_, MarketCache>,
     request: PackageRequest,
 ) -> Result<Vec<PiPackage>, String> {
     let query = request.query.trim().to_owned();
-    if let Some(packages) = cache.get(&query) {
+    let key = format!("{query}\0{}", request.types.join("\u{1}"));
+    if let Some(packages) = cache.get(&key) {
         return Ok(packages);
     }
-    let packages = fetch_pi_packages(&query)?;
-    cache.insert(query, packages.clone());
+    let packages = filter_packages_by_types(fetch_pi_packages(&query)?, &request.types);
+    cache.insert(key, packages.clone());
     Ok(packages)
 }
 
@@ -687,7 +861,66 @@ pub async fn pi_package_metadata(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_model_profile, parse_pi_models, parse_pi_packages, validate_package_name};
+    use super::{
+        filter_packages_by_types, parse_mcp_registry, parse_model_profile, parse_pi_models,
+        parse_pi_packages, validate_package_name,
+    };
+    #[test]
+    fn filters_packages_by_type_case_insensitively() {
+        let packages = parse_pi_packages(
+            r#"
+            <article data-package-card="true" data-package-name="skill-one"
+              data-package-search="a skill" data-package-types="skill"
+              data-package-downloads="10" data-package-date="0"></article>
+            <article data-package-card="true" data-package-name="ext-one"
+              data-package-search="an extension" data-package-types="extension"
+              data-package-downloads="10" data-package-date="0"></article>
+            "#,
+        );
+        assert_eq!(packages.len(), 2);
+        let skills = filter_packages_by_types(packages.clone(), &["skill".to_owned()]);
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "skill-one");
+        let uppercase = filter_packages_by_types(packages.clone(), &["SKILL".to_owned()]);
+        assert_eq!(uppercase.len(), 1);
+        assert_eq!(uppercase[0].name, "skill-one");
+        assert_eq!(filter_packages_by_types(packages, &[]).len(), 2);
+    }
+
+    #[test]
+    fn parses_mcp_registry_entries() {
+        let body = r#"{
+          "servers": [
+            {"server": {"name": "io.example/context7", "description": "Docs lookup",
+              "version": "1.2.3", "repository": {"url": "https://github.com/x/y"},
+              "remotes": [{"type": "streamable-http", "url": "https://mcp.example.com/mcp"}],
+              "packages": [{"registry_type": "npm", "identifier": "@modelcontextprotocol/server-x"}]}},
+            {"server": {}},
+            {"other": true}
+          ]
+        }"#;
+
+        let entries = parse_mcp_registry(body);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "io.example/context7");
+        assert_eq!(entries[0].description, "Docs lookup");
+        assert_eq!(entries[0].version.as_deref(), Some("1.2.3"));
+        assert_eq!(
+            entries[0].remote_url.as_deref(),
+            Some("https://mcp.example.com/mcp")
+        );
+        assert_eq!(
+            entries[0].package.as_deref(),
+            Some("@modelcontextprotocol/server-x")
+        );
+    }
+
+    #[test]
+    fn parse_mcp_registry_tolerates_invalid_payloads() {
+        assert!(parse_mcp_registry("not json").is_empty());
+        assert!(parse_mcp_registry(r#"{"servers": "nope"}"#).is_empty());
+    }
 
     #[test]
     fn parses_official_package_cards() {

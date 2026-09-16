@@ -3,6 +3,7 @@
   import { invoke, isTauri } from "@tauri-apps/api/core";
   import { Download, RefreshCw, Trash2 } from "@lucide/svelte";
   import { createDiagnosticsController, DIAGNOSTIC_LABELS, type DiagnosticsState } from "./diagnostics";
+  import { t, tm } from "$lib/i18n.svelte";
 
   let { confirmClear, onBusyChange }: {
     confirmClear: () => Promise<boolean>;
@@ -25,43 +26,43 @@
 
 <section class="settings-group" aria-labelledby="rpc-diagnostics-heading" aria-busy={diagnosticState.busy}>
   <div class="settings-group-header">
-    <h3 id="rpc-diagnostics-heading">Pi RPC 诊断</h3>
+    <h3 id="rpc-diagnostics-heading">{t("Pi RPC 诊断")}</h3>
     <div class="actions">
-      <button class="quiet-button icon-button" title="刷新诊断" aria-label="刷新诊断" disabled={diagnosticState.busy || !isTauri()} onclick={() => void controller.refresh()}><RefreshCw size={16} /></button>
-      <button class="quiet-button icon-button" title="清空诊断记录" aria-label="清空诊断记录" disabled={diagnosticState.busy || !diagnosticState.report} onclick={() => void controller.clear()}><Trash2 size={16} /></button>
-      <button class="quiet-button icon-button" title="导出当前快照（新文件）" aria-label="导出当前快照（新文件）" disabled={diagnosticState.busy || !diagnosticState.report} onclick={() => void controller.export()}><Download size={16} /></button>
+      <button class="quiet-button icon-button" title={t("刷新诊断")} aria-label={t("刷新诊断")} disabled={diagnosticState.busy || !isTauri()} onclick={() => void controller.refresh()}><RefreshCw size={16} /></button>
+      <button class="quiet-button icon-button" title={t("清空诊断记录")} aria-label={t("清空诊断记录")} disabled={diagnosticState.busy || !diagnosticState.report} onclick={() => void controller.clear()}><Trash2 size={16} /></button>
+      <button class="quiet-button icon-button" title={t("导出当前快照（新文件）")} aria-label={t("导出当前快照（新文件）")} disabled={diagnosticState.busy || !diagnosticState.report} onclick={() => void controller.export()}><Download size={16} /></button>
     </div>
   </div>
-  {#if !isTauri()}<p class="muted" role="status">诊断仅在桌面应用可用</p>{/if}
-  {#if diagnosticState.error}<p role="alert">{diagnosticState.error}</p>{/if}
-  {#if diagnosticState.busy}<p class="muted" role="status">正在处理…</p>
-  {:else if diagnosticState.status}<p class="muted" role="status">{diagnosticState.status}</p>{/if}
+  {#if !isTauri()}<p class="muted" role="status">{t("诊断仅在桌面应用可用")}</p>{/if}
+  {#if diagnosticState.error}<p role="alert">{tm(t(diagnosticState.error))}</p>{/if}
+  {#if diagnosticState.busy}<p class="muted" role="status">{t("正在处理…")}</p>
+  {:else if diagnosticState.status}<p class="muted" role="status">{t(diagnosticState.status)}</p>{/if}
   {#if diagnosticState.report}
     <dl class="metadata">
-      <div><dt>应用</dt><dd>{diagnosticState.report.appVersion}</dd></div>
-      <div><dt>系统</dt><dd>{diagnosticState.report.os} / {diagnosticState.report.arch}</dd></div>
-      <div><dt>采集范围</dt><dd>本次应用运行 · Pi RPC · 最多 256 条</dd></div>
-      <div><dt>隐私</dt><dd>不含 stderr 原文、提示词、文件内容、路径与凭据</dd></div>
+      <div><dt>{t("应用")}</dt><dd>{diagnosticState.report.appVersion}</dd></div>
+      <div><dt>{t("系统")}</dt><dd>{diagnosticState.report.os} / {diagnosticState.report.arch}</dd></div>
+      <div><dt>{t("采集范围")}</dt><dd>{t("本次应用运行 · Pi RPC · 最多 256 条")}</dd></div>
+      <div><dt>{t("隐私")}</dt><dd>{t("不含 stderr 原文、提示词、文件内容、路径与凭据")}</dd></div>
     </dl>
-    <label class="setting-control"><strong>运行批次</strong>
-      <select bind:value={run} aria-label="筛选诊断运行批次">
-        <option value="">全部</option>
+    <label class="setting-control"><strong>{t("运行批次")}</strong>
+      <select bind:value={run} aria-label={t("筛选诊断运行批次")}>
+        <option value="">{t("全部")}</option>
         {#each runs as id (id)}<option value={String(id)}>#{id}</option>{/each}
       </select>
     </label>
-    {#if diagnosticState.report.droppedEvents > 0}<p class="muted">较早的 {diagnosticState.report.droppedEvents} 条记录已被容量限制移除</p>{/if}
-    {#if events.length === 0}<p class="muted" role="status">暂无诊断事件</p>
+    {#if diagnosticState.report.droppedEvents > 0}<p class="muted">{t("较早的 {count} 条记录已被容量限制移除", { count: diagnosticState.report.droppedEvents })}</p>{/if}
+    {#if events.length === 0}<p class="muted" role="status">{t("暂无诊断事件")}</p>
     {:else}
-      <ol class="events" aria-label="诊断事件">
+      <ol class="events" aria-label={t("诊断事件")}>
         {#each events as event (event.sequence)}
           <li>
-            <div class="event-heading"><strong>{DIAGNOSTIC_LABELS[event.code]}</strong><span>#{event.run} · +{(event.elapsedMs / 1000).toFixed(1)}s</span></div>
+            <div class="event-heading"><strong>{t(DIAGNOSTIC_LABELS[event.code])}</strong><span>#{event.run} · +{(event.elapsedMs / 1000).toFixed(1)}s</span></div>
             <div class="event-detail"><code>{event.code}</code><span>{event.code === "stderr_observed" ? `${event.count} B` : `× ${event.count}`}{event.exitCode !== null ? ` · exit ${event.exitCode}` : ""}</span></div>
           </li>
         {/each}
       </ol>
     {/if}
-    <details><summary>报告 JSON</summary><pre>{JSON.stringify(diagnosticState.report, null, 2)}</pre></details>
+    <details><summary>{t("报告 JSON")}</summary><pre>{JSON.stringify(diagnosticState.report, null, 2)}</pre></details>
   {/if}
 </section>
 

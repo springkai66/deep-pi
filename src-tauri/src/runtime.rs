@@ -17,6 +17,7 @@ use uuid::Uuid;
 use crate::{
     app_paths::AppPaths,
     dsh::DshManager,
+    message::{msg, msg_with},
     operation::{Cancellation, OperationManager},
     process_runner, provider,
     recovery::activate_directory,
@@ -345,9 +346,9 @@ fn registry_label(registry: &str) -> &'static str {
     if registry.starts_with("https://registry.npmmirror.com") {
         "npmmirror"
     } else if registry.starts_with("https://registry.npmjs.org") {
-        "官方源"
+        "npmjs"
     } else {
-        "腾讯镜像"
+        "tencent"
     }
 }
 
@@ -405,7 +406,7 @@ fn latest_package_version(
             Err(error) => errors.push(format!("{}: {error}", registry_label(registry))),
         }
     }
-    Err(errors.join("；"))
+    Err(errors.join("; "))
 }
 
 fn version_parts(version: &str) -> Option<([u64; 3], Option<&str>)> {
@@ -550,13 +551,13 @@ fn ensure_runtime_idle(
             }))
     };
     if component == COMPONENT_PI && pi_busy()? {
-        return Err("请先停止所有 Pi Session，再切换 Pi runtime".into());
+        return Err(msg("runtime.pi.busy"));
     }
     if component == COMPONENT_NODE && (pi_busy()? || dsh_manager.is_running()?) {
-        return Err("请先停止所有 Pi 任务并关闭 DSH，再修复 Node 运行时".into());
+        return Err(msg("runtime.node.busy"));
     }
     if matches!(component, COMPONENT_DSH | COMPONENT_DSHMARKET) && dsh_manager.is_running()? {
-        return Err("请先关闭 DSH，再切换 DSH runtime".into());
+        return Err(msg("runtime.dsh.busy"));
     }
     Ok(())
 }
@@ -618,10 +619,7 @@ fn npm_install_with_registry(
     let output = std::thread::scope(|scope| {
         if let Some(progress) = progress {
             let stop = stop_heartbeat.clone();
-            let label = registry
-                .map(registry_label)
-                .unwrap_or("npm 默认源")
-                .to_owned();
+            let label = registry.map(registry_label).unwrap_or("npm").to_owned();
             scope.spawn(move || {
                 let started = std::time::Instant::now();
                 while !stop.load(std::sync::atomic::Ordering::Relaxed) {
@@ -631,10 +629,11 @@ fn npm_install_with_registry(
                     {
                         break;
                     }
+                    let seconds = started.elapsed().as_secs().to_string();
                     progress.report(
-                        &format!(
-                            "正在从 {label} 下载依赖（已 {}s，可随时取消）",
-                            started.elapsed().as_secs()
+                        &msg_with(
+                            "runtime.npm.downloading",
+                            &[("registry", label.as_str()), ("seconds", seconds.as_str())],
                         ),
                         None,
                     );
@@ -683,7 +682,10 @@ fn npm_install_with_fallback(
             let previous = registry_label(candidates[index - 1]);
             if let Some(progress) = progress {
                 progress.report(
-                    &format!("{previous} 失败，改用 {} 重试", registry_label(registry)),
+                    &msg_with(
+                        "runtime.npm.fallback",
+                        &[("previous", previous), ("next", registry_label(registry))],
+                    ),
                     None,
                 );
             }
@@ -701,7 +703,7 @@ fn npm_install_with_fallback(
             Err(error) => errors.push(format!("{}: {error}", registry_label(registry))),
         }
     }
-    Err(errors.join("；"))
+    Err(errors.join("; "))
 }
 
 fn dshmarket_backup_root(paths: &AppPaths) -> PathBuf {
@@ -885,10 +887,12 @@ fn install_dshmarket(
 
 /// 下载 Node 用于校验的 SHA-256 清单/小文件。
 fn download_node_text(agent: &ureq::Agent, url: &str) -> Result<String, String> {
-    let mut response = agent
-        .get(url)
-        .call()
-        .map_err(|error| format!("下载失败：{error}"))?;
+    let mut response = agent.get(url).call().map_err(|error| {
+        msg_with(
+            "runtime.node.download_failed",
+            &[("detail", &error.to_string())],
+        )
+    })?;
     let status = response.status().as_u16();
     let body = response
         .body_mut()
@@ -896,9 +900,17 @@ fn download_node_text(agent: &ureq::Agent, url: &str) -> Result<String, String> 
         .limit(1024 * 1024)
         .lossy_utf8(true)
         .read_to_string()
-        .map_err(|error| format!("下载响应读取失败：{error}"))?;
+        .map_err(|error| {
+            msg_with(
+                "runtime.node.download_read_failed",
+                &[("detail", &error.to_string())],
+            )
+        })?;
     if !(200..300).contains(&status) {
-        return Err(format!("下载返回 HTTP {status}"));
+        return Err(msg_with(
+            "runtime.node.download_http_failed",
+            &[("status", &status.to_string())],
+        ));
     }
     Ok(body)
 }
@@ -912,13 +924,18 @@ fn download_node_archive(
     on_progress: Option<&dyn Fn(u8)>,
 ) -> Result<String, String> {
     cancellation.check()?;
-    let response = agent
-        .get(url)
-        .call()
-        .map_err(|error| format!("下载失败：{error}"))?;
+    let response = agent.get(url).call().map_err(|error| {
+        msg_with(
+            "runtime.node.download_failed",
+            &[("detail", &error.to_string())],
+        )
+    })?;
     let status = response.status().as_u16();
     if !(200..300).contains(&status) {
-        return Err(format!("下载返回 HTTP {status}"));
+        return Err(msg_with(
+            "runtime.node.download_http_failed",
+            &[("status", &status.to_string())],
+        ));
     }
     // Node 官方发行包带 Content-Length，可据此计算百分比。
     let total = response
@@ -928,23 +945,34 @@ fn download_node_archive(
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|total| *total > 0);
     let mut reader = response.into_body().into_reader();
-    let mut file =
-        fs::File::create(destination).map_err(|error| format!("无法创建下载文件：{error}"))?;
+    let mut file = fs::File::create(destination).map_err(|error| {
+        msg_with(
+            "runtime.node.download_file_create_failed",
+            &[("detail", &error.to_string())],
+        )
+    })?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; 128 * 1024];
     let mut downloaded: u64 = 0;
     let mut last_reported: u8 = 0;
     loop {
         cancellation.check()?;
-        let read = reader
-            .read(&mut buffer)
-            .map_err(|error| format!("下载读取失败：{error}"))?;
+        let read = reader.read(&mut buffer).map_err(|error| {
+            msg_with(
+                "runtime.node.download_stream_read_failed",
+                &[("detail", &error.to_string())],
+            )
+        })?;
         if read == 0 {
             break;
         }
         hasher.update(&buffer[..read]);
-        file.write_all(&buffer[..read])
-            .map_err(|error| format!("下载写入失败：{error}"))?;
+        file.write_all(&buffer[..read]).map_err(|error| {
+            msg_with(
+                "runtime.node.download_write_failed",
+                &[("detail", &error.to_string())],
+            )
+        })?;
         if let Some(on_progress) = on_progress {
             downloaded += read as u64;
             if let Some(total) = total {
@@ -957,8 +985,12 @@ fn download_node_archive(
             }
         }
     }
-    file.sync_all()
-        .map_err(|error| format!("下载落盘失败：{error}"))?;
+    file.sync_all().map_err(|error| {
+        msg_with(
+            "runtime.node.download_flush_failed",
+            &[("detail", &error.to_string())],
+        )
+    })?;
     Ok(format!("{:x}", hasher.finalize()))
 }
 
@@ -978,15 +1010,28 @@ fn extract_node_archive(
     destination: &Path,
     cancellation: &Cancellation,
 ) -> Result<(), String> {
-    let file = fs::File::open(archive).map_err(|error| format!("无法打开 Node 归档：{error}"))?;
-    let mut zip = zip::ZipArchive::new(file).map_err(|error| format!("Node 归档无效：{error}"))?;
+    let file = fs::File::open(archive).map_err(|error| {
+        msg_with(
+            "runtime.node.archive_open_failed",
+            &[("detail", &error.to_string())],
+        )
+    })?;
+    let mut zip = zip::ZipArchive::new(file).map_err(|error| {
+        msg_with(
+            "runtime.node.archive_invalid",
+            &[("detail", &error.to_string())],
+        )
+    })?;
     for index in 0..zip.len() {
         cancellation.check()?;
-        let mut entry = zip
-            .by_index(index)
-            .map_err(|error| format!("Node 归档读取失败：{error}"))?;
+        let mut entry = zip.by_index(index).map_err(|error| {
+            msg_with(
+                "runtime.node.archive_read_failed",
+                &[("detail", &error.to_string())],
+            )
+        })?;
         let Some(path) = entry.enclosed_name() else {
-            return Err("Node 归档包含非法路径".into());
+            return Err(msg("runtime.node.archive_unsafe_path"));
         };
         let relative: PathBuf = path.components().skip(1).collect();
         if relative.as_os_str().is_empty() {
@@ -1009,15 +1054,18 @@ fn extract_node_archive(
 fn verify_node(root: &Path, expected: &str) -> Result<String, String> {
     let node = root.join("node.exe");
     if !node.is_file() {
-        return Err("Node 运行时缺少 node.exe".into());
+        return Err(msg("runtime.node.exe_missing"));
     }
     if !root.join("npm.cmd").is_file() {
-        return Err("Node 运行时缺少 npm.cmd（安装 Pi/DSH 需要托管 npm）".into());
+        return Err(msg("runtime.node.npm_missing"));
     }
     let version = command_version(Command::new(&node).arg("--version"))
-        .ok_or_else(|| "Node 运行时启动验证失败".to_string())?;
+        .ok_or_else(|| msg("runtime.node.verify_failed"))?;
     if version != expected {
-        return Err(format!("Node 版本不符：期望 {expected}，实际 {version}"));
+        return Err(msg_with(
+            "runtime.node.version_mismatch",
+            &[("expected", expected), ("actual", &version)],
+        ));
     }
     Ok(version)
 }
@@ -1031,8 +1079,9 @@ fn install_node(
     progress: &dyn RuntimeProgressSink,
 ) -> Result<RuntimeOperationResult, String> {
     if version != MANAGED_NODE_VERSION {
-        return Err(format!(
-            "Node 运行时只能安装内置固定版本 {MANAGED_NODE_VERSION}"
+        return Err(msg_with(
+            "runtime.node.fixed_version",
+            &[("version", MANAGED_NODE_VERSION)],
         ));
     }
     let root = paths.runtimes.join("node");
@@ -1068,21 +1117,27 @@ fn install_node(
             }
         }
         let Some((base, shasums)) = resolved else {
-            return Err(shasums_errors.join("；"));
+            return Err(shasums_errors.join("; "));
         };
-        let expected = parse_sha256(&shasums, &archive_name)
-            .ok_or_else(|| format!("官方校验文件缺少 {archive_name}"))?;
-        progress.report("下载 Node 官方发行包", Some(0));
+        let expected = parse_sha256(&shasums, &archive_name).ok_or_else(|| {
+            msg_with(
+                "runtime.node.checksum_entry_missing",
+                &[("file", archive_name.as_str())],
+            )
+        })?;
+        progress.report(&msg("runtime.node.downloading_package"), Some(0));
         let digest = download_node_archive(
             &agent,
             &format!("{base}/v{version}/{archive_name}"),
             &archive_path,
             cancellation,
-            Some(&|percent| progress.report("下载 Node 官方发行包", Some(percent))),
+            Some(&|percent| {
+                progress.report(&msg("runtime.node.downloading_package"), Some(percent))
+            }),
         )?;
-        progress.report("校验 SHA-256", None);
+        progress.report(&msg("runtime.node.verifying_checksum"), None);
         if digest != expected {
-            return Err("Node 归档的 SHA-256 校验失败".into());
+            return Err(msg("runtime.node.checksum_mismatch"));
         }
         extract_node_archive(&archive_path, &staging, cancellation)?;
         verify_node(&staging, version)?;
@@ -1284,12 +1339,18 @@ fn install_runtime_inner(
     cancellation.check()?;
     crate::snapshot::Snapshot::ensure_ready(&paths.backups)?;
     if !component_installable(&paths, &request.component_id) {
-        return Err("该组件当前不可更新，请先满足其运行时兼容条件".into());
+        return Err(msg("runtime.install.component_not_ready"));
     }
     if !valid_package_version(&request.version) {
         return Err("runtime version is invalid".into());
     }
-    progress.report(&format!("准备安装 {}", request.version), None);
+    progress.report(
+        &msg_with(
+            "runtime.install.preparing",
+            &[("version", request.version.as_str())],
+        ),
+        None,
+    );
     ensure_runtime_idle(&request.component_id, &store, &dsh_manager, &pty_manager)?;
     // Node 是自包含的基础运行时：从官方发行包下载，不从 npm 安装。
     if request.component_id == COMPONENT_NODE {
@@ -1303,19 +1364,23 @@ fn install_runtime_inner(
     }
     let package = runtime_package(&request.component_id)
         .ok_or_else(|| "runtime component is not supported".to_string())?;
-    progress.report("查询 registry 最新版本", None);
+    progress.report(&msg("runtime.install.checking_registry"), None);
     let proxy = configured_update_proxy()?;
     let (registry_latest, registry_used) = latest_package_version(package, proxy.as_deref())?;
     cancellation.check()?;
     // DSH 固定兼容版本：即使通过 IPC 直接请求，也不能安装未验证的上游版本。
     if request.component_id == COMPONENT_DSH && request.version != VERIFIED_DSH_VERSION {
         let requested = &request.version;
-        return Err(format!(
-            "DSH {requested} 尚未通过 DeepPi 兼容验证，请安装 {VERIFIED_DSH_VERSION}"
+        return Err(msg_with(
+            "runtime.dsh.unsupported",
+            &[
+                ("requested", requested.as_str()),
+                ("verified", VERIFIED_DSH_VERSION),
+            ],
         ));
     }
     if registry_latest != request.version && request.component_id != COMPONENT_DSH {
-        return Err("只能安装刚从 registry 验证的最新版本".into());
+        return Err(msg("runtime.install.not_latest"));
     }
     if request.component_id == COMPONENT_DSHMARKET {
         let result = install_dshmarket(&paths, &request.version, cancellation, progress)?;
@@ -1413,12 +1478,12 @@ fn rollback_runtime_inner(
     cancellation.check()?;
     crate::snapshot::Snapshot::ensure_ready(&paths.backups)?;
     if !runtime_installable(&request.component_id) {
-        return Err("该组件没有可回滚的独立运行时".into());
+        return Err(msg("runtime.rollback.not_available"));
     }
     ensure_runtime_idle(&request.component_id, &store, &dsh_manager, &pty_manager)?;
     if request.component_id == COMPONENT_DSHMARKET {
-        let backup = latest_dshmarket_backup(&paths)
-            .ok_or_else(|| "没有可用的 dshmarket 回滚版本".to_string())?;
+        let backup =
+            latest_dshmarket_backup(&paths).ok_or_else(|| msg("runtime.dshmarket.no_backup"))?;
         let package = paths.dshmarket_package();
         let backups = dshmarket_backup_root(&paths);
         let failed = backups.join(format!("dshmarket-rollback-{}", Uuid::new_v4()));
@@ -1518,8 +1583,12 @@ fn check_runtime_updates_inner(
                         (
                             VERIFIED_DSH_VERSION.to_owned(),
                             (registry_latest != VERIFIED_DSH_VERSION).then(|| {
-                                format!(
-                                    "上游已有 {registry_latest}；该版本尚未通过 DeepPi 兼容验证，暂时固定 {VERIFIED_DSH_VERSION}"
+                                msg_with(
+                                    "runtime.dsh.pinned",
+                                    &[
+                                        ("latest", registry_latest.as_str()),
+                                        ("pinned", VERIFIED_DSH_VERSION),
+                                    ],
                                 )
                             }),
                         )

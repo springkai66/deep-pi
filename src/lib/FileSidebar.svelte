@@ -7,6 +7,7 @@
   import { createLatestSearch, type SearchMatch } from "./search";
   import ContentSearchResults from "./ContentSearchResults.svelte";
   import { shortcutAria } from "./shortcuts";
+  import { t, tm } from "$lib/i18n.svelte";
 
   interface Props {
     project: Project | undefined;
@@ -124,7 +125,7 @@
         contentSkipped = result.skippedFiles;
         contentLoading = false;
       }, (cause) => {
-        contentError = String(cause);
+        contentError = tm(String(cause));
         contentLoading = false;
       }).finally(() => searchRequests.delete(id));
     }, 180);
@@ -168,7 +169,7 @@
       unreadable = result.unreadableDirectories;
       contentRefreshToken++;
     } catch (cause) {
-      if (current === generation) error = String(cause);
+      if (current === generation) error = tm(String(cause));
     } finally {
       if (current === generation) {
         loading = false;
@@ -219,7 +220,7 @@
       error = "";
     } catch (cause) {
       if (current === generation) {
-        error = String(cause);
+        error = tm(String(cause));
         const retryable = new Set(expanded);
         retryable.delete(entry.path);
         expanded = retryable;
@@ -279,49 +280,49 @@
   function rowId(path: string) { return `file-${encodeURIComponent(path)}`; }
 </script>
 
-<section class="file-sidebar" aria-label="项目文件">
+<section class="file-sidebar" aria-label={t("项目文件")}>
   <header>
-    <strong title={project?.path}>{project?.name ?? "未选择项目"}</strong>
+    <strong title={project?.path}>{project?.name ?? t("未选择项目")}</strong>
     {#if watchError && onRetryWatch}
-      <button type="button" title="重新连接文件监听" aria-label="重新连接文件监听" onclick={onRetryWatch}><Radio size={15} /></button>
+      <button type="button" title={t("重新连接文件监听")} aria-label={t("重新连接文件监听")} onclick={onRetryWatch}><Radio size={15} /></button>
     {/if}
-    <button type="button" disabled={loading || !project} title="刷新文件" aria-label="刷新文件" onclick={() => void refresh()}>
+    <button type="button" disabled={loading || !project} title={t("刷新文件")} aria-label={t("刷新文件")} onclick={() => void refresh()}>
       <RefreshCw size={15} />
     </button>
   </header>
   {#if watchError}<p role="status" class="error">{watchError}</p>{/if}
   <div class="file-search" role="search">
     <Search size={14} aria-hidden="true" />
-    <input type="search" bind:this={searchInput} bind:value={searchText} aria-label="搜索文件" aria-keyshortcuts={shortcutAria("files")}
-      placeholder={searchMode === "files" ? "搜索文件名或路径" : "搜索文件内容"} onkeydown={keyboard}
+    <input type="search" bind:this={searchInput} bind:value={searchText} aria-label={t("搜索文件")} aria-keyshortcuts={shortcutAria("files")}
+      placeholder={searchMode === "files" ? t("搜索文件名或路径") : t("搜索文件内容")} onkeydown={keyboard}
       oncompositionstart={() => { composing = true; clearTimeout(debounce); }}
       oncompositionend={(event) => { composing = false; commitQuery(event.currentTarget.value); }}
       oninput={(event) => { if (!composing) commitQuery(event.currentTarget.value); }} />
-    {#if searchText}<button type="button" title="清空文件搜索" aria-label="清空文件搜索" onclick={clearSearch}><X size={14} /></button>{/if}
+    {#if searchText}<button type="button" title={t("清空文件搜索")} aria-label={t("清空文件搜索")} onclick={clearSearch}><X size={14} /></button>{/if}
   </div>
-  <div class="search-modes" role="group" aria-label="搜索类型">
-    <button type="button" aria-pressed={searchMode === "files"} onclick={() => { searchMode = "files"; }}>文件</button>
-    <button type="button" aria-pressed={searchMode === "content"} onclick={() => { searchMode = "content"; }}>内容</button>
+  <div class="search-modes" role="group" aria-label={t("搜索类型")}>
+    <button type="button" aria-pressed={searchMode === "files"} onclick={() => { searchMode = "files"; }}>{t("文件")}</button>
+    <button type="button" aria-pressed={searchMode === "content"} onclick={() => { searchMode = "content"; }}>{t("内容")}</button>
   </div>
   {#if searchMode === "content"}
     {#if contentLoading}
-      <div class="search-progress"><p role="status">正在搜索内容…</p>
-        <button type="button" title="取消内容搜索" aria-label="取消内容搜索" onclick={() => { contentRefreshPending = false; contentSearch.cancel(); contentLoading = false; contentError = "搜索已取消"; }}><Square size={14} /></button>
+      <div class="search-progress"><p role="status">{t("正在搜索内容…")}</p>
+        <button type="button" title={t("取消内容搜索")} aria-label={t("取消内容搜索")} onclick={() => { contentRefreshPending = false; contentSearch.cancel(); contentLoading = false; contentError = t("搜索已取消"); }}><Square size={14} /></button>
       </div>
     {/if}
-    {#if contentError}<p role="alert" class="error">{contentError}</p>{/if}
-    {#if contentTruncated}<p role="status">搜索结果已截断，请缩小查询范围。</p>{/if}
-    {#if contentSkipped}<p role="status">{contentSkipped} 个文件不可读、不支持或超过 2 MiB</p>{/if}
-    {#if !project}<p role="status">未选择项目</p>
-    {:else if !contentLoading && !contentError && !contentResults.length && searchText.trim()}<p role="status">没有匹配内容</p>{/if}
+    {#if contentError}<p role="alert" class="error">{tm(contentError)}</p>{/if}
+    {#if contentTruncated}<p role="status">{t("搜索结果已截断，请缩小查询范围。")}</p>{/if}
+    {#if contentSkipped}<p role="status">{t("{count} 个文件不可读、不支持或超过 2 MiB", { count: contentSkipped })}</p>{/if}
+    {#if !project}<p role="status">{t("未选择项目")}</p>
+    {:else if !contentLoading && !contentError && !contentResults.length && searchText.trim()}<p role="status">{t("没有匹配内容")}</p>{/if}
     <ContentSearchResults matches={contentResults} {onOpen} onClear={clearSearch} focusToken={contentFocusToken} />
   {:else}
-  {#if loading}<p role="status">正在读取项目文件…</p>{/if}
-  {#if error}<p role="alert" class="error">{error}</p>{/if}
-  {#if incomplete}<p role="status">索引未完整加载；展开目录可继续读取。</p>{/if}
-  {#if unreadable.length}<p role="status" title={unreadable.join("\n")}>{unreadable.length} 个目录无法读取</p>{/if}
-  {#if !loading && rows.length === 0}<p role="status">{query ? "没有匹配的文件" : project ? "目录为空" : "未选择项目"}</p>{/if}
-  <div class="file-tree" role="tree" aria-label="文件目录" tabindex="0"
+  {#if loading}<p role="status">{t("正在读取项目文件…")}</p>{/if}
+  {#if error}<p role="alert" class="error">{tm(error)}</p>{/if}
+  {#if incomplete}<p role="status">{t("索引未完整加载；展开目录可继续读取。")}</p>{/if}
+  {#if unreadable.length}<p role="status" title={unreadable.join("\n")}>{t("{count} 个目录无法读取", { count: unreadable.length })}</p>{/if}
+  {#if !loading && rows.length === 0}<p role="status">{query ? t("没有匹配的文件") : project ? t("目录为空") : t("未选择项目")}</p>{/if}
+  <div class="file-tree" role="tree" aria-label={t("文件目录")} tabindex="0"
     aria-activedescendant={windowRows.some((entry) => entry.path === activePath) ? rowId(activePath) : undefined}
     aria-busy={loading} bind:this={list} bind:clientHeight={height}
     onscroll={(event) => { scrollTop = event.currentTarget.scrollTop; }} onkeydown={keyboard}>
@@ -338,23 +339,23 @@
           <Folder size={14} />
         {:else}<span class="indent"></span><File size={14} />{/if}
         <span class="filename">{entry.name}</span>
-        {#if pending.has(entry.path)}<span aria-label="正在加载">…</span>{/if}
+        {#if pending.has(entry.path)}<span aria-label={t("正在加载")}>…</span>{/if}
       </button>
       {#if entry.isDirectory && !query.trim() && expanded.has(entry.path) && emptyDirectories.includes(entry.path)}
-        <p class="empty-directory" role="status" style:padding-left={`${8 + (entry.path.split("/").length - 1) * 12 + 12}px`}>空目录</p>
+        <p class="empty-directory" role="status" style:padding-left={`${8 + (entry.path.split("/").length - 1) * 12 + 12}px`}>{t("空目录")}</p>
       {/if}
     {/each}
     <div role="none" style:height={`${Math.max(0, rows.length - end) * rowHeight}px`}></div>
   </div>
   {/if}
-  <footer>{entries.filter((entry) => !entry.isDirectory).length} 个文件</footer>
+  <footer>{t("{count} 个文件", { count: entries.filter((entry) => !entry.isDirectory).length })}</footer>
 </section>
 
 <style>
   .file-sidebar { display: flex; flex-direction: column; min-height: 0; height: 100%; }
   header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px; }
   header strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
-  header button, .file-search button { display: grid; place-items: center; flex-shrink: 0; width: 24px; height: 24px; border: 0; border-radius: 4px; background: transparent; color: var(--text-muted); cursor: pointer; }
+  header button, .file-search button { display: grid; place-items: center; flex-shrink: 0; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--text-muted); cursor: pointer; }
   button:disabled { opacity: .4; cursor: default; }
   .file-search { display: flex; align-items: center; gap: 6px; margin: 0 10px 8px; padding: 4px 6px; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--surface); color: var(--text-muted); }
   .file-search input { width: 100%; min-width: 0; border: 0; background: transparent; color: var(--text); }
@@ -362,7 +363,7 @@
   .search-modes button { flex: 1; border: 0; border-radius: 3px; padding: 4px; background: transparent; color: var(--text-muted); font-size: 11px; cursor: pointer; }
   .search-modes button[aria-pressed="true"] { background: var(--surface-hover); color: var(--text); }
   .search-progress { display: flex; align-items: center; justify-content: space-between; padding-right: 10px; }
-  .search-progress button { width: 26px; height: 26px; display: grid; place-items: center; border: 0; color: var(--text); background: var(--surface); cursor: pointer; }
+  .search-progress button { width: 26px; height: 26px; display: grid; place-items: center; padding: 0; border: 0; color: var(--text); background: var(--surface); cursor: pointer; }
   p { margin: 6px 10px; color: var(--text-muted); font-size: 12px; overflow-wrap: anywhere; }
   /* 空目录占位行：与文件行同高，不参与文件计数。 */
   .file-tree p.empty-directory { margin: 0; height: 28px; display: flex; align-items: center; color: var(--text-muted); font-size: 11px; font-style: italic; }

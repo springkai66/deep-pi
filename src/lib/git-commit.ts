@@ -1,3 +1,4 @@
+import { t, tm } from "./i18n.svelte";
 export interface CommitPreview {
   reference: string;
   head: string | null;
@@ -69,9 +70,9 @@ export function createCommitController(
             return;
           }
         }
-        emit({ error: "暂存内容在审阅期间发生变化，请重新审阅暂存" });
+        emit({ error: t("暂存内容在审阅期间发生变化，请重新审阅暂存") });
       } catch (error) {
-        if (!disposed && state.projectId === projectId) emit({ error: String(error) });
+        if (!disposed && state.projectId === projectId) emit({ error: tm(String(error)) });
       } finally {
         active = false;
         emit({ busy: false, phase: "idle" });
@@ -94,7 +95,7 @@ export function createCommitController(
         }
       } catch (error) {
         if (!disposed && state.projectId === projectId) emit({
-          preview: null, error: `提交结果未确认，请刷新后核对；不会自动重试：${String(error)}`,
+          preview: null, error: t("提交结果未确认，请刷新后核对；不会自动重试：{error}", { error: tm(String(error)) }),
         });
       } finally {
         active = false;

@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createRecoveryManager, type RecoveryState, type RecoveryItem, type RecoveryPage } from "./file-recovery";
+import { appConfirmDialog } from "./app-messages";
+import { getLocale } from "./i18n.svelte";
 
 const item: RecoveryItem = { id: "record:recovery", target: "src/a.txt", path: "src/.deeppi-id.recovery",
   kind: "recovery", createdAt: 1, status: "available", version: "version1", size: 4, detail: "" };
@@ -69,6 +71,10 @@ describe("recovery manager", () => {
     await f.manager.run("delete", item);
     expect(f.invoke).toHaveBeenLastCalledWith("delete_project_recovery", {
       projectId: "p", recordId: item.id, expectedVersion: "version1",
+      dialogs: {
+        permanent: appConfirmDialog("recovery.delete.dialog.permanent", getLocale()),
+        recordOnly: appConfirmDialog("recovery.delete.dialog.record_only", getLocale()),
+      },
     });
     expect(f.changed).not.toHaveBeenCalled();
     expect(f.state().items).toEqual([item]);
@@ -97,13 +103,17 @@ describe("recovery manager", () => {
     await f.manager.run("forget", item);
     expect(f.invoke.mock.calls[1]).toEqual(["delete_project_recovery", {
       projectId: "p", recordId: item.id, expectedVersion: null,
+      dialogs: {
+        permanent: appConfirmDialog("recovery.delete.dialog.permanent", getLocale()),
+        recordOnly: appConfirmDialog("recovery.delete.dialog.record_only", getLocale()),
+      },
     }]);
     f.invoke.mockResolvedValueOnce({ outcome: "conflict", version: null, detail: "target exists" });
     await f.manager.run("restore", item, "new.txt");
     expect(f.state().message).toContain("target exists");
     expect(f.invoke.mock.calls[3][1]).toEqual({ projectId: "p", request: {
       recordId: item.id, expectedVersion: "version1", relativePath: "new.txt",
-    } });
+    }, dialog: appConfirmDialog("recovery.restore.dialog", getLocale()) });
   });
   it("never automatically repeats a write after an unknown result", async () => {
     const f = fixture();

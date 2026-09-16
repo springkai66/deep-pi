@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{operation::Cancellation, process_runner::ProcessOutput};
+use crate::{message::msg, operation::Cancellation, process_runner::ProcessOutput};
 
 const MAX_ACTIVE: usize = 16;
 const MAX_RECENT: usize = 256;
@@ -66,7 +66,7 @@ impl GitBudget {
         self.deadline
             .checked_duration_since(Instant::now())
             .filter(|duration| !duration.is_zero())
-            .ok_or_else(|| "Git 读取已超过总等待预算，请重试".into())
+            .ok_or_else(|| msg("git.operation.budget_exhausted"))
     }
 
     pub(crate) fn run(&self, command: &mut Command) -> Result<ProcessOutput, String> {
@@ -80,7 +80,7 @@ impl GitBudget {
             self.check()?;
             match mutex.try_lock() {
                 Ok(guard) => return Ok(guard),
-                Err(TryLockError::Poisoned(_)) => return Err("Git 操作锁已失效，请重启应用".into()),
+                Err(TryLockError::Poisoned(_)) => return Err(msg("git.operation.lock_poisoned")),
                 Err(TryLockError::WouldBlock) => thread::sleep(Duration::from_millis(20)),
             }
         }
@@ -119,10 +119,10 @@ impl GitOperations {
         if registry.active.contains_key(&id)
             || registry.recent.iter().any(|(known, _)| *known == id)
         {
-            return Err("Git 请求已取消、完成或正在运行，请使用新的请求 ID".into());
+            return Err(msg("git.operation.request_reused"));
         }
         if registry.active.len() >= MAX_ACTIVE {
-            return Err("Git 请求队列已满，请稍后重试".into());
+            return Err(msg("git.operation.queue_full"));
         }
         let budget = GitBudget::new(duration);
         registry.active.insert(id, budget.token.clone());
@@ -173,8 +173,9 @@ pub fn cancel_git_read(
 /// 在主窗口持有项目路径与操作预算的前提下，于阻塞线程池中执行一次 Git 读取。
 ///
 /// 七个 Git 命令此前各自重复同一段“解析项目路径 → 登记操作 ID → 转入阻塞线程 →
-/// 打开仓库并执行”的样板；其中 `request_trust` 已出现分化（仅状态读取为 `true`），
-/// 靠人工保持一致性。集中到一处后，信任策略成为显式参数，新增命令不会再漏掉
+/// 打开仓库并执行”的样板；其中信任确认已出现分化（只有状态读取会请求用户信任，
+/// 其余入口直接按未信任处理），靠人工保持一致性。集中到一处后，信任策略成为显式
+/// 参数（`None` 表示不请求信任，文案由前端按当前语言传入），新增命令不会再漏掉
 /// 主窗口校验、操作 ID 登记或超时预算。
 ///
 /// 调用方负责在主线程完成 `webview.label() != "main"` 检查与请求参数校验；
@@ -183,22 +184,14 @@ pub(crate) async fn run_git_command<T, F>(
     app: tauri::AppHandle,
     project_id: String,
     operation_id: String,
-    request_trust: bool,
+    trust_dialog: Option<crate::dialog_text::ConfirmDialog>,
     operation: F,
 ) -> Result<T, String>
 where
     T: Send + 'static,
     F: FnOnce(&crate::git_repository::GitRepository) -> Result<T, String> + Send + 'static,
 {
-    prepare_and_run(
-        app,
-        project_id,
-        operation_id,
-        request_trust,
-        None,
-        operation,
-    )
-    .await
+    prepare_and_run(app, project_id, operation_id, trust_dialog, None, operation).await
 }
 
 /// 同 [`run_git_command`]，但覆盖默认的读取预算。
@@ -209,7 +202,7 @@ pub(crate) async fn run_git_command_with_budget<T, F>(
     app: tauri::AppHandle,
     project_id: String,
     operation_id: String,
-    request_trust: bool,
+    trust_dialog: Option<crate::dialog_text::ConfirmDialog>,
     budget: std::time::Duration,
     operation: F,
 ) -> Result<T, String>
@@ -221,7 +214,7 @@ where
         app,
         project_id,
         operation_id,
-        request_trust,
+        trust_dialog,
         Some(budget),
         operation,
     )
@@ -232,7 +225,7 @@ async fn prepare_and_run<T, F>(
     app: tauri::AppHandle,
     project_id: String,
     operation_id: String,
-    request_trust: bool,
+    trust_dialog: Option<crate::dialog_text::ConfirmDialog>,
     budget: Option<std::time::Duration>,
     operation: F,
 ) -> Result<T, String>
@@ -253,7 +246,7 @@ where
         crate::git_repository::with_repository(
             &app,
             std::path::Path::new(&root),
-            request_trust,
+            trust_dialog,
             running.budget.clone(),
             operation,
         )

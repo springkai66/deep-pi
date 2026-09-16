@@ -1,5 +1,7 @@
 use std::{fs, path::PathBuf};
 
+use crate::message::{msg, msg_with};
+
 #[derive(Clone, Debug)]
 pub struct AppPaths {
     pub database: PathBuf,
@@ -63,9 +65,12 @@ impl AppPaths {
         // 运行时安装在 DeepPi 安装目录的子文件夹里；目录创建失败通常意味着
         // DeepPi 被装进了受保护的目录（如 Program Files），需要给出可操作的提示。
         fs::create_dir_all(&paths.runtimes).map_err(|error| {
-            format!(
-                "无法创建运行时目录 {}：{error}。Pi/DSH 运行时安装在 DeepPi 安装目录下的 runtimes 子文件夹，请把 DeepPi 安装到可写的位置（不要安装在受保护的系统目录）",
-                paths.runtimes.display()
+            msg_with(
+                "managed.runtime_dir_create_failed",
+                &[
+                    ("path", &paths.runtimes.display().to_string()),
+                    ("error", &error.to_string()),
+                ],
             )
         })?;
         Ok(paths)
@@ -83,7 +88,7 @@ impl AppPaths {
         if node.is_file() {
             Ok(node)
         } else {
-            Err("托管 Node 运行时未安装，请在“设置 → 运行时与更新”安装 Node".into())
+            Err(msg("managed.node_missing"))
         }
     }
 
@@ -94,7 +99,7 @@ impl AppPaths {
         if npm.is_file() {
             Ok(npm)
         } else {
-            Err("托管 npm 不可用，请在“设置 → 运行时与更新”修复 Node 运行时".into())
+            Err(msg("managed.npm_missing"))
         }
     }
 
@@ -122,8 +127,7 @@ impl AppPaths {
     }
 
     pub fn required_pi_cli(&self) -> Result<PathBuf, String> {
-        self.pi_cli()?
-            .ok_or_else(|| "托管 Pi 运行时未安装，请在“设置 → 运行时与更新”安装 Pi".to_string())
+        self.pi_cli()?.ok_or_else(|| msg("managed.pi_missing"))
     }
 
     pub fn managed_dsh_runtime(&self) -> Result<PathBuf, String> {
@@ -152,7 +156,7 @@ impl AppPaths {
                 return Ok(development);
             }
         }
-        Err("托管 DSH 运行时未安装，请在“设置 → 运行时与更新”安装 DSH".into())
+        Err(msg("managed.dsh_missing"))
     }
 
     pub fn dsh_cli_path(runtime: &std::path::Path) -> PathBuf {
@@ -189,7 +193,7 @@ impl AppPaths {
     pub fn task_pi_home(&self, record: &crate::task::TaskRecord) -> Result<PathBuf, String> {
         // v1 只支持托管环境。旧的 native 任务记录保留在数据库中，但不能启动或恢复。
         if record.pi_environment != "managed" {
-            return Err("当前稳定版仅支持 DeepPi 托管任务，本机会话记录已保留".into());
+            return Err(msg("managed.native_task_unsupported"));
         }
         let home = record
             .pi_agent_dir
@@ -198,7 +202,7 @@ impl AppPaths {
             .unwrap_or_else(|| self.pi_home.clone());
         crate::snapshot::reject_link(&home)?;
         if !home.is_absolute() || !home.is_dir() {
-            return Err("任务绑定的 Pi 配置目录不可用".into());
+            return Err(msg("managed.pi_config_unavailable"));
         }
         Ok(home)
     }

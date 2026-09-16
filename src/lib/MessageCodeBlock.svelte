@@ -1,5 +1,6 @@
 <script lang="ts">
   import { Check, Copy, WrapText } from "@lucide/svelte";
+  import { t, tm } from "$lib/i18n.svelte";
   let { content, language = "" }: { content: string; language?: string } = $props();
   let highlighted = $state<string | null>(null);
   let copied = $state(false);
@@ -26,7 +27,7 @@
     copying = true;
     error = "";
     try { await navigator.clipboard.writeText(source); copied = source === content; }
-    catch (cause) { error = `复制失败：${String(cause)}`; }
+    catch (cause) { error = t("复制失败：{error}", { error: tm(String(cause)) }); }
     finally { copying = false; }
   }
 </script>
@@ -34,21 +35,21 @@
 <div class="message-code">
   <header>
     <span title={language}>{language || "text"}</span>
-    <button type="button" title="代码自动换行" aria-label="代码自动换行" aria-pressed={wrap} onclick={() => { wrap = !wrap; }}><WrapText size={15} /></button>
-    <button type="button" title={copied ? "已复制" : "复制代码"} aria-label={copied ? "已复制" : "复制代码"} disabled={copying} onclick={copy}>
+    <button type="button" title={t("代码自动换行")} aria-label={t("代码自动换行")} aria-pressed={wrap} onclick={() => { wrap = !wrap; }}><WrapText size={15} /></button>
+    <button type="button" title={copied ? t("已复制") : t("复制代码")} aria-label={copied ? t("已复制") : t("复制代码")} disabled={copying} onclick={copy}>
       {#if copied}<Check size={15} />{:else}<Copy size={15} />{/if}
     </button>
   </header>
   {#if error}<p role="alert">{error}</p>{/if}
   <!-- svelte-ignore a11y_no_noninteractive_tabindex (Scrollable code needs keyboard focus.) -->
-  <pre class:wrap tabindex="0" role="region" aria-label="代码块"><code>{#if highlighted !== null}{@html highlighted}{:else}{content}{/if}</code></pre>
+  <pre class:wrap tabindex="0" role="region" aria-label={t("代码块")}><code>{#if highlighted !== null}{@html highlighted}{:else}{content}{/if}</code></pre>
 </div>
 
 <style>
   .message-code { margin: 12px 0; border: 1px solid var(--border); border-radius: 4px; overflow: hidden; background: var(--surface); min-width: 0; }
   header { display: flex; gap: 4px; align-items: center; padding: 4px 8px; border-bottom: 1px solid var(--border); }
   header span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 11px var(--code-font); color: var(--text-muted); }
-  button { display: grid; place-items: center; width: 28px; height: 28px; flex: 0 0 28px; border: 0; border-radius: 4px; color: var(--text-muted); background: transparent; cursor: pointer; }
+  button { display: grid; place-items: center; width: 28px; height: 28px; padding: 0; flex: 0 0 28px; border: 0; border-radius: 4px; color: var(--text-muted); background: transparent; cursor: pointer; }
   button:hover, button[aria-pressed="true"] { background: var(--surface-hover); color: var(--text); }
   button:disabled { opacity: .4; cursor: default; }
   pre { margin: 0; padding: 12px; max-height: 440px; overflow: auto; tab-size: 4; white-space: pre; color: var(--text); font: 12px/1.6 var(--code-font); }

@@ -1,4 +1,5 @@
 pub use crate::git_repository::GitStatusGate;
+use crate::message::{msg, msg_with};
 use crate::{git_operation::run_git_command, git_repository::GitRepository};
 use serde::{Deserialize, Serialize};
 
@@ -147,13 +148,13 @@ fn read_status_scoped(
         },
     ]))?;
     if !output.status.success() {
-        return Err(format!(
-            "Git 状态读取失败（退出码 {:?}）；请在可信终端检查仓库权限或索引锁",
-            output.status.code()
+        return Err(msg_with(
+            "git.status.read_failed",
+            &[("code", &format!("{:?}", output.status.code()))],
         ));
     }
     if output.truncated {
-        return Err("Git 状态输出超过 64 KiB，未展示不完整列表；请在外部 Git 工具中查看".into());
+        return Err(msg("git.status.truncated"));
     }
     let mut status = parse_status(&output.stdout)?;
     if detect_cross_boundary {
@@ -164,7 +165,7 @@ fn read_status_scoped(
     for entry in &mut status.entries {
         entry.path = repo
             .to_project_path(&entry.path)
-            .ok_or("Git 返回了项目范围以外的变更")?
+            .ok_or(msg("git.status.outside_scope"))?
             .into();
         if let Some(original) = &entry.original_path {
             match repo.to_project_path(original) {
@@ -186,13 +187,17 @@ pub async fn project_git_status(
     webview: tauri::Webview,
     app: tauri::AppHandle,
     project_id: String,
-    request_trust: bool,
+    // 需要用户信任时展示的确认文案；由前端按当前语言传入，`None` 表示不请求信任。
+    trust_dialog: Option<crate::dialog_text::ConfirmDialog>,
     operation_id: String,
 ) -> Result<GitStatus, String> {
     if webview.label() != "main" {
-        return Err("Git 状态读取需要主窗口".into());
+        return Err(msg("git.status.window_required"));
     }
-    run_git_command(app, project_id, operation_id, request_trust, read_status).await
+    if let Some(dialog) = trust_dialog.as_ref() {
+        dialog.validate()?;
+    }
+    run_git_command(app, project_id, operation_id, trust_dialog, read_status).await
 }
 
 #[cfg(test)]

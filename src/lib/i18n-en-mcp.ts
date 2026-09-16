@@ -1,0 +1,140 @@
+/** 英文目录（MCP 服务 / Skills 技能设置、插件市场）。键 = 简体中文原文。 */
+export const EN_MCP: Record<string, string> = {
+  /* ---------- 通用：范围、标签与动作 ---------- */
+  "全局": "Global",
+  "项目": "Project",
+  "已安装": "Installed",
+  "市场": "Marketplace",
+  "搜索": "Search",
+  "刷新": "Refresh",
+  "添加": "Add",
+  "安装": "Install",
+  "卸载": "Uninstall",
+  "更新": "Update",
+  "删除": "Delete",
+  "覆盖": "Overwrite",
+  "官方目录": "Official catalog",
+
+  /* ---------- MCP 服务 / Skills 技能设置：范围与视图 ---------- */
+  "MCP 服务设置": "MCP server settings",
+  "Skills 技能设置": "Skills settings",
+  "配置范围": "Configuration scope",
+  "视图": "View",
+  "请先选择一个项目": "Select a project first",
+
+  /* ---------- MCP 服务设置：已安装列表与新增表单 ---------- */
+  "MCP 服务": "MCP Servers",
+  "刷新 MCP 服务列表": "Refresh the MCP server list",
+  "正在读取 MCP 服务…": "Reading MCP servers…",
+  "尚未安装 MCP 服务": "No MCP servers installed yet",
+  "删除 MCP 服务 {name}": "Delete MCP server {name}",
+  "MCP 服务名称": "MCP server name",
+  "配置（JSON）": "Configuration (JSON)",
+  "添加 MCP 服务": "Add MCP server",
+  "未配置传输方式": "No transport configured",
+  "MCP 服务名称不能为空": "MCP server name is required",
+  "MCP 配置必须是 JSON 对象": "MCP configuration must be a JSON object",
+  "MCP 配置不是有效的 JSON": "MCP configuration is not valid JSON",
+  "MCP 服务 {name} 已保存到{scope}配置": "MCP server {name} saved to the {scope} configuration",
+  "删除 MCP 服务": "Delete MCP server",
+  "删除 MCP 服务 “{name}” 吗？": "Delete MCP server “{name}”?",
+  "MCP 服务 {name} 已删除": "MCP server {name} deleted",
+
+  /* ---------- Skills 技能设置：已安装列表与新增表单 ---------- */
+  "Skills 技能": "Skills",
+  "刷新 Skills 列表": "Refresh the Skills list",
+  "正在读取 Skills…": "Reading Skills…",
+  "尚未安装 Skill": "No Skills installed yet",
+  "删除 Skill {name}": "Delete Skill {name}",
+  "Skill 名称": "Skill name",
+  "SKILL.md 内容": "SKILL.md content",
+  "触发描述": "Trigger description",
+  "何时使用该技能…": "When to use this skill…",
+  "技能指令正文…": "Skill instructions…",
+  "添加 Skill": "Add Skill",
+  "Skill 名称不能为空": "Skill name is required",
+  "Skill 描述不能为空": "Skill description is required",
+  "Skill 内容不能为空": "Skill content is required",
+  "Skill {name} 已保存到{scope}配置": "Skill {name} saved to the {scope} configuration",
+  "删除 Skill": "Delete Skill",
+  "删除 Skill “{name}” 及其目录吗？": "Delete Skill “{name}” and its folder?",
+  "Skill {name} 已删除": "Skill {name} deleted",
+
+  /* ---------- MCP / Skills 市场操作 ---------- */
+  "该条目没有可自动写入的传输配置，请手动添加":
+    "This entry has no transport configuration that can be written automatically; add it manually",
+  "覆盖 MCP 服务": "Overwrite MCP server",
+  "已存在同名 MCP 服务 “{name}”，覆盖其配置吗？":
+    "An MCP server named “{name}” already exists. Overwrite its configuration?",
+  "把 “{name}” 添加到{scope} MCP 配置吗？": "Add “{name}” to the {scope} MCP configuration?",
+  "MCP 服务 {name} 已添加{detail}；新服务在重启 Pi 任务后生效":
+    "MCP server {name} added ({detail}); the new server takes effect after Pi tasks are restarted",
+  "（远程传输）": "remote transport",
+  "（本地命令 {package}）": "local command {package}",
+  "安装 Skill Package": "Install Skill Package",
+  "安装 {name}@{version} 吗？安装会运行 Pi 包管理器，期间需要停止所有 Pi 任务。":
+    "Install {name}@{version}? The installation runs the Pi package manager, so all Pi tasks must be stopped first.",
+  "{name} 已安装；技能在重启 Pi 任务后生效":
+    "{name} installed; the Skill takes effect after Pi tasks are restarted",
+  "远程 · {url}": "Remote · {url}",
+  "本地 · {package}": "Local · {package}",
+  "无可用传输配置": "No transport configuration available",
+
+  /* ---------- MCP 市场 ---------- */
+  "MCP 市场官方目录": "Official MCP marketplace catalog",
+  "搜索 MCP 服务（如 context7、fetch）": "Search MCP servers (e.g. context7, fetch)",
+  "搜索 MCP 市场": "Search the MCP marketplace",
+  "正在加载 MCP 目录…": "Loading the MCP catalog…",
+  "没有匹配的 MCP 服务": "No matching MCP servers",
+  "输入关键词搜索官方 MCP 注册表，选择后一键写入 MCP 配置。":
+    "Enter a keyword to search the official MCP registry; adding an entry writes it into your MCP configuration.",
+  "{count}/月": "{count}/month",
+
+  /* ---------- Skills 市场 ---------- */
+  "Skills 市场": "Skills marketplace",
+  "pi.dev 官方目录 · skill 类型": "pi.dev official catalog · skill type",
+  "搜索 Skill 包": "Search Skill packages",
+  "搜索 Skills 市场": "Search the Skills marketplace",
+  "正在加载 Skills 目录…": "Loading the Skills catalog…",
+  "没有匹配的 Skill 包": "No matching Skill packages",
+  "输入关键词搜索 pi.dev 官方目录中的 Skill 包；安装会运行 Pi 包管理器。":
+    "Enter a keyword to search Skill packages in the pi.dev official catalog; installation runs the Pi package manager.",
+  "安装由 Pi 包管理器执行，需要先停止所有 Pi 任务；安装失败会自动回滚。":
+    "Installation is performed by the Pi package manager and requires stopping all Pi tasks first; a failed installation rolls back automatically.",
+
+  /* ---------- 插件市场（PiMarketplace） ---------- */
+  "Pi 扩展市场": "Pi Extensions Marketplace",
+  "返回工作区": "Back to workspace",
+  "返回": "Back",
+  "安装范围": "Installation scope",
+  "搜索 Pi Package": "Search Pi Packages",
+  "取消操作": "Cancel operation",
+  "正在取消并恢复": "Cancelling and restoring",
+  "操作尚未接受取消，或已进入提交阶段":
+    "The operation has not accepted cancellation yet, or has already entered the commit phase",
+  "正在加载目录…": "Loading catalog…",
+  "没有匹配的 Package": "No matching Packages",
+  "日期未知": "Unknown date",
+  "已安装 · DeepPi 托管": "Installed · DeepPi managed",
+  "{count} / 月 · {date}": "{count} / month · {date}",
+  "DeepPi 托管": "DeepPi managed",
+  "当前项目": "Current project",
+  "暂无已安装 Package": "No Packages installed yet",
+  "刷新已安装 Package": "Refresh installed Packages",
+  "全部更新 Pi Package": "Update all Pi Packages",
+  "更新 DeepPi 托管扩展": "Update DeepPi-managed extensions",
+  "全部更新": "Update all",
+  "全部 Package 已更新": "All Packages updated",
+  "安装 Pi Package": "Install Pi Package",
+  "安装 {name}@{version} 并自动启用吗？": "Install {name}@{version} and enable it automatically?",
+  "{name} 已安装并启用": "{name} installed and enabled",
+  "更新 Pi Packages": "Update Pi Packages",
+  "更新当前{scope}范围的全部 Package 吗？": "Update all Packages in the {scope} scope?",
+  "更新 Pi Package": "Update Pi Package",
+  "更新 {name} 吗？": "Update {name}?",
+  "更新 {name}": "Update {name}",
+  "{name} 已更新": "{name} updated",
+  "卸载 Pi Package": "Uninstall Pi Package",
+  "卸载 {name} 吗？": "Uninstall {name}?",
+  "{name} 已卸载": "{name} uninstalled",
+};

@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 use crate::{
     app_paths::AppPaths,
+    message::msg_with,
     pty::PtyManager,
     rpc_transport::{RpcEvent, RpcTransport},
     runtime::RuntimeOperationLock,
@@ -264,6 +265,7 @@ fn validate_command(command: &Value) -> Result<&str, String> {
             | "get_state"
             | "get_messages"
             | "get_available_models"
+            | "compact"
             | "get_commands"
             | "set_model"
             | "set_thinking_level"
@@ -298,29 +300,56 @@ pub async fn rpc_command(
     let kind = validate_command(&command)?.to_owned();
     let transport = app.state::<RpcManager>().get(&task_id, &run_id)?;
     tauri::async_runtime::spawn_blocking(move || {
-        if kind == "extension_ui_response" { transport.notify(command)?; return Ok(Value::Null); }
+        if kind == "extension_ui_response" {
+            transport.notify(command)?;
+            return Ok(Value::Null);
+        }
         if kind == "get_messages" {
             let reply = transport.request_with_cursor(command, Duration::from_secs(30))?;
             return Ok(json!({"messages":reply.data["messages"],"eventSequence":reply.sequence}));
         }
-        let result = transport.request(command, Duration::from_secs(30)).map_err(|error| {
-            if !kind.starts_with("get_") && (error.contains("timed out") || error.contains("process exited")) {
-                format!("RPC_OUTCOME_UNKNOWN: 未收到请求确认，操作可能已经执行。请重新连接并检查会话，勿直接重复发送。({error})")
-            } else { error }
+        // 压缩上下文可能要等模型总结整段历史，放长超时；其余命令保持 30 秒。
+        let timeout = if kind == "compact" {
+            Duration::from_secs(300)
+        } else {
+            Duration::from_secs(30)
+        };
+        let result = transport.request(command, timeout).map_err(|error| {
+            if !kind.starts_with("get_")
+                && (error.contains("timed out") || error.contains("process exited"))
+            {
+                msg_with("rpc.outcome_unknown", &[("error", &error)])
+            } else {
+                error
+            }
         })?;
         if kind == "get_state" {
             app.state::<RpcManager>().get(&task_id, &run_id)?;
-            if let (Some(id), Some(path)) = (result["sessionId"].as_str(), result["sessionFile"].as_str()) {
+            if let (Some(id), Some(path)) =
+                (result["sessionId"].as_str(), result["sessionFile"].as_str())
+            {
                 let store = app.state::<TaskStore>();
                 let task = store.get(&task_id)?.ok_or("Task not found")?;
-                crate::native_pi::validate_reported_session(&app.state::<AppPaths>(), &task, id, path)?;
+                crate::native_pi::validate_reported_session(
+                    &app.state::<AppPaths>(),
+                    &task,
+                    id,
+                    path,
+                )?;
                 store.set_session_file(&task_id, id, path)?;
             }
-            let status = if result["isStreaming"] == true || result["isCompacting"] == true { TaskStatus::Running } else { TaskStatus::Waiting };
-            app.state::<TaskStore>().set_active_status(&task_id, status)?;
+            let status = if result["isStreaming"] == true || result["isCompacting"] == true {
+                TaskStatus::Running
+            } else {
+                TaskStatus::Waiting
+            };
+            app.state::<TaskStore>()
+                .set_active_status(&task_id, status)?;
         }
         Ok(result)
-    }).await.map_err(|error| error.to_string())?
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]

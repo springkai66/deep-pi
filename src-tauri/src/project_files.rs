@@ -7,6 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::message::{msg, msg_with};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
@@ -190,9 +191,9 @@ impl GuardedPath {
             )
         } == 0
         {
-            return Err(format!(
-                "无法识别固定路径：{}",
-                std::io::Error::last_os_error()
+            return Err(msg_with(
+                "files.identity_failed",
+                &[("detail", &std::io::Error::last_os_error().to_string())],
             ));
         }
         Ok(FileIdentity {
@@ -274,9 +275,9 @@ impl GuardedPath {
                 )
             } == 0
             {
-                return Err(format!(
-                    "无法删除选定副本：{}",
-                    std::io::Error::last_os_error()
+                return Err(msg_with(
+                    "files.delete_failed",
+                    &[("detail", &std::io::Error::last_os_error().to_string())],
                 ));
             }
             Ok(())
@@ -314,19 +315,19 @@ impl GuardedPath {
             } else if delete {
                 options.access_mode(FILE_GENERIC_READ | DELETE);
             }
-            let file = options
-                .open(parent)
-                .map_err(|error| format!("无法访问项目路径：{error}"))?;
+            let file = options.open(parent).map_err(|error| {
+                msg_with("files.access_failed", &[("detail", &error.to_string())])
+            })?;
             let metadata = file.metadata().map_err(|error| error.to_string())?;
             if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-                return Err("不支持符号链接与重解析点".into());
+                return Err(msg("files.symlink_unsupported"));
             }
             if final_file && !metadata.is_file() || !final_file && !metadata.is_dir() {
-                return Err("项目条目类型不符合预期".into());
+                return Err(msg("files.unexpected_entry_type"));
             }
             held.push(file);
         }
-        let file = held.pop().ok_or("项目路径没有可用的文件句柄")?;
+        let file = held.pop().ok_or(msg("files.no_file_handle"))?;
         Ok(Self {
             path,
             _ancestors: held,
@@ -380,7 +381,12 @@ fn scan(root: &Path, relative: &str, recursive: bool, limit: usize) -> Result<Fi
         };
         let children = match fs::read_dir(&guard.path) {
             Ok(children) => children,
-            Err(error) if directory == relative => return Err(format!("无法列出目录：{error}")),
+            Err(error) if directory == relative => {
+                return Err(msg_with(
+                    "files.list_dir_failed",
+                    &[("detail", &error.to_string())],
+                ))
+            }
             Err(_) => {
                 if result.unreadable_directories.len() < 100 {
                     result.unreadable_directories.push(directory);
@@ -514,7 +520,7 @@ fn ripgrep_executable(root: &Path) -> Result<GuardedPath, String> {
         .filter(|directory| directory.is_absolute() && !directory.starts_with(root))
         .map(|directory| directory.join("rg.exe"))
         .find_map(|path| pin_external_executable(root, &path).ok())
-        .ok_or_else(|| "未找到 ripgrep (rg.exe)，请配置系统 PATH 后重试".into())
+        .ok_or_else(|| msg("files.ripgrep_missing"))
 }
 
 fn search_cancellable(
@@ -564,7 +570,7 @@ fn search_cancellable(
         .arg(if relative.is_empty() { "." } else { &relative });
     let files = run(&mut enumerate)?;
     if !files.status.success() && files.status.code() != Some(1) {
-        return Err("无法枚举搜索文件，请检查目录权限".into());
+        return Err(msg("files.search_enumerate_failed"));
     }
     let mut result = SearchResult {
         matches: Vec::new(),
@@ -629,7 +635,7 @@ fn search_cancellable(
         }
         let output = run(&mut command)?;
         if !output.status.success() && output.status.code() != Some(1) {
-            return Err("搜索文件失败，请检查目录权限或文件是否可读".into());
+            return Err(msg("files.search_failed"));
         }
         result.truncated |= output.truncated;
         for frame in output.stdout.split_inclusive(|byte| *byte == b'\n') {
@@ -979,7 +985,7 @@ mod tests {
         fn content_search(root: &Path, request: SearchRequest) -> Option<SearchResult> {
             match search_text(root, request) {
                 Ok(result) => Some(result),
-                Err(error) if error.contains("未找到 ripgrep") => {
+                Err(error) if error.contains("files.ripgrep_missing") => {
                     eprintln!("ripgrep (rg.exe) is unavailable; content search assertions skipped");
                     None
                 }

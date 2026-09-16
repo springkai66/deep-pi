@@ -1,3 +1,4 @@
+use crate::message::msg;
 use crate::{
     git_operation::run_git_command, git_repository::GitRepository, project_files::GuardedPath,
 };
@@ -72,9 +73,7 @@ pub struct RemoteVerification {
 }
 
 fn validate_destination(value: &str) -> Result<(), String> {
-    let invalid = || {
-        "不支持或包含敏感参数的推送地址；请使用无内嵌凭据的 HTTPS、SSH 或本地绝对路径".to_string()
-    };
+    let invalid = || msg("git.push.destination_invalid");
     if value.is_empty()
         || value.len() > 4096
         || value.chars().any(char::is_control)
@@ -127,9 +126,9 @@ fn validate_destination(value: &str) -> Result<(), String> {
 fn text(repo: &GitRepository, command: &mut Command) -> Result<String, String> {
     let output = repo.budget.run(command)?;
     if !output.status.success() || output.truncated {
-        return Err("无法完整读取 Git 推送配置".into());
+        return Err(msg("git.push.config_read_failed"));
     }
-    String::from_utf8(output.stdout).map_err(|_| "Git 推送配置不是有效 UTF-8".into())
+    String::from_utf8(output.stdout).map_err(|_| msg("git.push.config_encoding"))
 }
 
 fn configured_targets(repo: &GitRepository) -> Result<Vec<PushTarget>, String> {
@@ -137,7 +136,7 @@ fn configured_targets(repo: &GitRepository) -> Result<Vec<PushTarget>, String> {
     let mut targets = Vec::new();
     for remote in names.lines() {
         if remote.is_empty() || remote.starts_with('-') || remote.chars().any(char::is_control) {
-            return Err("不支持的 Git 远程名称".into());
+            return Err(msg("git.push.remote_name_invalid"));
         }
         let urls = text(
             repo,
@@ -154,7 +153,7 @@ fn configured_targets(repo: &GitRepository) -> Result<Vec<PushTarget>, String> {
                 targets.push(target);
             }
             if targets.len() > 64 {
-                return Err("推送目的地超过 64 个，未展示不完整列表".into());
+                return Err(msg("git.push.too_many_targets"));
             }
         }
     }
@@ -163,7 +162,7 @@ fn configured_targets(repo: &GitRepository) -> Result<Vec<PushTarget>, String> {
 
 fn list_targets(repo: &GitRepository) -> Result<PushTargets, String> {
     let (source_ref, head) = crate::git_commit::head_state(repo)?;
-    let source_oid = head.ok_or("仓库尚无提交，不能推送")?;
+    let source_oid = head.ok_or(msg("git.push.no_commits"))?;
     Ok(PushTargets {
         source_ref,
         source_oid,
@@ -184,14 +183,14 @@ fn prepare_push(
         || branch.starts_with("refs/")
         || branch.chars().any(char::is_control)
     {
-        return Err("目标分支名称无效".into());
+        return Err(msg("git.push.branch_invalid"));
     }
     let target_ref = format!("refs/heads/{branch}");
     let check = repo
         .budget
         .run(repo.command().args(["check-ref-format", &target_ref]))?;
     if !check.status.success() {
-        return Err("目标分支名称无效".into());
+        return Err(msg("git.push.branch_invalid"));
     }
     let targets = list_targets(repo)?;
     if !targets
@@ -199,7 +198,7 @@ fn prepare_push(
         .iter()
         .any(|target| target.remote == remote && target.destination == destination)
     {
-        return Err("远程推送地址已变化，请重新加载并选择目的地".into());
+        return Err(msg("git.push.destination_changed"));
     }
     Ok(PushPreview {
         remote: remote.into(),
@@ -224,15 +223,16 @@ impl PushConfig {
             .write(true)
             .create_new(true)
             .open(&path)
-            .map_err(|_| "无法创建临时推送配置")?;
+            .map_err(|_| msg("git.push.temp_config_failed"))?;
         let mut config = Self {
             path,
             guard: None,
             remote,
         };
-        let quoted = serde_json::to_string(destination).map_err(|_| "无法编码推送地址")?;
+        let quoted =
+            serde_json::to_string(destination).map_err(|_| msg("git.push.encode_failed"))?;
         file.write_all(format!("[remote \"{}\"]\nurl = {}\npushurl = {}\nmirror = false\nreceivepack = git-receive-pack\n",
-            config.remote, quoted, quoted).as_bytes()).map_err(|_| "无法写入临时推送配置")?;
+            config.remote, quoted, quoted).as_bytes()).map_err(|_| msg("git.push.temp_config_write_failed"))?;
         drop(file);
         config.guard = Some(GuardedPath::pin(&config.path, false)?);
         Ok(config)
@@ -305,7 +305,7 @@ fn push_snapshot(repo: &GitRepository, expected: &PushPreview) -> Result<PushRes
         .strip_prefix("refs/heads/")
         .ok_or("Invalid push target")?;
     if prepare_push(repo, &expected.remote, &expected.destination, branch)? != *expected {
-        return Err("源提交、分支或推送目的地已变化，请重新确认".into());
+        return Err(msg("git.push.source_changed"));
     }
     let _local = if Path::new(&expected.destination).is_absolute() {
         Some(GuardedPath::pin(Path::new(&expected.destination), true)?)
@@ -339,18 +339,16 @@ fn push_snapshot(repo: &GitRepository, expected: &PushPreview) -> Result<PushRes
         Err(_) => PushOutcome::Unknown,
     };
     let detail = match outcome {
-        PushOutcome::Pushed => "远程已接受所选提交。",
-        PushOutcome::UpToDate => "远程目标已是所选提交。",
-        PushOutcome::Rejected => "远程拒绝推送，请检查非快进、分支保护或服务器策略；未强推。",
-        PushOutcome::Unknown => {
-            "推送结果未确认。可能是认证、网络、取消或服务端错误；请核对远程目标，勿直接重复推送。"
-        }
+        PushOutcome::Pushed => msg("git.push.detail.pushed"),
+        PushOutcome::UpToDate => msg("git.push.detail.up_to_date"),
+        PushOutcome::Rejected => msg("git.push.detail.rejected"),
+        PushOutcome::Unknown => msg("git.push.detail.unknown"),
     };
     Ok(PushResult {
         outcome,
         source_oid: expected.source_oid.clone(),
         target_ref: expected.target_ref.clone(),
-        detail: detail.into(),
+        detail,
     })
 }
 
@@ -372,28 +370,30 @@ pub(crate) fn check_destination(
         ]),
     )?;
     if resolved.lines().collect::<Vec<_>>() != [destination] {
-        return Err("地址重写改变了已确认的目的地，未执行推送".into());
+        return Err(msg("git.push.rewritten_destination"));
     }
     if push_urls.lines().collect::<Vec<_>>() != [destination] {
-        return Err("推送地址不再是唯一目的地，未执行推送".into());
+        return Err(msg("git.push.ambiguous_destination"));
     }
     Ok(())
 }
 
 fn parse_remote(bytes: &[u8], target: &str, source: &str) -> Result<RemoteVerification, String> {
-    let text = std::str::from_utf8(bytes).map_err(|_| "远程响应不是有效 UTF-8")?;
+    let text = std::str::from_utf8(bytes).map_err(|_| msg("git.push.remote_encoding"))?;
     if !text.is_empty() && !text.ends_with('\n') {
-        return Err("远程响应不完整，未确认目标状态".into());
+        return Err(msg("git.push.remote_incomplete"));
     }
     let mut remote_oid = None;
     for line in text.lines() {
-        let (oid, reference) = line.split_once('\t').ok_or("远程引用格式异常")?;
+        let (oid, reference) = line
+            .split_once('\t')
+            .ok_or(msg("git.push.remote_ref_invalid"))?;
         if reference != target
             || remote_oid.is_some()
             || !matches!(oid.len(), 40 | 64)
             || !oid.bytes().all(|ch| ch.is_ascii_hexdigit())
         {
-            return Err("远程引用格式或范围异常".into());
+            return Err(msg("git.push.remote_ref_out_of_range"));
         }
         remote_oid = Some(oid.to_owned());
     }
@@ -420,7 +420,7 @@ pub(crate) fn verify_remote(
         || !expected.target_ref.starts_with("refs/heads/")
         || expected.target_ref.len() > 523
     {
-        return Err("无效的远程核对请求".into());
+        return Err(msg("git.push.verify_request_invalid"));
     }
     if !repo
         .budget
@@ -431,12 +431,12 @@ pub(crate) fn verify_remote(
         .status
         .success()
     {
-        return Err("目标分支名称无效".into());
+        return Err(msg("git.push.branch_invalid"));
     }
     if !configured_targets(repo)?.iter().any(|target| {
         target.remote == expected.remote && target.destination == expected.destination
     }) {
-        return Err("远程地址已变化，不能用新地址核对旧推送".into());
+        return Err(msg("git.push.remote_address_changed"));
     }
     let _local = if Path::new(&expected.destination).is_absolute() {
         Some(GuardedPath::pin(Path::new(&expected.destination), true)?)
@@ -454,7 +454,7 @@ pub(crate) fn verify_remote(
         &expected.target_ref,
     ]))?;
     if !output.status.success() || output.truncated {
-        return Err("远程核对失败或响应超限；不能判断目标是否存在，请检查认证和连接".into());
+        return Err(msg("git.push.verify_failed"));
     }
     parse_remote(&output.stdout, &expected.target_ref, &expected.source_oid)
 }
@@ -468,9 +468,9 @@ pub async fn project_git_verify_remote(
     expected: PushPreview,
 ) -> Result<RemoteVerification, String> {
     if webview.label() != "main" {
-        return Err("远程核对需要主窗口".into());
+        return Err(msg("git.push.verify_window_required"));
     }
-    run_git_command(app, project_id, operation_id, false, move |repo| {
+    run_git_command(app, project_id, operation_id, None, move |repo| {
         verify_remote(repo, &expected)
     })
     .await
@@ -484,9 +484,9 @@ pub async fn project_git_push_targets(
     operation_id: String,
 ) -> Result<PushTargets, String> {
     if webview.label() != "main" {
-        return Err("推送配置需要主窗口".into());
+        return Err(msg("git.push.targets_window_required"));
     }
-    run_git_command(app, project_id, operation_id, false, list_targets).await
+    run_git_command(app, project_id, operation_id, None, list_targets).await
 }
 
 #[tauri::command]
@@ -496,23 +496,40 @@ pub async fn project_git_push(
     project_id: String,
     operation_id: String,
     expected: PushPreview,
+    dialog: crate::dialog_text::ConfirmDialog,
 ) -> Result<Option<PushResult>, String> {
     if webview.label() != "main" {
-        return Err("Git 推送需要主窗口".into());
+        return Err(msg("git.push.window_required"));
     }
+    dialog.validate()?;
     // 确认弹窗在阻塞线程内仍需 AppHandle，因此保留一份再移交。
     let dialog_app = app.clone();
-    run_git_command(app, project_id, operation_id, false, move |repo| {
-        let branch = expected.target_ref.strip_prefix("refs/heads/").ok_or("Invalid push target")?;
+    run_git_command(app, project_id, operation_id, None, move |repo| {
+        let branch = expected
+            .target_ref
+            .strip_prefix("refs/heads/")
+            .ok_or("Invalid push target")?;
         if prepare_push(repo, &expected.remote, &expected.destination, branch)? != expected {
-            return Err("推送配置或源提交已变化，请重新加载".into());
+            return Err(msg("git.push.config_changed"));
         }
-        let confirmed = dialog_app.dialog().message(format!(
-            "工作树：{}\n远程：{}\n目的地：{}\n目标：{}\n源提交：{}\n\n推送会传输此提交及其可达历史，不限于项目子目录。\n仅更新上述分支，不强推、不附带标签、不递归推送子模块、不运行客户端 hooks。\n使用系统现有凭据；本入口不交互登录、不签署推送证书。",
-            repo.worktree.path.display(), expected.remote, expected.destination, expected.target_ref, expected.source_oid,
-        )).title("确认推送")
-            .buttons(MessageDialogButtons::OkCancelCustom("推送".into(), "取消".into())).blocking_show();
-        if !confirmed { return Ok(None); }
+        let confirmed = dialog_app
+            .dialog()
+            .message(dialog.render(&[
+                ("worktree", repo.worktree.path.display().to_string()),
+                ("remote", expected.remote.clone()),
+                ("destination", expected.destination.clone()),
+                ("target", expected.target_ref.clone()),
+                ("source", expected.source_oid.clone()),
+            ]))
+            .title(dialog.title.clone())
+            .buttons(MessageDialogButtons::OkCancelCustom(
+                dialog.confirm_label.clone(),
+                dialog.cancel_label.clone(),
+            ))
+            .blocking_show();
+        if !confirmed {
+            return Ok(None);
+        }
         push_snapshot(repo, &expected).map(Some)
     })
     .await
@@ -701,7 +718,9 @@ mod tests {
         ]);
         let repo = GitRepository::open(&fixture.root).unwrap();
         let preview = prepare_push(&repo, "origin", remote.to_str().unwrap(), "main").unwrap();
-        assert!(push_snapshot(&repo, &preview).unwrap_err().contains("重写"));
+        assert!(push_snapshot(&repo, &preview)
+            .unwrap_err()
+            .contains("git.push.rewritten_destination"));
         assert!(remote_oid(&fixture, &remote, "refs/heads/main").is_none());
         assert!(remote_oid(&fixture, &redirect, "refs/heads/main").is_none());
     }

@@ -8,13 +8,16 @@
   import { onMount } from "svelte";
   import { Bot } from "@lucide/svelte";
   import {
-    cssFontFamily,
+    cssCodeFontFamily,
+    cssSessionFontFamily,
     isLightColorMode,
+    FONT_SIZE_RANGE,
     type CodeFont,
     type ColorMode,
   } from "$lib/settings";
   import type { TaskStatus } from "$lib/task";
   import { createTerminalSession } from "$lib/terminal-session";
+  import { t, tm } from "$lib/i18n.svelte";
 
   interface Props {
     taskId: string;
@@ -25,12 +28,14 @@
     active: boolean;
     transitioning: boolean;
     codeFont: CodeFont;
+    sessionFontName: string;
+    sessionFontSize: number;
     colorMode: ColorMode;
     onExit: (exitCode: number | null, error: string | null, runId: string) => void;
     onUseConversation: () => void;
   }
 
-  let { taskId, runId = null, title, status, visible, active, transitioning, codeFont, colorMode, onExit, onUseConversation }: Props = $props();
+  let { taskId, runId = null, title, status, visible, active, transitioning, codeFont, sessionFontName, sessionFontSize, colorMode, onExit, onUseConversation }: Props = $props();
   let container: HTMLDivElement;
   let terminal: Terminal | undefined;
   let session = $state<ReturnType<typeof createTerminalSession> | null>(null);
@@ -101,7 +106,8 @@
 
   $effect(() => {
     if (!terminal) return;
-    terminal.options.fontFamily = cssFontFamily(codeFont);
+    terminal.options.fontFamily = cssSessionFontFamily(sessionFontName) || cssCodeFontFamily(codeFont);
+    terminal.options.fontSize = Math.round(Math.min(FONT_SIZE_RANGE.max, Math.max(FONT_SIZE_RANGE.min, sessionFontSize)));
     terminal.options.theme = terminalTheme(isLightColorMode(colorMode));
     requestAnimationFrame(resizeTerminal);
   });
@@ -117,8 +123,8 @@
       convertEol: false,
       cursorBlink: true,
       cursorStyle: "bar",
-      fontFamily: cssFontFamily(codeFont),
-      fontSize: 13,
+      fontFamily: cssSessionFontFamily(sessionFontName) || cssCodeFontFamily(codeFont),
+      fontSize: Math.round(Math.min(FONT_SIZE_RANGE.max, Math.max(FONT_SIZE_RANGE.min, sessionFontSize))),
       lineHeight: 1.15,
       scrollback: 5_000,
       theme: terminalTheme(isLightColorMode(colorMode)),
@@ -153,12 +159,12 @@
         terminalInstance.writeln("");
         terminalInstance.writeln(
           error
-            ? `\x1b[31m${error}\x1b[0m`
+            ? `\x1b[31m${tm(error)}\x1b[0m`
             : `\x1b[90mPi exited with code ${exitCode ?? "unknown"}.\x1b[0m`,
         );
         onExit(exitCode, error, exitedRunId);
       },
-      error: (error) => terminalInstance.writeln(`\r\nTerminal subscription failed: ${String(error)}`),
+      error: (error) => terminalInstance.writeln(`\r\nTerminal subscription failed: ${tm(String(error))}`),
     });
     session = connection;
 
@@ -187,7 +193,7 @@
       currentRun: () => transitioning ? null : runId,
       write: (runId, data) => invoke("write_pi_task", { taskId, runId, data }),
       error: (error) => {
-        terminalInstance.writeln(`\r\n\x1b[31mInput failed: ${String(error)}\x1b[0m`);
+        terminalInstance.writeln(`\r\n\x1b[31mInput failed: ${tm(String(error))}\x1b[0m`);
       },
     });
     const dataDisposable = terminalInstance.onData((data) => inputQueue.send(data));
@@ -228,8 +234,8 @@
 </script>
 
 <section class:hidden={!visible} class="terminal-pane" aria-label={`${title} terminal`}>
-  <header><span>{title}{#if transitioning} · 正在切换模式{/if}</span>
-    <button type="button" title="切换到对话模式" aria-label="切换到对话模式" disabled={transitioning} onclick={onUseConversation}><Bot size={15} /></button>
+  <header><span>{title}{#if transitioning}{t(" · 正在切换模式")}{/if}</span>
+    <button type="button" title={t("切换到对话模式")} aria-label={t("切换到对话模式")} disabled={transitioning} onclick={onUseConversation}><Bot size={15} /></button>
   </header>
   <div class="terminal" bind:this={container}></div>
 </section>
@@ -268,7 +274,7 @@
     white-space: nowrap;
   }
   header span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-  header button { display: grid; place-items: center; width: 26px; height: 26px; flex-shrink: 0; border: 0; border-radius: 4px; color: inherit; background: transparent; cursor: pointer; }
+  header button { display: grid; place-items: center; width: 26px; height: 26px; padding: 0; flex-shrink: 0; border: 0; border-radius: 4px; color: inherit; background: transparent; cursor: pointer; }
   header button:hover:not(:disabled) { background: var(--surface-hover); }
   header button:disabled { opacity: .4; cursor: default; }
 

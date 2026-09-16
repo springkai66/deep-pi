@@ -1,74 +1,52 @@
 :root {
   color-scheme: dark;
-  --page-bg: #111412;
-  --surface: #191d1a;
-  --surface-alt: #161a17;
-  --surface-raised: #202521;
-  --surface-hover: #252b27;
-  --border: #303832;
-  --border-strong: #39423b;
-  --text: #d8ded9;
-  --text-strong: #f4f7f5;
-  --text-muted: #89928b;
-  --text-subtle: #778078;
-  --accent: #8fd6ad;
-  --accent-ink: #111412;
-  --app-font: Inter, "Segoe UI", "Microsoft YaHei UI", sans-serif;
-  --text-font: Inter, "Segoe UI", "Microsoft YaHei UI", sans-serif;
-  --code-font: "Cascadia Mono", Consolas, monospace;
+  /* 默认主题 Command Flow（command-flow）。运行时可被主题包覆盖：applyAppearance 会写入内联变量。 */
+  --page-bg: #0c0e0d;
+  --surface: #141815;
+  --surface-alt: #111613;
+  --surface-raised: #1a201c;
+  --surface-hover: #202822;
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.16);
+  --text: #e6ede8;
+  --text-strong: #f4f8f5;
+  --text-muted: #829186;
+  --text-subtle: #6d7a70;
+  --accent: #52e19d;
+  --accent-ink: #0c0e0d;
+  /* 任务状态色：等待 / 运行中 / 失败 / 已完成。 */
+  --status-waiting: #e5c07b;
+  --status-running: #52e19d;
+  --status-failed: #f87171;
+  --status-done: #60a5fa;
+  --app-font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+  --text-font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+  --code-font: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+  /* 顶栏高度：非工作区尽量少占窗口高度。 */
+  --topbar-h: 32px;
 }
 
 :root[data-color-scheme="light"] {
   color-scheme: light;
-  --page-bg: #f7f8fa;
+  --page-bg: #f6f8f7;
   --surface: #ffffff;
-  --surface-alt: #f4f5f7;
-  --surface-raised: #eef0f3;
-  --surface-hover: #e8edef;
-  --border: #e8ebee;
-  --border-strong: #c5cbd1;
-  --text: #293139;
-  --text-strong: #172129;
-  --text-muted: #56616a;
-  --text-subtle: #66717b;
-  --accent: #2f8a5d;
+  --surface-alt: #eef2f0;
+  --surface-raised: #e6ece8;
+  --surface-hover: #e2eae5;
+  --border: #dfe6e1;
+  --border-strong: #c2cdc6;
+  --text: #26302a;
+  --text-strong: #141a16;
+  --text-muted: #57635b;
+  --text-subtle: #67736b;
+  --accent: #1f8a58;
   --accent-ink: #ffffff;
+  --status-waiting: #a9741a;
+  --status-running: #1f8a58;
+  --status-failed: #b23b34;
+  --status-done: #2563b8;
 }
 
-/* Windows XP（Luna）主题：亮色为经典蓝，暗色为 Royale 黑蓝 */
-:root[data-theme="winxp"][data-color-scheme="light"] {
-  color-scheme: light;
-  --page-bg: #ece9d8;
-  --surface: #f4f2e8;
-  --surface-alt: #efeddd;
-  --surface-raised: #d6d2c2;
-  --surface-hover: #dcd9c8;
-  --border: #aca899;
-  --border-strong: #716f64;
-  --text: #1e1e1e;
-  --text-strong: #000000;
-  --text-muted: #5a584e;
-  --text-subtle: #6d6b60;
-  --accent: #2a5bd7;
-  --accent-ink: #ffffff;
-}
-
-:root[data-theme="winxp"][data-color-scheme="dark"] {
-  color-scheme: dark;
-  --page-bg: #1d2433;
-  --surface: #232c3d;
-  --surface-alt: #202838;
-  --surface-raised: #2c3650;
-  --surface-hover: #33405c;
-  --border: #3a465f;
-  --border-strong: #4a5878;
-  --text: #d6dcec;
-  --text-strong: #f2f5fc;
-  --text-muted: #8b96b3;
-  --text-subtle: #7d88a5;
-  --accent: #5a8be8;
-  --accent-ink: #0d1220;
-}
 
 * {
   box-sizing: border-box;
@@ -84,7 +62,7 @@ body {
 
 .startup-status {
   position: fixed;
-  inset: 48px 0 0;
+  inset: var(--topbar-h, 32px) 0 0;
   z-index: 20;
   display: flex;
   flex-direction: column;
@@ -113,7 +91,7 @@ body {
   color: var(--text);
   background: var(--page-bg);
   font-family: var(--app-font);
-  font-size: 13px;
+  font-size: var(--app-font-size, 13px);
 }
 
 button,
@@ -132,78 +110,31 @@ select:focus-visible {
 
 .app-shell {
   display: grid;
-  grid-template-columns: 52px 260px minmax(0, 1fr);
-  grid-template-rows: 48px minmax(0, 1fr);
+  --rail-w: 48px;
+  grid-template-columns: var(--rail-w) var(--sidebar-w, 260px) minmax(0, 1fr);
+  grid-template-rows: var(--topbar-h, 32px) minmax(0, 1fr);
   width: 100vw;
   height: 100vh;
   background: var(--page-bg);
   font-family: var(--app-font);
+  transition: grid-template-columns .16s ease;
 }
 
 @media (min-width: 1101px) {
-  .app-shell { grid-template-columns: 52px 260px minmax(0, 1fr) 260px; }
-  .app-shell.files-hidden { grid-template-columns: 52px 260px minmax(0, 1fr); }
-  .app-shell.files-visible.git-visible { grid-template-columns: 52px 260px minmax(0, 1fr) 260px 300px; }
-  .app-shell.files-hidden.git-visible { grid-template-columns: 52px 260px minmax(0, 1fr) 300px; }
-  .app-shell.sidebar-hidden { grid-template-columns: 52px minmax(0, 1fr) 260px; }
-  .app-shell.sidebar-hidden.files-hidden { grid-template-columns: 52px minmax(0, 1fr); }
-  .app-shell.sidebar-hidden.files-visible.git-visible { grid-template-columns: 52px minmax(0, 1fr) 260px 300px; }
-  .app-shell.sidebar-hidden.files-hidden.git-visible { grid-template-columns: 52px minmax(0, 1fr) 300px; }
+  .app-shell { grid-template-columns: var(--rail-w) var(--sidebar-w, 260px) minmax(0, 1fr) var(--files-w, 260px); }
+  .app-shell.files-hidden { grid-template-columns: var(--rail-w) var(--sidebar-w, 260px) minmax(0, 1fr); }
+  .app-shell.files-visible.git-visible { grid-template-columns: var(--rail-w) var(--sidebar-w, 260px) minmax(0, 1fr) var(--files-w, 260px) var(--git-w, 300px); }
+  .app-shell.files-hidden.git-visible { grid-template-columns: var(--rail-w) var(--sidebar-w, 260px) minmax(0, 1fr) var(--git-w, 300px); }
+  .app-shell.sidebar-hidden { grid-template-columns: var(--rail-w) minmax(0, 1fr) var(--files-w, 260px); }
+  .app-shell.sidebar-hidden.files-hidden { grid-template-columns: var(--rail-w) minmax(0, 1fr); }
+  .app-shell.sidebar-hidden.files-visible.git-visible { grid-template-columns: var(--rail-w) minmax(0, 1fr) var(--files-w, 260px) var(--git-w, 300px); }
+  .app-shell.sidebar-hidden.files-hidden.git-visible { grid-template-columns: var(--rail-w) minmax(0, 1fr) var(--git-w, 300px); }
 }
 
 .app-shell.dsh-mode {
-  grid-template-columns: 52px minmax(0, 1fr);
+  grid-template-columns: var(--rail-w) minmax(0, 1fr);
 }
 
-/* WinXP：蓝色强调按钮 + 经典凹凸边框感 */
-:root[data-theme="winxp"] .toolbar button.primary,
-:root[data-theme="winxp"] .start-button {
-  border-radius: 3px;
-  border: 1px solid #1c3fa0;
-}
-:root[data-theme="winxp"] .agent-switch button.selected {
-  background: linear-gradient(#7ba2e7, #2a5bd7);
-  color: #ffffff;
-}
-:root[data-theme="winxp"] .session-tab.active {
-  box-shadow: inset 0 -2px #2a5bd7;
-}
-
-.activity-rail {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 4px;
-  border-right: 1px solid var(--border);
-  background: var(--surface);
-  min-height: 0;
-}
-
-.activity-rail button {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  flex-shrink: 0;
-  width: 42px;
-  height: 48px;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--text-muted);
-  cursor: pointer;
-}
-
-.activity-rail button:hover,
-.activity-rail button.active {
-  color: var(--accent);
-  background: var(--surface-hover);
-}
-
-.activity-rail span { font-size: 10px; }
-.activity-rail .rail-settings { margin-top: auto; }
 
 .project-sidebar { display: flex; flex-direction: column; min-width: 0; min-height: 0; border-right: 1px solid var(--border); background: var(--surface-alt); }
 .sidebar-panel { flex: 1; min-height: 0; overflow: hidden; }
@@ -215,60 +146,204 @@ select:focus-visible {
 .file-panel .sidebar-panel { flex: 1; min-height: 0; overflow: hidden; }
 .file-panel .sidebar-panel > .file-sidebar { height: 100%; border: 0; }
 @media (max-width: 1100px) {
-  .file-panel { position: fixed; top: 48px; bottom: 0; right: 0; width: min(260px, calc(100vw - 44px)); z-index: 5; box-shadow: -4px 0 16px #0002; }
+  .file-panel { position: fixed; top: var(--topbar-h, 32px); bottom: 0; right: 0; width: min(260px, calc(100vw - 44px)); z-index: 5; box-shadow: -4px 0 16px #0002; }
 }
 .panel-hidden { display: none !important; }
 
-.topbar {
-  grid-column: 1 / -1;
+/* 面板拖拽调宽把手 */
+.panel-resize-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  z-index: 6;
+  cursor: col-resize;
+  background: transparent;
+}
+.panel-resize-handle:hover, .panel-resize-handle.resizing { background: color-mix(in srgb, var(--accent) 35%, transparent); }
+.resize-right { right: -3px; }
+.resize-left { left: -3px; }
+body.panel-resizing { cursor: col-resize; user-select: none; }
+
+aside.project-sidebar, aside.file-panel, aside.git-sidebar { position: relative; }
+
+/* 面板折叠按钮：骑在侧栏与中间窗口的分界线上（左右各压一半）。 */
+.panel-toggle {
+  position: absolute;
+  z-index: 7;
   display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr);
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  color: var(--text-muted);
+  background: var(--surface-raised);
+  cursor: pointer;
+}
+
+.panel-toggle:hover {
+  color: var(--text-strong);
+  background: var(--surface-hover);
+}
+
+.project-sidebar > .panel-toggle { top: 12px; right: -13px; }
+.file-panel > .panel-toggle { top: 8px; left: -13px; }
+
+/* 展开按钮：该侧已收起，没有分界线只有窗口边缘，因此贴窗口边摆放；垂直位置与折叠按钮一致，切换时不跳动。 */
+.workspace > .panel-toggle.sidebar-toggle { top: 12px; left: 3px; }
+.workspace > .panel-toggle.files-toggle { top: 8px; right: 3px; }
+
+/* 为压线/贴边按钮预留位置，避免压住搜索框与标签。 */
+.app-shell .project-sidebar .task-search { margin-right: 24px; }
+.app-shell .file-panel .file-project-selector { padding-left: 30px; }
+.app-shell.sidebar-hidden .workspace .task-tabs-shell,
+.app-shell.files-hidden .workspace .task-tabs-shell {
+  background: var(--surface-alt);
+  border-bottom: 1px solid var(--border);
+}
+.app-shell.sidebar-hidden .workspace .task-tabs-shell { padding-left: 34px; }
+/* 极窄控制柱（Command Rail）：常驻左侧，承载工作区切换与设置入口。 */
+.command-rail {
+  grid-column: 1;
+  grid-row: 1 / -1;
+  display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 16px;
-  padding: 0 12px;
+  gap: 6px;
+  min-height: 0;
+  padding: 8px 0;
+  border-right: 1px solid var(--border);
+  background: var(--page-bg);
+  z-index: 8;
+}
+
+.rail-brand {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  margin-bottom: 2px;
+  border: 1px solid var(--accent);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.rail-divider { width: 22px; height: 1px; flex-shrink: 0; background: var(--border); }
+.rail-spacer { flex: 1; min-height: 0; }
+
+.rail-item {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  color: var(--text-muted);
+  background: transparent;
+  cursor: pointer;
+}
+
+.rail-item:hover { color: var(--text-strong); background: var(--surface-hover); }
+.rail-item.selected { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+
+.rail-item.selected::before {
+  content: "";
+  position: absolute;
+  left: -8px;
+  top: 7px;
+  bottom: 7px;
+  width: 3px;
+  border-radius: 0 2px 2px 0;
+  background: var(--accent);
+}
+
+/* 顶部面包屑：替代原品牌区，显示「项目 / 当前任务」。 */
+.stage-crumbs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 12px;
+}
+
+.crumb-project {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  padding: 3px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text-strong);
+  font-weight: 500;
+}
+
+.crumb-dot { width: 6px; height: 6px; flex-shrink: 0; border-radius: 50%; background: var(--accent); }
+.crumb-sep { color: var(--text-subtle); }
+.crumb-task { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); }
+.app-shell.files-hidden .workspace .task-tabs-shell { padding-right: 34px; }
+
+.topbar {
+  grid-column: 2 / -1;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  padding: 0 10px;
   border-bottom: 1px solid var(--border);
   background: var(--surface);
 }
 
-.brand,
 .agent-switch,
 .toolbar {
   display: flex;
   align-items: center;
 }
 
-.brand {
-  gap: 8px;
-  color: #f4f7f5;
-}
-
-.brand strong {
-  font-size: 14px;
-}
-
 .agent-switch {
+  display: flex;
+  align-items: center;
+  gap: 2px;
   padding: 2px;
-  border: 1px solid #39423b;
+  border: 1px solid var(--border-strong);
   border-radius: 5px;
-  background: var(--page-bg);
+  background: var(--surface-alt);
 }
 
 .agent-switch button {
-  min-width: 48px;
-  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  height: 22px;
+  padding: 0 8px;
+  font-size: 12px;
   border: 0;
   border-radius: 3px;
   color: #89928b;
   background: transparent;
 }
 
+.agent-switch button:hover { color: var(--text); }
 .agent-switch button.selected {
-  color: #111412;
-  background: #8fd6ad;
+  color: var(--accent-ink);
+  background: var(--accent);
   font-weight: 700;
 }
 
 .toolbar {
+  justify-self: end;
   justify-content: flex-end;
   gap: 5px;
 }
@@ -285,8 +360,9 @@ select:focus-visible {
 }
 
 .toolbar button {
-  width: 30px;
-  height: 30px;
+  width: 24px;
+  height: 24px;
+  padding: 0;
 }
 
 .toolbar button:hover,
@@ -315,6 +391,11 @@ select:focus-visible {
   overflow: auto;
   border-right: 1px solid var(--border);
   background: var(--surface-alt);
+}
+
+/* 侧栏底部不再放设置按钮（已在控制柱），任务列表补满整个高度。 */
+.project-sidebar > .task-sidebar {
+  flex: 1 1 auto;
 }
 
 .projects-section {
@@ -347,6 +428,7 @@ select:focus-visible {
   place-items: center;
   width: 26px;
   height: 26px;
+  padding: 0;
   border-radius: 4px;
 }
 
@@ -376,7 +458,8 @@ select:focus-visible {
 }
 
 .project-group.selected {
-  background: #1e251f;
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 
 .project-header {
@@ -404,6 +487,7 @@ select:focus-visible {
   place-items: center;
   width: 26px;
   height: 26px;
+  padding: 0;
   border-radius: 4px;
 }
 
@@ -544,33 +628,6 @@ select:focus-visible {
   border-top: 1px solid var(--border);
 }
 
-.sidebar-footer {
-  margin-top: auto;
-  padding: 8px;
-  border-top: 1px solid #303832;
-}
-
-.sidebar-footer button {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  min-height: 34px;
-  padding: 0 8px;
-  border: 1px solid transparent;
-  border-radius: 4px;
-  color: #aeb7b0;
-  background: transparent;
-  cursor: pointer;
-}
-
-.sidebar-footer button:hover,
-.sidebar-footer button.active {
-  border-color: var(--border-strong);
-  color: var(--text-strong);
-  background: var(--surface-hover);
-}
-
 .context-menu {
   position: fixed;
   z-index: 12;
@@ -616,6 +673,14 @@ select:focus-visible {
   grid-template-rows: minmax(0, 1fr);
 }
 
+
+/* 任务看板视图：占满整个工作区（跨过标签行）。 */
+.board-view {
+  grid-row: 1 / -1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
 .workspace-content {
   min-width: 0;
   min-height: 0;
@@ -675,6 +740,7 @@ select:focus-visible {
 
 .dsh-error strong { font-size: 13px; }
 .dsh-error small { color: #e3aaa4; line-height: 1.5; }
+.dsh-error-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 
 .empty-state {
   grid-row: 1 / -1;
@@ -725,7 +791,7 @@ select:focus-visible {
 
 @media (max-width: 900px) {
   .app-shell {
-    grid-template-columns: 52px 220px minmax(0, 1fr);
+    grid-template-columns: var(--rail-w, 48px) 220px minmax(0, 1fr);
   }
 
   .topbar {
@@ -743,14 +809,11 @@ select:focus-visible {
 }
 
 @media (max-width: 620px) {
-  .app-shell { grid-template-columns: 44px minmax(150px, 38%) minmax(0, 1fr); }
-  .app-shell.sidebar-hidden, .app-shell.dsh-mode { grid-template-columns: 44px minmax(0, 1fr); }
-  .activity-rail button { width: 36px; }
-  .topbar { padding: 0 4px; gap: 4px; grid-template-columns: auto minmax(0, 1fr); }
-  .brand strong, .topbar .toolbar { display: none; }
+  .app-shell { --rail-w: 40px; grid-template-columns: var(--rail-w) minmax(150px, 38%) minmax(0, 1fr); }
+  .app-shell.sidebar-hidden { grid-template-columns: var(--rail-w) minmax(0, 1fr); }
+  .app-shell.dsh-mode { grid-template-columns: var(--rail-w) minmax(0, 1fr); }
 }
-
-:root[data-color-scheme="light"] body,
+  :root[data-color-scheme="light"] body,
 :root[data-color-scheme="light"] .app-shell {
   color: var(--text) !important;
   background: var(--page-bg) !important;
@@ -771,7 +834,6 @@ select:focus-visible {
   background: var(--surface-alt) !important;
 }
 
-:root[data-color-scheme="light"] .brand,
 :root[data-color-scheme="light"] .project-copy strong,
 :root[data-color-scheme="light"] .task-copy strong,
 :root[data-color-scheme="light"] .empty-state h1 {
@@ -781,7 +843,6 @@ select:focus-visible {
 :root[data-color-scheme="light"] .agent-switch button,
 :root[data-color-scheme="light"] .toolbar button,
 :root[data-color-scheme="light"] .task-actions button,
-:root[data-color-scheme="light"] .sidebar-footer button,
 :root[data-color-scheme="light"] .project-add,
 :root[data-color-scheme="light"] .project-open,
 :root[data-color-scheme="light"] .project-copy small,
@@ -795,8 +856,6 @@ select:focus-visible {
 :root[data-color-scheme="light"] .toolbar button:hover,
 :root[data-color-scheme="light"] .toolbar button.active,
 :root[data-color-scheme="light"] .task-actions button:hover,
-:root[data-color-scheme="light"] .sidebar-footer button:hover,
-:root[data-color-scheme="light"] .sidebar-footer button.active,
 :root[data-color-scheme="light"] .project-open:hover,
 :root[data-color-scheme="light"] .project-add:hover,
 :root[data-color-scheme="light"] .task-row:hover {
@@ -805,9 +864,6 @@ select:focus-visible {
   background: var(--surface-hover) !important;
 }
 
-:root[data-color-scheme="light"] .project-group.selected {
-  background: var(--surface-raised) !important;
-}
 
 :root[data-color-scheme="light"] .agent-switch button.selected,
 :root[data-color-scheme="light"] .toolbar button.primary,

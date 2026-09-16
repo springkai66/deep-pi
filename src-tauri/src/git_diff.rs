@@ -1,3 +1,4 @@
+use crate::message::{msg, msg_with};
 use crate::{
     git_operation::run_git_command,
     git_repository::GitRepository,
@@ -58,7 +59,7 @@ fn pin_worktree_entry(repo: &GitRepository, relative: &str) -> Result<GuardedPat
     match fs::symlink_metadata(&path) {
         Ok(metadata) => {
             if metadata.len() > 8 * 1024 * 1024 {
-                return Err("工作区文件超过 8 MiB，请在外部 Git 工具中查看".into());
+                return Err(msg("git.diff.worktree_too_large"));
             }
             GuardedPath::open(&repo.project.path, relative, false)
         }
@@ -93,7 +94,7 @@ fn read_diff(repo: &GitRepository, request: DiffRequest) -> Result<GitDiff, Stri
         .entries
         .iter()
         .find(|entry| entry.path == request.path)
-        .ok_or("文件状态已变化，请刷新变更列表")?;
+        .ok_or(msg("git.diff.status_changed"))?;
     let eligible = match request.area {
         DiffArea::Staged => entry.kind == EntryKind::Tracked && entry.index_status != '.',
         DiffArea::Unstaged => entry.kind == EntryKind::Tracked && entry.worktree_status != '.',
@@ -101,7 +102,7 @@ fn read_diff(repo: &GitRepository, request: DiffRequest) -> Result<GitDiff, Stri
         DiffArea::Conflict => entry.kind == EntryKind::Conflict,
     };
     if !eligible {
-        return Err("文件已不属于所选变更分组，请刷新后重试".into());
+        return Err(msg("git.diff.group_changed"));
     }
     let _file = if request.area != DiffArea::Staged {
         Some(pin_worktree_entry(repo, &request.path)?)
@@ -159,9 +160,9 @@ fn read_diff(repo: &GitRepository, request: DiffRequest) -> Result<GitDiff, Stri
     if !output.status.success()
         && !(request.area == DiffArea::Untracked && output.status.code() == Some(1))
     {
-        return Err(format!(
-            "Git 差异读取失败（退出码 {:?}），请刷新或在可信终端检查仓库",
-            output.status.code()
+        return Err(msg_with(
+            "git.diff.read_failed",
+            &[("code", &format!("{:?}", output.status.code()))],
         ));
     }
     let (mut patch, mut format) = match std::str::from_utf8(&output.stdout) {
@@ -200,9 +201,9 @@ pub async fn project_git_diff(
     operation_id: String,
 ) -> Result<GitDiff, String> {
     if webview.label() != "main" {
-        return Err("Git 差异读取需要主窗口".into());
+        return Err(msg("git.diff.window_required"));
     }
-    run_git_command(app, project_id, operation_id, false, move |repo| {
+    run_git_command(app, project_id, operation_id, None, move |repo| {
         read_diff(repo, request)
     })
     .await

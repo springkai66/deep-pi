@@ -1,4 +1,5 @@
 use crate::git_status::{read_status_for_index, EntryKind, GitEntry, GitStatus};
+use crate::message::{msg, msg_with};
 use crate::{
     git_operation::{run_git_command, GitBudget},
     git_repository::GitRepository,
@@ -17,7 +18,12 @@ const MAX_INDEX_BYTES: u64 = 32 * 1024 * 1024;
 fn read_index(path: &Path) -> Result<Option<Vec<u8>>, String> {
     match fs::symlink_metadata(path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(format!("无法读取 Git 索引: {error}")),
+        Err(error) => {
+            return Err(msg_with(
+                "git.index.read_failed",
+                &[("detail", &error.to_string())],
+            ))
+        }
         Ok(_) => {}
     }
     let _guard = GuardedPath::pin(path, false)?;
@@ -28,7 +34,7 @@ fn read_index(path: &Path) -> Result<Option<Vec<u8>>, String> {
         .read_to_end(&mut bytes)
         .map_err(|error| error.to_string())?;
     if bytes.len() as u64 > MAX_INDEX_BYTES {
-        return Err("Git 索引超过 32 MiB，未执行写入".into());
+        return Err(msg("git.index.too_large"));
     }
     Ok(Some(bytes))
 }
@@ -51,8 +57,13 @@ impl IndexTransaction {
         repo.budget.check()?;
         let metadata = GuardedPath::pin(repo.git_dir(), true)?;
         let lock_path = repo.git_dir().join("index.lock");
-        let lock = OpenOptions::new().write(true).create_new(true).open(&lock_path)
-            .map_err(|error| format!("无法取得 Git 索引锁，未执行写入；请检查其他 Git 操作（不会删除已有锁）: {error}"))?;
+        let lock = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock_path)
+            .map_err(|error| {
+                msg_with("git.index.lock_failed", &[("detail", &error.to_string())])
+            })?;
         let directory = repo
             .git_dir()
             .join(format!("deeppi-index-{}", uuid::Uuid::new_v4()));
@@ -85,9 +96,9 @@ impl IndexTransaction {
     pub(crate) fn run(&self, repo: &GitRepository, args: &[&str]) -> Result<(), String> {
         let output = repo.budget.run(self.command(repo).args(args))?;
         if !output.status.success() || output.truncated {
-            return Err(format!(
-                "Git 索引操作未完成（退出码 {:?}），真实索引未更新；请检查文件状态或过滤器",
-                output.status.code()
+            return Err(msg_with(
+                "git.index.operation_failed",
+                &[("code", &format!("{:?}", output.status.code()))],
             ));
         }
         Ok(())
@@ -127,15 +138,22 @@ impl IndexTransaction {
 
     pub(crate) fn commit(mut self, budget: &GitBudget) -> Result<(), String> {
         budget.check()?;
-        let bytes = read_index(&self.temporary_index)?.ok_or("Git 未生成临时索引，未执行写入")?;
-        let lock = self.lock.as_mut().ok_or("Git 索引事务已结束")?;
+        let bytes = read_index(&self.temporary_index)?.ok_or(msg("git.index.not_generated"))?;
+        let lock = self
+            .lock
+            .as_mut()
+            .ok_or(msg("git.index.transaction_finished"))?;
         lock.write_all(&bytes)
             .and_then(|()| lock.sync_all())
             .map_err(|error| error.to_string())?;
         budget.check()?;
         // No cancellable work follows this atomic publication point.
-        fs::rename(&self.lock_path, &self.index)
-            .map_err(|error| format!("无法发布 Git 索引，原索引未替换: {error}"))?;
+        fs::rename(&self.lock_path, &self.index).map_err(|error| {
+            msg_with(
+                "git.index.publish_failed",
+                &[("detail", &error.to_string())],
+            )
+        })?;
         self.published = true;
         Ok(())
     }
@@ -172,6 +190,36 @@ pub struct IndexRequest {
     action: IndexAction,
 }
 
+/// 前端传入的三分支确认文案（前端掌握当前语言，后端不持有任何文案）。
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct IndexDialogs {
+    pub stage: crate::dialog_text::ConfirmDialog,
+    pub unstage: crate::dialog_text::ConfirmDialog,
+    pub resolve: crate::dialog_text::ConfirmDialog,
+}
+
+impl IndexDialogs {
+    /// 校验三个分支的文案，字段错误会直接指向出问题的分支。
+    pub fn validate(&self) -> Result<(), String> {
+        self.stage.validate()?;
+        self.unstage.validate()?;
+        self.resolve.validate()
+    }
+}
+
+/// 按操作类型选取对应的确认文案分支。
+fn dialog_for<'a>(
+    dialogs: &'a IndexDialogs,
+    action: IndexAction,
+) -> &'a crate::dialog_text::ConfirmDialog {
+    match action {
+        IndexAction::Stage => &dialogs.stage,
+        IndexAction::Unstage => &dialogs.unstage,
+        IndexAction::Resolve => &dialogs.resolve,
+    }
+}
+
 fn selected_paths(
     repo: &GitRepository,
     request: &IndexRequest,
@@ -183,12 +231,12 @@ fn selected_paths(
         .entries
         .iter()
         .find(|current| current.path == entry.path)
-        .ok_or("文件状态已变化，请刷新并重新选择，不会自动重试写入")?;
+        .ok_or(msg("git.index.status_changed"))?;
     if current.source_outside_project {
-        return Err("重命名跨越项目边界，请从完整仓库项目中操作".into());
+        return Err(msg("git.index.rename_outside_project"));
     }
     if current != entry {
-        return Err("文件状态已变化，请刷新并重新选择，不会自动重试写入".into());
+        return Err(msg("git.index.status_changed"));
     }
     let eligible = match request.action {
         IndexAction::Stage => {
@@ -199,11 +247,18 @@ fn selected_paths(
         IndexAction::Resolve => entry.kind == EntryKind::Conflict,
     };
     if !eligible {
-        return Err("文件不属于此操作对应的变更分组，请刷新后重试".into());
+        return Err(msg("git.index.group_changed"));
     }
     let mut paths = vec![path];
     if request.action == IndexAction::Unstage && entry.index_status == 'R' {
-        paths.push(repo.to_repo_path(entry.original_path.as_deref().ok_or("重命名缺少源路径")?)?);
+        paths.push(
+            repo.to_repo_path(
+                entry
+                    .original_path
+                    .as_deref()
+                    .ok_or(msg("git.index.rename_source_missing"))?,
+            )?,
+        );
     }
     Ok(paths)
 }
@@ -223,7 +278,7 @@ fn change_index(repo: &GitRepository, request: &IndexRequest) -> Result<(), Stri
             match fs::symlink_metadata(&absolute) {
                 Ok(metadata) => {
                     if metadata.len() > 8 * 1024 * 1024 {
-                        return Err("工作区文件超过 8 MiB，未执行暂存".into());
+                        return Err(msg("git.index.worktree_too_large"));
                     }
                     held = Some(GuardedPath::open(
                         &repo.project.path,
@@ -234,7 +289,7 @@ fn change_index(repo: &GitRepository, request: &IndexRequest) -> Result<(), Stri
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     if request.entry.kind == EntryKind::Untracked {
-                        return Err("新文件已消失，请刷新后重试".into());
+                        return Err(msg("git.index.new_file_missing"));
                     }
                     // Remove only this index entry, even if a directory is recreated at its path.
                     vec!["update-index", "--force-remove", "--"]
@@ -256,41 +311,29 @@ pub async fn project_git_change_index(
     app: tauri::AppHandle,
     project_id: String,
     request: IndexRequest,
+    // 三个分支的确认文案；由前端按当前语言传入，后端不持有任何文案。
+    dialogs: IndexDialogs,
     operation_id: String,
 ) -> Result<bool, String> {
     if webview.label() != "main" {
-        return Err("Git 写入需要主窗口".into());
+        return Err(msg("git.index.window_required"));
     }
+    dialogs.validate()?;
     // 确认弹窗在阻塞线程内仍需 AppHandle，因此保留一份再移交。
     let dialog_app = app.clone();
-    run_git_command(app, project_id, operation_id, false, move |repo| {
+    run_git_command(app, project_id, operation_id, None, move |repo| {
         let paths = selected_paths(repo, &request, &read_status_for_index(repo)?)?;
-        let (title, detail) = match request.action {
-            IndexAction::Stage => (
-                "暂存所选文件",
-                "将执行时的工作区内容加入暂存区，不修改工作区文件。",
-            ),
-            IndexAction::Unstage => (
-                "取消所选文件暂存",
-                "将所选索引路径恢复到当前提交，保留工作区文件。",
-            ),
-            IndexAction::Resolve => (
-                "标记冲突已解决",
-                "以执行时的工作区内容替换冲突索引；缺失文件按删除处理。请先确认冲突已解决。",
-            ),
-        };
+        let dialog = dialog_for(&dialogs, request.action);
         let confirmed = dialog_app
             .dialog()
-            .message(format!(
-                "{}\n\n工作树：{}\n\n{}\n\nGit 会使用已信任的仓库配置和文件过滤器。",
-                detail,
-                repo.worktree.path.display(),
-                paths.join("\n"),
-            ))
-            .title(title)
+            .message(dialog.render(&[
+                ("worktree", repo.worktree.path.display().to_string()),
+                ("paths", paths.join("\n")),
+            ]))
+            .title(dialog.title.clone())
             .buttons(MessageDialogButtons::OkCancelCustom(
-                title.into(),
-                "取消".into(),
+                dialog.confirm_label.clone(),
+                dialog.cancel_label.clone(),
             ))
             .blocking_show();
         if !confirmed {
@@ -489,7 +532,9 @@ mod tests {
         fixture.git(&["mv", "--", "outside.txt", "nested/moved.txt"]);
         let repo = GitRepository::open(&fixture.root.join("nested")).unwrap();
         let cross = request(&repo, "moved.txt", IndexAction::Unstage);
-        assert!(change_index(&repo, &cross).unwrap_err().contains("边界"));
+        assert!(change_index(&repo, &cross)
+            .unwrap_err()
+            .contains("git.index.rename_outside_project"));
         drop(repo);
         fixture.git(&["commit", "-m", "move"]);
         fs::remove_file(fixture.root.join("nested/moved.txt")).unwrap();
@@ -592,5 +637,66 @@ mod tests {
         let repo = GitRepository::open(&fixture.root).unwrap();
         change_index(&repo, &request(&repo, "file.txt", IndexAction::Stage)).unwrap();
         assert!(!fixture.root.join("hook-ran.txt").exists());
+    }
+}
+
+/// 纯逻辑对话框测试：不调用 Git、不依赖临时仓库，任何平台都能编译执行。
+#[cfg(test)]
+mod dialog_tests {
+    use super::*;
+    use crate::dialog_text::ConfirmDialog;
+
+    fn dialog(message: &str) -> ConfirmDialog {
+        ConfirmDialog {
+            title: "Confirm".into(),
+            message: message.into(),
+            confirm_label: "OK".into(),
+            cancel_label: "Cancel".into(),
+            terms: std::collections::BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn dialog_for_selects_the_branch_matching_the_action() {
+        let dialogs = IndexDialogs {
+            stage: dialog("stage-message"),
+            unstage: dialog("unstage-message"),
+            resolve: dialog("resolve-message"),
+        };
+        assert_eq!(
+            dialog_for(&dialogs, IndexAction::Stage).message,
+            "stage-message"
+        );
+        assert_eq!(
+            dialog_for(&dialogs, IndexAction::Unstage).message,
+            "unstage-message"
+        );
+        assert_eq!(
+            dialog_for(&dialogs, IndexAction::Resolve).message,
+            "resolve-message"
+        );
+    }
+
+    #[test]
+    fn index_dialog_message_renders_worktree_and_paths() {
+        let dialog = dialog("worktree: {worktree}\npaths:\n{paths}\nend");
+        assert_eq!(
+            dialog.render(&[
+                ("worktree", "F:/work".into()),
+                ("paths", "a.txt\nb.txt".into()),
+            ]),
+            "worktree: F:/work\npaths:\na.txt\nb.txt\nend"
+        );
+    }
+
+    #[test]
+    fn deserializes_the_three_branch_payload() {
+        let payload = r#"{"stage":{"title":"A","message":"S {worktree}","confirmLabel":"Yes","cancelLabel":"No"},"unstage":{"title":"B","message":"U {paths}","confirmLabel":"Yes","cancelLabel":"No"},"resolve":{"title":"C","message":"R","confirmLabel":"Yes","cancelLabel":"No"}}"#;
+        let dialogs: IndexDialogs = serde_json::from_str(payload).unwrap();
+        dialogs.validate().unwrap();
+        assert_eq!(
+            dialog_for(&dialogs, IndexAction::Unstage).render(&[("paths", "one.txt".into())]),
+            "U one.txt"
+        );
     }
 }

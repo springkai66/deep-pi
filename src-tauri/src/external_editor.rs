@@ -5,6 +5,8 @@ use std::{
 };
 use tauri::{Manager, State};
 
+use crate::message::{msg, msg_with};
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum EditorKind {
@@ -38,7 +40,7 @@ impl ExternalEditor {
             || !path.is_absolute()
             || !supported
         {
-            return Err("请选择对应编辑器的绝对 .exe 路径".into());
+            return Err(msg("external_editor.absolute_exe_required"));
         }
         Ok(())
     }
@@ -55,9 +57,11 @@ fn arguments(
         || line.is_some_and(|value| value > 100_000_000)
         || column.is_some_and(|value| value > 100_000_000)
     {
-        return Err("文件行列必须在 1 到 100000000 之间".into());
+        return Err(msg("external_editor.line_column_range"));
     }
-    let path = path.to_str().ok_or("文件路径不是有效 Unicode")?;
+    let path = path
+        .to_str()
+        .ok_or(msg("external_editor.path_not_unicode"))?;
     match kind {
         EditorKind::Vscode if line.is_some() => Ok(vec![
             "--goto".into(),
@@ -91,7 +95,7 @@ pub async fn open_project_in_editor(
         .state::<crate::settings::SettingsStore>()
         .get()?
         .external_editor
-        .ok_or("尚未配置外部编辑器，请先打开设置")?;
+        .ok_or(msg("external_editor.not_configured"))?;
     tauri::async_runtime::spawn_blocking(move || {
         editor.validate()?;
         let root = Path::new(&root);
@@ -101,7 +105,12 @@ pub async fn open_project_in_editor(
         let mut command = Command::new(&executable.path);
         command
             .args(arguments(editor.kind, &file.path, line, column)?)
-            .current_dir(executable.path.parent().ok_or("编辑器路径无父目录")?)
+            .current_dir(
+                executable
+                    .path
+                    .parent()
+                    .ok_or(msg("external_editor.parent_missing"))?,
+            )
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -111,9 +120,12 @@ pub async fn open_project_in_editor(
             command.creation_flags(0x0800_0000);
         }
         // The user's editor is independent of the host's task process trees.
-        let child = command
-            .spawn()
-            .map_err(|error| format!("无法启动外部编辑器: {error}"))?;
+        let child = command.spawn().map_err(|error| {
+            msg_with(
+                "external_editor.launch_failed",
+                &[("error", &error.to_string())],
+            )
+        })?;
         drop(child);
         Ok(())
     })

@@ -2,6 +2,7 @@
   import { X } from "@lucide/svelte";
   import { tick } from "svelte";
   import type { DialogRequest, DialogValue } from "$lib/dialog";
+  import { t } from "$lib/i18n.svelte";
 
   interface Props {
     request: DialogRequest | null;
@@ -62,7 +63,7 @@
     >
       <header>
         <h2 id={`dialog-title-${request.id}`}>{request.title}</h2>
-        <button class="icon-button" type="button" aria-label="关闭" title="关闭" onclick={cancel}>
+        <button class="icon-button" type="button" aria-label={t("关闭对话框")} title={t("关闭对话框")} onclick={cancel}>
           <X size={17} />
         </button>
       </header>
@@ -103,10 +104,10 @@
           }}
         >
           {#if request.kind !== "alert"}
-            <button class="secondary-button" type="button" onclick={cancel}>取消</button>
+            <button class="secondary-button" type="button" onclick={cancel}>{t("取消")}</button>
           {/if}
           <button bind:this={confirmButton} class="primary-button" type="submit">
-            {request.confirmLabel ?? (request.kind === "alert" ? "知道了" : "确认")}
+            {request.confirmLabel ?? (request.kind === "alert" ? t("知道了") : t("确认"))}
           </button>
         </form>
       {/if}
@@ -172,6 +173,7 @@
     place-items: center;
     width: 28px;
     height: 28px;
+    padding: 0;
     border: 1px solid transparent;
     color: #9aa49c;
     background: transparent;

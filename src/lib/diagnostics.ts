@@ -1,3 +1,6 @@
+import { isAppMessage, appMessageText } from "./app-messages";
+import { getLocale } from "./i18n.svelte";
+
 export const DIAGNOSTIC_LABELS = {
   process_starting: "进程启动", spawn_failed: "进程创建失败", process_exit: "进程退出",
   stop_requested: "请求停止", stop_timeout: "停止超时", input_write_failed: "输入管道写入失败",
@@ -63,7 +66,8 @@ export function createDiagnosticsController(ports: Ports) {
     publish({ busy: true, error: "", status: "" });
     ports.busy(true);
     try { await action(); }
-    catch (error) { publish({ error: typeof error === "string" && SAFE_DIAGNOSTIC_ERRORS.has(error) ? error : failure }); }
+    // 白名单文案与后端消息码都来自后端且可安全展示；其它任意 IPC 文本一律回落到本地文案。
+    catch (error) { publish({ error: typeof error === "string" && (SAFE_DIAGNOSTIC_ERRORS.has(error) || isAppMessage(error)) ? error : failure }); }
     finally { publish({ busy: false }); ports.busy(false); }
   }
   async function load() {
@@ -74,7 +78,11 @@ export function createDiagnosticsController(ports: Ports) {
     refresh: () => operation(load, "无法读取诊断，请重试"),
     export: () => operation(async () => {
       if (!state.report) return;
-      const saved = await ports.invoke("diagnostics_export", { snapshotId: state.report.snapshotId });
+      // 原生保存对话框的标题由前端按当前语言传入，后端不持有任何文案。
+      const saved = await ports.invoke("diagnostics_export", {
+        snapshotId: state.report.snapshotId,
+        dialogTitle: appMessageText("diagnostics.export_dialog_title", getLocale()),
+      });
       publish({ status: saved ? "报告已导出" : "已取消导出" });
     }, "无法确认报告是否导出；请检查保存位置。预览过期时请刷新后重试"),
     clear: () => operation(async () => {

@@ -19,6 +19,7 @@ use uuid::Uuid;
 use crate::{
     app_paths::AppPaths,
     bridge,
+    message::msg,
     runtime::RuntimeOperationLock,
     settings::SettingsStore,
     task::{TaskRecord, TaskStatus, TaskStore},
@@ -155,7 +156,7 @@ impl PtyManager {
             .get(task_id)
             .is_some_and(|task| task.gate.run_id == run_id)
         {
-            Err("终端仍在结束输出，请稍后重试切换".into())
+            Err(msg("pty.terminal_busy"))
         } else {
             Ok(())
         }

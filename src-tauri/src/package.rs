@@ -11,7 +11,8 @@ use serde_json::Value;
 use tauri::{AppHandle, Manager, State};
 
 use crate::{
-    app_paths::AppPaths, process_runner, runtime::RuntimeOperationLock, snapshot::Snapshot,
+    app_paths::AppPaths, message::msg, process_runner, runtime::RuntimeOperationLock,
+    snapshot::Snapshot,
 };
 
 const MANAGED_ENVIRONMENT: &str = "managed";
@@ -279,7 +280,7 @@ fn package_operation_inner(
         .try_lock()
         .map_err(|_| "Pi package operation is already unavailable".to_string())?;
     if pty_manager.is_running()? || rpc_manager.count()? > 0 {
-        return Err("请先停止所有 Pi 任务，再修改扩展，以确保可以安全恢复".into());
+        return Err(msg("package.tasks_running"));
     }
     let (mut command, cwd) = package_command(&paths, &request)?;
     let roots = [paths.pi_home.clone(), cwd.join(".pi")];

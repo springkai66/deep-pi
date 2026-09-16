@@ -330,6 +330,7 @@ use std::{
 use tauri::{Manager, State};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 
+use crate::message::{msg, msg_with};
 use crate::{
     project_edit::FileEditGate,
     project_files::{
@@ -401,16 +402,16 @@ fn validate_record(target: &str, path: &str, kind: &str) -> Result<String, Strin
         || target.rsplit_once('/').map(|(parent, _)| parent)
             != path.rsplit_once('/').map(|(parent, _)| parent)
     {
-        return Err("无效的恢复副本记录。".into());
+        return Err(msg("recovery.record_invalid"));
     }
     let name = path.rsplit('/').next().unwrap_or("");
     let id = name
         .strip_prefix(".deeppi-")
         .and_then(|name| name.strip_suffix(&format!(".{kind}")))
-        .ok_or("恢复副本文件名无效。")?;
-    let uuid = uuid::Uuid::parse_str(id).map_err(|_| "恢复副本标识无效。")?;
+        .ok_or(msg("recovery.file_name_invalid"))?;
+    let uuid = uuid::Uuid::parse_str(id).map_err(|_| msg("recovery.id_invalid"))?;
     if uuid.to_string() != id {
-        return Err("恢复副本标识格式无效。".into());
+        return Err(msg("recovery.id_format_invalid"));
     }
     Ok(format!("{id}:{kind}"))
 }
@@ -453,7 +454,10 @@ impl RecoveryStore {
             .duration_since(UNIX_EPOCH)
             .map_err(|error| error.to_string())?
             .as_millis() as i64;
-        let mut connection = self.0.lock().map_err(|_| "恢复记录锁不可用。")?;
+        let mut connection = self
+            .0
+            .lock()
+            .map_err(|_| msg("recovery.lock_unavailable"))?;
         let tx = connection
             .transaction()
             .map_err(|error| error.to_string())?;
@@ -461,7 +465,7 @@ impl RecoveryStore {
             .query_row("SELECT COUNT(*) FROM file_recovery", [], |row| row.get(0))
             .map_err(|error| error.to_string())?;
         if count + paths.len() as i64 > 20_000 {
-            return Err("恢复记录已达上限，请先处理旧记录。".into());
+            return Err(msg("recovery.limit_reached"));
         }
         for (path, kind) in paths {
             let id = validate_record(target, path, kind)?;
@@ -472,14 +476,17 @@ impl RecoveryStore {
     }
 
     fn lookup(&self, project: &str, id: &str) -> Result<Record, String> {
-        let connection = self.0.lock().map_err(|_| "恢复记录锁不可用。")?;
+        let connection = self
+            .0
+            .lock()
+            .map_err(|_| msg("recovery.lock_unavailable"))?;
         let found = connection.query_row(
             "SELECT id,target,path,kind,created_at,root_version FROM file_recovery WHERE project_id=?1 AND id=?2",
             params![project, id], record).optional().map_err(|error| error.to_string())?
-            .ok_or("找不到此项目的恢复记录。")?;
+            .ok_or(msg("recovery.record_missing"))?;
         if validate_record(&found.item.target, &found.item.path, &found.item.kind)? != found.item.id
         {
-            return Err("恢复记录标识不匹配。".into());
+            return Err(msg("recovery.id_mismatch"));
         }
         Ok(found)
     }
@@ -491,10 +498,13 @@ impl RecoveryStore {
         offset: u64,
     ) -> Result<RecoveryList, String> {
         if offset > 20_000 {
-            return Err("无效的恢复记录分页。".into());
+            return Err(msg("recovery.pagination_invalid"));
         }
         let _root = GuardedPath::open(root, "", true)?;
-        let connection = self.0.lock().map_err(|_| "恢复记录锁不可用。")?;
+        let connection = self
+            .0
+            .lock()
+            .map_err(|_| msg("recovery.lock_unavailable"))?;
         let total = connection
             .query_row(
                 "SELECT COUNT(*) FROM file_recovery WHERE project_id=?1",
@@ -518,13 +528,13 @@ impl RecoveryStore {
             let scoped = scope_guard(root, &item.target);
             if scoped.as_ref().map(|(_, version)| version).ok() != Some(&found.root_version) {
                 item.status = "projectChanged".into();
-                item.detail = "项目或副本目录身份已变化或无法核验，未访问此记录对应的副本。".into();
+                item.detail = msg("recovery.detail_project_changed");
             } else if validate_record(&item.target, &item.path, &item.kind)
                 .ok()
                 .as_deref()
                 != Some(&item.id)
             {
-                item.detail = "恢复记录格式无效。".into();
+                item.detail = msg("recovery.detail_record_invalid");
             } else {
                 let parent = item.path.rsplit_once('/').map_or("", |(parent, _)| parent);
                 let inspected = GuardedPath::open(root, parent, true).and_then(|_parent| {
@@ -545,7 +555,7 @@ impl RecoveryStore {
                     }
                     Ok(None) => {
                         item.status = "missing".into();
-                        item.detail = "副本路径当前不存在，可移除此记录。".into();
+                        item.detail = msg("recovery.detail_copy_missing");
                     }
                     Err(error) => {
                         item.detail = error;
@@ -572,12 +582,12 @@ impl RecoveryStore {
         let found = self.lookup(project, id)?;
         let (_scope, version) = scope_guard(root, &found.item.target)?;
         if version != found.root_version {
-            return Err("项目或副本目录身份已变化。".into());
+            return Err(msg("recovery.scope_changed"));
         }
         let guard = GuardedPath::open(root, &found.item.path, false)?;
         let preview = read_guarded_text(&guard, &found.item.path)?;
         if preview.version != expected {
-            return Err("副本已变化，请刷新后重新核对。".into());
+            return Err(msg("recovery.copy_changed"));
         }
         Ok(preview)
     }
@@ -594,11 +604,11 @@ impl RecoveryStore {
         if let Some(version) = expected {
             let (_scope, scope_version) = scope_guard(root, &found.item.target)?;
             if scope_version != found.root_version {
-                return Err("项目或副本目录身份已变化。".into());
+                return Err(msg("recovery.scope_changed"));
             }
             let guard = GuardedPath::open_for_delete(root, &found.item.path)?;
             if read_guarded_text(&guard, &found.item.path)?.version != version {
-                return Err("副本已变化，本次未删除。请刷新后核对。".into());
+                return Err(msg("recovery.copy_changed_no_delete"));
             }
             when_locked();
             guard.delete()?;
@@ -607,12 +617,14 @@ impl RecoveryStore {
         }
         self.0
             .lock()
-            .map_err(|_| "副本处理后无法清理恢复记录。")?
+            .map_err(|_| msg("recovery.cleanup_failed"))?
             .execute(
                 "DELETE FROM file_recovery WHERE project_id=?1 AND id=?2",
                 params![project, id],
             )
-            .map_err(|error| format!("副本已处理，但记录清理失败，请刷新核对：{error}"))?;
+            .map_err(|error| {
+                msg_with("recovery.cleanup_error", &[("detail", &error.to_string())])
+            })?;
         Ok(())
     }
 }
@@ -652,6 +664,36 @@ pub async fn read_project_recovery(
     .map_err(|error| error.to_string())?
 }
 
+/// 前端传入的两分支确认文案（前端掌握当前语言，后端不持有任何文案）。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DeleteDialogs {
+    pub permanent: crate::dialog_text::ConfirmDialog,
+    pub record_only: crate::dialog_text::ConfirmDialog,
+}
+
+impl DeleteDialogs {
+    /// 两条分支文案都要通过与单条对话框相同的长度与字段校验。
+    fn validate(&self) -> Result<(), String> {
+        self.permanent.validate()?;
+        self.record_only.validate()
+    }
+}
+
+/// 按前端传入的 `expected_version` 挑选删除确认文案：`Some` 走「永久删除副本」，
+/// `None` 走「仅移除记录」——与随后 `delete()` 里的版本校验同源。
+/// 副本已消失等不一致情况会在删除阶段由版本校验拒绝，不会误删。
+fn delete_dialog<'a>(
+    dialogs: &'a DeleteDialogs,
+    expected_version: Option<&str>,
+) -> &'a crate::dialog_text::ConfirmDialog {
+    if expected_version.is_some() {
+        &dialogs.permanent
+    } else {
+        &dialogs.record_only
+    }
+}
+
 #[tauri::command]
 pub async fn delete_project_recovery(
     webview: tauri::Webview,
@@ -661,38 +703,29 @@ pub async fn delete_project_recovery(
     project_id: String,
     record_id: String,
     expected_version: Option<String>,
+    dialogs: DeleteDialogs,
 ) -> Result<bool, String> {
     require_main(&webview)?;
+    dialogs.validate()?;
     let root = project_root(&store, &project_id)?;
     let app = webview.app_handle().clone();
     let recovery = recovery.inner().clone();
     let gate = gate.0.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let _permit = gate.try_lock().map_err(|_| "文件正在处理，请稍后重试。")?;
+        let _permit = gate.try_lock().map_err(|_| msg("recovery.busy"))?;
         let found = recovery.lookup(&project_id, &record_id)?;
-        let action = if expected_version.is_some() {
-            "永久删除副本"
-        } else {
-            "仅移除记录"
-        };
-        let consequence = if expected_version.is_some() {
-            "永久删除选定副本，不修改工作文件。"
-        } else {
-            "仅移除恢复记录，不删除或修改任何文件。"
-        };
+        let dialog = delete_dialog(&dialogs, expected_version.as_deref());
         if !app
             .dialog()
-            .message(format!(
-                "项目：{}\n副本：{}\n原目标：{}\n\n{}",
-                root.display(),
-                found.item.path,
-                found.item.target,
-                consequence
-            ))
-            .title(action)
+            .message(dialog.render(&[
+                ("project", root.display().to_string()),
+                ("copy", found.item.path.clone()),
+                ("target", found.item.target.clone()),
+            ]))
+            .title(dialog.title.clone())
             .buttons(MessageDialogButtons::OkCancelCustom(
-                action.into(),
-                "取消".into(),
+                dialog.confirm_label.clone(),
+                dialog.cancel_label.clone(),
             ))
             .blocking_show()
         {
@@ -727,28 +760,29 @@ pub async fn restore_project_recovery(
     gate: State<'_, FileEditGate>,
     project_id: String,
     request: RestoreRequest,
+    dialog: crate::dialog_text::ConfirmDialog,
 ) -> Result<Option<crate::project_edit::SaveResult>, String> {
     require_main(&webview)?;
     validate_relative(&request.relative_path, false)?;
+    dialog.validate()?;
     let root = project_root(&store, &project_id)?;
     let app = webview.app_handle().clone();
     let recovery = recovery.inner().clone();
     let gate = gate.0.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let _permit = gate.try_lock().map_err(|_| "文件正在处理，请稍后重试。")?;
+        let _permit = gate.try_lock().map_err(|_| msg("recovery.busy"))?;
         let found = recovery.lookup(&project_id, &request.record_id)?;
         if !app
             .dialog()
-            .message(format!(
-                "项目：{}\n副本：{}\n新文件：{}\n\n只创建新文件，不覆盖已有文件；原副本保留。",
-                root.display(),
-                found.item.path,
-                request.relative_path
-            ))
-            .title("另存恢复文件")
+            .message(dialog.render(&[
+                ("project", root.display().to_string()),
+                ("copy", found.item.path.clone()),
+                ("new_path", request.relative_path.clone()),
+            ]))
+            .title(dialog.title.clone())
             .buttons(MessageDialogButtons::OkCancelCustom(
-                "另存".into(),
-                "取消".into(),
+                dialog.confirm_label.clone(),
+                dialog.cancel_label.clone(),
             ))
             .blocking_show()
         {
@@ -773,4 +807,90 @@ pub async fn restore_project_recovery(
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+#[cfg(test)]
+mod dialog_tests {
+    use super::*;
+    use crate::dialog_text::ConfirmDialog;
+    use std::collections::BTreeMap;
+
+    fn dialog(message: &str) -> ConfirmDialog {
+        ConfirmDialog {
+            title: "Confirm".into(),
+            message: message.into(),
+            confirm_label: "Yes".into(),
+            cancel_label: "No".into(),
+            terms: BTreeMap::new(),
+        }
+    }
+
+    fn delete_dialogs() -> DeleteDialogs {
+        DeleteDialogs {
+            permanent: dialog("permanent project={project} copy={copy} target={target}"),
+            record_only: dialog("record project={project} copy={copy} target={target}"),
+        }
+    }
+
+    #[test]
+    fn selects_the_delete_dialog_branch_by_expected_version() {
+        let dialogs = delete_dialogs();
+        assert!(std::ptr::eq(
+            delete_dialog(&dialogs, Some("version")),
+            &dialogs.permanent
+        ));
+        assert!(std::ptr::eq(
+            delete_dialog(&dialogs, None),
+            &dialogs.record_only
+        ));
+        assert!(dialogs.validate().is_ok());
+    }
+
+    #[test]
+    fn renders_delete_placeholders_from_measured_values() {
+        let dialogs = delete_dialogs();
+        let values = [
+            ("project", "F:/work".to_owned()),
+            ("copy", "src/.deeppi-id.recovery".to_owned()),
+            ("target", "src/a.txt".to_owned()),
+        ];
+        assert_eq!(
+            delete_dialog(&dialogs, Some("version")).render(&values),
+            "permanent project=F:/work copy=src/.deeppi-id.recovery target=src/a.txt"
+        );
+        assert_eq!(
+            delete_dialog(&dialogs, None).render(&values),
+            "record project=F:/work copy=src/.deeppi-id.recovery target=src/a.txt"
+        );
+    }
+
+    #[test]
+    fn renders_the_restore_placeholder_from_measured_values() {
+        let dialog = dialog("restore project={project} copy={copy} new={new_path}");
+        assert_eq!(
+            dialog.render(&[
+                ("project", "F:/work".to_owned()),
+                ("copy", "src/.deeppi-id.recovery".to_owned()),
+                ("new_path", "src/a.txt.restored".to_owned()),
+            ]),
+            "restore project=F:/work copy=src/.deeppi-id.recovery new=src/a.txt.restored"
+        );
+    }
+
+    #[test]
+    fn deserializes_the_frontend_delete_payload() {
+        let payload = r#"{
+            "permanent":{"title":"Delete copy","message":"{target}","confirmLabel":"Delete","cancelLabel":"Cancel"},
+            "recordOnly":{"title":"Remove record","message":"{copy}","confirmLabel":"Remove","cancelLabel":"Cancel"}
+        }"#;
+        let dialogs: DeleteDialogs = serde_json::from_str(payload).unwrap();
+        assert!(dialogs.validate().is_ok());
+        assert_eq!(delete_dialog(&dialogs, None).title, "Remove record");
+        assert_eq!(delete_dialog(&dialogs, Some("v")).title, "Delete copy");
+        // 任一分支缺失都是前端契约错误。
+        assert!(serde_json::from_str::<DeleteDialogs>(
+            r#"{"permanent":{"title":"a","message":"b","confirmLabel":"c","cancelLabel":"d"}}"#
+        )
+        .is_err());
+    }
 }

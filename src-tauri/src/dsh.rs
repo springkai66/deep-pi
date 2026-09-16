@@ -1,19 +1,29 @@
 use std::{
-    io::{BufRead, BufReader},
+    fs,
+    io::{BufRead, BufReader, Write},
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{mpsc, Mutex},
     thread,
     time::Duration,
 };
 
-use serde::Serialize;
+use atomic_write_file::AtomicWriteFile;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use tauri::{
     webview::{NewWindowResponse, WebviewBuilder},
     AppHandle, Emitter, Manager, State, Url, WebviewUrl,
 };
+
 use tauri_plugin_opener::OpenerExt;
 
-use crate::{app_paths::AppPaths, dsh_api, task::TaskStore};
+use crate::{
+    app_paths::AppPaths,
+    dsh_api,
+    message::{msg, msg_with},
+    task::TaskStore,
+};
 
 #[derive(Default)]
 struct DshProcess {
@@ -87,6 +97,382 @@ impl DshManager {
         state.url = None;
         Ok(false)
     }
+}
+
+/// DSH 启动失败诊断结果。
+/// - `culprit`：导入失败型（插件与 DSH 版本不兼容）的可疑插件包名，可一键移除；
+/// - `pending`：激活超时型（插件等待的服务不存在）的插件名，通常是运行时版本不匹配，
+///   正确处理是更新 DSH 运行时或插件本身，而不是直接移除。
+/// - `kind`：`import-failure` | `activation-pending` | `unknown`。
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DshDiagnosis {
+    pub has_failure: bool,
+    pub timestamp: Option<u64>,
+    pub error: Option<String>,
+    pub lines: Vec<String>,
+    pub culprit: Option<String>,
+    pub pending: Vec<String>,
+    pub kind: Option<String>,
+}
+
+/// DSH 插件修复结果。
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DshRepairReport {
+    pub package: String,
+    pub removed_from_dependencies: bool,
+    pub removed_from_bundles: bool,
+    pub node_modules_removed: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DshRepairRequest {
+    pub package: String,
+}
+
+fn dsh_log_dir(paths: &AppPaths) -> PathBuf {
+    paths.logs.join("dsh")
+}
+
+fn dsh_failure_path(paths: &AppPaths) -> PathBuf {
+    dsh_log_dir(paths).join("last-startup-failure.json")
+}
+
+fn dsh_repairs_path(paths: &AppPaths) -> PathBuf {
+    dsh_log_dir(paths).join("repairs.jsonl")
+}
+
+/// 把最近一次启动失败的 stderr 行写入 logs/dsh/last-startup-failure.json（尽力而为）。
+fn persist_startup_failure(paths: &AppPaths, error: &str, lines: &[String]) {
+    let payload = json!({
+        "timestamp": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis() as u64)
+            .unwrap_or(0),
+        "error": error,
+        "lines": lines,
+    });
+    if fs::create_dir_all(dsh_log_dir(paths)).is_err() {
+        return;
+    }
+    let Ok(content) = serde_json::to_vec_pretty(&payload) else {
+        return;
+    };
+    let mut file = match AtomicWriteFile::open(dsh_failure_path(paths)) {
+        Ok(file) => file,
+        Err(_) => return,
+    };
+    let _ = file.write_all(&content);
+    let _ = file.commit();
+}
+
+fn is_official_dsh_package(name: &str) -> bool {
+    name == "dshmarket"
+        || name.starts_with("@deepseek-ai/")
+        || name.starts_with("cordis")
+        || name == "@cordis"
+}
+
+fn package_name_is_valid(name: &str) -> bool {
+    crate::market::validate_package_name(name).is_ok()
+}
+
+/// 从启动失败的 stderr 摘要中定位肇事插件包名。
+/// 优先匹配 `failed to import loader entry <id> (<pkg>)` 行；否则回退到
+/// stderr 中的 node_modules 路径段（跳过官方运行时包）。
+fn culprit_from_lines(lines: &[String]) -> Option<String> {
+    for line in lines {
+        // 同一行可能连续出现多个 `failed to import loader entry <id> (<pkg>)`
+        // 嵌套错误链，需要逐个检查括号里的包名直到找到非官方的候选。
+        let mut cursor = 0usize;
+        while let Some(offset) = line[cursor..].find("failed to import loader entry") {
+            let tail = &line[cursor + offset..];
+            let open = tail.find('(');
+            let close = tail.find(')');
+            if let (Some(open), Some(close)) = (open, close) {
+                if close > open {
+                    let candidate = tail[open + 1..close].trim();
+                    if !is_official_dsh_package(candidate) && package_name_is_valid(candidate) {
+                        return Some(candidate.to_owned());
+                    }
+                }
+            }
+            cursor += offset + "failed to import loader entry".len();
+        }
+    }
+    for line in lines {
+        let mut cursor = 0usize;
+        while cursor < line.len() {
+            let Some(offset) = line[cursor..].find("node_modules") else {
+                break;
+            };
+            let start = cursor + offset + "node_modules".len();
+            let bytes = line.as_bytes();
+            if start >= bytes.len() || (bytes[start] != b'/' && bytes[start] != b'\\') {
+                cursor = start + 1;
+                continue;
+            }
+            let rest = &line[start + 1..];
+            let end = rest.find(['/', '\\']).unwrap_or(rest.len());
+            let segment = &rest[..end];
+            let candidate = if segment.starts_with('@') {
+                if segment == "@deepseek-ai" || end >= rest.len() {
+                    cursor = start + 1;
+                    continue;
+                }
+                let after = &rest[end + 1..];
+                let end2 = after.find(['/', '\\']).unwrap_or(after.len());
+                format!("{segment}/{}", &after[..end2])
+            } else {
+                segment.to_owned()
+            };
+            if !is_official_dsh_package(&candidate) && package_name_is_valid(&candidate) {
+                return Some(candidate);
+            }
+            cursor = start + 1;
+        }
+    }
+    None
+}
+
+/// 从失败输出中提取“等待服务而未能激活”的插件名。
+/// 该输出可能被压成一行（`pkg-a: pending (waiting for service: x)pkg-b: pending (...)`），
+/// 因此这里按标记全局扫描，再向前回读包名。
+fn pending_plugins_from_lines(lines: &[String]) -> Vec<String> {
+    const MARKER: &str = ": pending (waiting for service:";
+    let mut found: Vec<String> = Vec::new();
+    for line in lines {
+        let mut search_from = 0usize;
+        while let Some(offset) = line[search_from..].find(MARKER) {
+            let marker_at = search_from + offset;
+            let name: String = line[..marker_at]
+                .chars()
+                .rev()
+                .take_while(|c| {
+                    c.is_ascii_alphanumeric() || matches!(c, '@' | '/' | '-' | '_' | '.')
+                })
+                .collect::<Vec<char>>()
+                .into_iter()
+                .rev()
+                .collect();
+            if !name.is_empty()
+                && !is_official_dsh_package(&name)
+                && package_name_is_valid(&name)
+                && !found.iter().any(|existing| existing == &name)
+            {
+                found.push(name);
+            }
+            search_from = marker_at + MARKER.len();
+        }
+    }
+    found
+}
+
+fn diagnosis_kind(
+    lines: &[String],
+    culprit: Option<&String>,
+    pending: &[String],
+) -> Option<String> {
+    if !pending.is_empty() {
+        return Some("activation-pending".into());
+    }
+    if culprit.is_some() {
+        return Some("import-failure".into());
+    }
+    if lines.iter().any(|line| {
+        line.contains("did not activate") || line.contains("plugin tree failed to load")
+    }) {
+        return Some("unknown".into());
+    }
+    None
+}
+
+fn diagnose_inner(paths: &AppPaths) -> DshDiagnosis {
+    let empty = DshDiagnosis {
+        has_failure: false,
+        timestamp: None,
+        error: None,
+        lines: Vec::new(),
+        culprit: None,
+        pending: Vec::new(),
+        kind: None,
+    };
+    let Ok(content) = fs::read_to_string(dsh_failure_path(paths)) else {
+        return empty;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&content) else {
+        return empty;
+    };
+    let lines = value
+        .get("lines")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str().map(str::to_owned))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let culprit = culprit_from_lines(&lines);
+    let pending = pending_plugins_from_lines(&lines);
+    let kind = diagnosis_kind(&lines, culprit.as_ref(), &pending);
+    DshDiagnosis {
+        has_failure: true,
+        timestamp: value.get("timestamp").and_then(Value::as_u64),
+        error: value
+            .get("error")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        culprit,
+        pending,
+        kind,
+        lines,
+    }
+}
+
+#[tauri::command]
+pub async fn dsh_diagnose(app: AppHandle) -> Result<DshDiagnosis, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let paths = app.state::<AppPaths>().inner().clone();
+        diagnose_inner(&paths)
+    })
+    .await
+    .map_err(|error| format!("DSH diagnosis worker failed: {error}"))
+}
+
+/// 修复插件导致的 DSH 启动失败：先快照，再从 web profile 的
+/// dependencies/bundles/node_modules 中移除指定插件，失败可回滚。
+fn repair_inner(app: &AppHandle, package: &str) -> Result<DshRepairReport, String> {
+    let paths = app.state::<AppPaths>();
+    let package = crate::market::validate_package_name(package)?;
+    if is_official_dsh_package(package) {
+        return Err(msg("dsh.repair.official_package"));
+    }
+    if app.state::<DshManager>().is_running()? {
+        return Err(msg("dsh.repair.running"));
+    }
+    let profile = paths.dsh_profile();
+    if !profile.is_dir() {
+        return Err(msg("dsh.profile.missing"));
+    }
+    let manifest = profile.join("package.json");
+    let targets = [manifest, profile.join("node_modules")];
+    let snapshot = crate::snapshot::Snapshot::capture(&targets, &paths.backups)?;
+    let result = remove_package_from_profile(&profile, package).and_then(|report| {
+        append_repair_log(&dsh_repairs_path(&paths), package)?;
+        Ok(report)
+    });
+    match result {
+        Ok(report) => {
+            snapshot.commit()?;
+            Ok(report)
+        }
+        Err(error) => Err(snapshot.restore_error(error)),
+    }
+}
+
+fn append_repair_log(path: &Path, package: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create DSH log directory: {error}"))?;
+    }
+    let entry = json!({
+        "timestamp": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis() as u64)
+            .unwrap_or(0),
+        "package": package,
+        "action": "removed",
+    });
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|error| format!("failed to open DSH repair log: {error}"))?;
+    writeln!(file, "{entry}").map_err(|error| format!("failed to write DSH repair log: {error}"))
+}
+
+#[tauri::command]
+pub async fn dsh_repair(
+    app: AppHandle,
+    request: DshRepairRequest,
+) -> Result<DshRepairReport, String> {
+    tauri::async_runtime::spawn_blocking(move || repair_inner(&app, &request.package))
+        .await
+        .map_err(|error| format!("DSH repair worker failed: {error}"))?
+}
+
+/// 从 web profile 移除一个插件：dependencies、dsh.profile.bundles 与
+/// node_modules/<pkg>（存在时）。pnpm 链接目录只移除链接本身。
+fn remove_package_from_profile(profile: &Path, package: &str) -> Result<DshRepairReport, String> {
+    let manifest = profile.join("package.json");
+    let content = fs::read_to_string(&manifest)
+        .map_err(|error| format!("failed to read DSH profile manifest: {error}"))?;
+    let mut value: Value = serde_json::from_str(&content)
+        .map_err(|error| format!("DSH profile manifest is not valid JSON: {error}"))?;
+    let (removed_from_dependencies, removed_from_bundles) =
+        strip_package_from_manifest(&mut value, package)?;
+    if !removed_from_dependencies && !removed_from_bundles {
+        return Err(msg_with(
+            "dsh.repair.not_in_profile",
+            &[("package", package)],
+        ));
+    }
+    let serialized = serde_json::to_vec_pretty(&value)
+        .map_err(|error| format!("failed to serialize DSH profile manifest: {error}"))?;
+    let mut file = AtomicWriteFile::open(&manifest)
+        .map_err(|error| format!("failed to open DSH profile manifest: {error}"))?;
+    file.write_all(&serialized)
+        .map_err(|error| format!("failed to write DSH profile manifest: {error}"))?;
+    file.commit()
+        .map_err(|error| format!("failed to commit DSH profile manifest: {error}"))?;
+
+    let mut node_modules_removed = false;
+    let entry = profile.join("node_modules").join(package);
+    if entry.exists() {
+        remove_node_modules_entry(&entry)?;
+        node_modules_removed = true;
+    }
+    Ok(DshRepairReport {
+        package: package.to_owned(),
+        removed_from_dependencies,
+        removed_from_bundles,
+        node_modules_removed,
+    })
+}
+
+fn strip_package_from_manifest(value: &mut Value, package: &str) -> Result<(bool, bool), String> {
+    let mut removed_from_dependencies = false;
+    let mut removed_from_bundles = false;
+    if let Some(dependencies) = value.get_mut("dependencies").and_then(Value::as_object_mut) {
+        removed_from_dependencies = dependencies.remove(package).is_some();
+    }
+    if let Some(bundles) = value
+        .get_mut("dsh")
+        .and_then(|dsh| dsh.get_mut("profile"))
+        .and_then(|profile| profile.get_mut("bundles"))
+        .and_then(Value::as_array_mut)
+    {
+        let before = bundles.len();
+        bundles.retain(|entry| entry.as_str() != Some(package));
+        removed_from_bundles = before != bundles.len();
+    }
+    Ok((removed_from_dependencies, removed_from_bundles))
+}
+
+fn remove_node_modules_entry(entry: &Path) -> Result<(), String> {
+    // pnpm 在 Windows 上用 junction 链接包目录：绝不能递归进目标，只移除链接本身。
+    let is_link = fs::symlink_metadata(entry)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false);
+    let result = if is_link {
+        fs::remove_dir(entry)
+    } else {
+        fs::remove_dir_all(entry)
+    };
+    result.map_err(|error| format!("failed to remove {}: {error}", entry.display()))
 }
 
 fn dsh_url_is_allowed(base_url: &str, candidate: &Url) -> bool {
@@ -227,15 +613,23 @@ fn start_dsh_inner(
         .take()
         .ok_or_else(|| "failed to capture DSH errors".to_string())?;
     let (sender, receiver) = mpsc::sync_channel(1);
-    // DSH 启动失败（尤其是插件树加载失败）时错误写在 stderr；
-    // 启动阶段收集 stderr 末尾几行，就绪后转为后台丢弃。
+    // 启动失败信息分两路：导入/激活失败写在 stdout（插件加载器日志），
+    // 崩溃栈写在 stderr。两边的末尾几行都要留作诊断依据。
     let (stderr_sender, stderr_receiver) = mpsc::sync_channel(1);
     let ready = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let ready_for_stderr = ready.clone();
+    let stdout_tail = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+    let stdout_tail_writer = stdout_tail.clone();
 
     thread::spawn(move || {
         let mut sender = Some(sender);
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if let Ok(mut tail) = stdout_tail_writer.lock() {
+                if tail.len() >= 20 {
+                    tail.remove(0);
+                }
+                tail.push(line.clone());
+            }
             if let Some(url) = extract_dsh_url(&line) {
                 if let Some(channel) = sender.take() {
                     let _ = channel.send(url);
@@ -264,18 +658,29 @@ fn start_dsh_inner(
             ready.store(true, std::sync::atomic::Ordering::Relaxed);
             let _ = child.kill();
             let _ = child.wait();
-            let detail = stderr_receiver
-                .try_recv()
-                .ok()
-                .map(|lines| lines.join("; "))
-                .filter(|text| !text.trim().is_empty());
+            let stderr_lines: Vec<String> = stderr_receiver.try_recv().ok().unwrap_or_default();
+            let stdout_lines: Vec<String> = stdout_tail
+                .lock()
+                .map(|tail| tail.clone())
+                .unwrap_or_default();
+            // stdout 在前（插件加载器日志），stderr 在后（崩溃栈）。
+            let mut lines = stdout_lines;
+            lines.extend(stderr_lines);
+            let joined = lines.join("; ");
+            let detail = (!joined.trim().is_empty()).then_some(joined);
+            persist_startup_failure(paths, &error.to_string(), &lines);
             return Err(match detail {
-                Some(detail) => format!("DSH 启动失败（{error}）：{detail}"),
+                Some(detail) => msg_with(
+                    "dsh.start.failed",
+                    &[("error", &error.to_string()), ("detail", detail.as_str())],
+                ),
                 None => format!("DSH did not become ready: {error}"),
             });
         }
     };
     ready.store(true, std::sync::atomic::Ordering::Relaxed);
+    // 启动成功即清除旧失败记录，避免诊断误报。
+    let _ = fs::remove_file(dsh_failure_path(paths));
 
     state.generation = state.generation.wrapping_add(1);
     let generation = state.generation;
@@ -438,7 +843,10 @@ impl Drop for DshManager {
 mod tests {
     use tauri::Url;
 
-    use super::{dsh_api_base, dsh_url_is_allowed, extract_dsh_url};
+    use super::{
+        culprit_from_lines, dsh_api_base, dsh_url_is_allowed, extract_dsh_url,
+        strip_package_from_manifest,
+    };
 
     #[test]
     fn allows_only_the_active_loopback_origin() {
@@ -487,5 +895,220 @@ mod tests {
     #[test]
     fn rejects_non_loopback_url() {
         assert_eq!(extract_dsh_url("dsh web: http://192.168.1.20:63358"), None);
+    }
+
+    fn lines(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn culprit_from_loader_entry_failure_line() {
+        let stderr = lines(&[
+            "[dsh-auto-approval-llm] warning",
+            "Error: dsh: plugin tree failed to load: failed to import loader entry include (cordis:include): failed to import loader entry prompt-optimizer (oss-prompt-optimizer): The requested module '@deepseek-ai/dsh-llm' does not provide an export named 'deepFreeze'",
+        ]);
+        assert_eq!(
+            culprit_from_lines(&stderr).as_deref(),
+            Some("oss-prompt-optimizer")
+        );
+    }
+
+    #[test]
+    fn culprit_falls_back_to_node_modules_path_segment() {
+        let stderr = lines(&[
+            "Error: failed to import loader entry demo (demo-pkg): boom",
+            "      [cause]: file:///C:/agents/dsh/profiles/web/node_modules/demo-pkg/lib/index.js:2",
+        ]);
+        assert_eq!(culprit_from_lines(&stderr).as_deref(), Some("demo-pkg"));
+    }
+
+    #[test]
+    fn culprit_skips_official_runtime_packages() {
+        let stderr = lines(&[
+            "file:///F:/runtimes/dsh/node_modules/@deepseek-ai/cordis-plugin-loader/lib/index.js:97",
+        ]);
+        assert_eq!(culprit_from_lines(&stderr), None);
+    }
+
+    #[test]
+    fn culprit_handles_scoped_paths_and_windows_separators() {
+        let stderr =
+            lines(&[r"C:\agents\dsh\profiles\web\node_modules\@some-scope\some-pkg\lib\index.js"]);
+        assert_eq!(
+            culprit_from_lines(&stderr).as_deref(),
+            Some("@some-scope/some-pkg")
+        );
+    }
+
+    #[test]
+    fn culprit_returns_none_without_usable_evidence() {
+        assert_eq!(culprit_from_lines(&lines(&["Node.js v24.13.0"])), None);
+        assert_eq!(culprit_from_lines(&[]), None);
+    }
+
+    #[test]
+    fn strips_package_from_dependencies_and_bundles() {
+        let mut value = serde_json::json!({
+            "name": "dsh-profile-web",
+            "dependencies": {"oss-prompt-optimizer": "^1.0.0", "dsh-context": "^0.1.0"},
+            "dsh": {"profile": {"bundles": ["@deepseek-ai/dsh-base", "dshmarket", "oss-prompt-optimizer"]}}
+        });
+        let (dependencies, bundles) =
+            strip_package_from_manifest(&mut value, "oss-prompt-optimizer")
+                .expect("strip should work");
+        assert!(dependencies);
+        assert!(bundles);
+        assert!(value["dependencies"].get("oss-prompt-optimizer").is_none());
+        assert_eq!(value["dependencies"]["dsh-context"], "^0.1.0");
+        assert_eq!(
+            value["dsh"]["profile"]["bundles"],
+            serde_json::json!(["@deepseek-ai/dsh-base", "dshmarket"])
+        );
+    }
+
+    #[test]
+    fn strip_package_reports_when_absent() {
+        let mut value = serde_json::json!({
+            "dependencies": {"dsh-context": "^0.1.0"},
+            "dsh": {"profile": {"bundles": ["dshmarket"]}}
+        });
+        let (dependencies, bundles) =
+            strip_package_from_manifest(&mut value, "missing-pkg").expect("strip should work");
+        assert!(!dependencies);
+        assert!(!bundles);
+    }
+
+    #[test]
+    fn remove_package_from_profile_updates_manifest_and_modules() {
+        let root = std::env::temp_dir().join(format!("deeppi-dsh-repair-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let profile = root.join("profiles").join("web");
+        std::fs::create_dir_all(profile.join("node_modules").join("oss-prompt-optimizer"))
+            .expect("fixture directories should exist");
+        std::fs::create_dir_all(profile.join("node_modules").join("dsh-context"))
+            .expect("fixture directories should exist");
+        std::fs::write(
+            profile.join("package.json"),
+            br#"{"name":"dsh-profile-web","dependencies":{"oss-prompt-optimizer":"^1.0.0","dsh-context":"^0.1.0"},"dsh":{"profile":{"bundles":["dshmarket","oss-prompt-optimizer"]}}}"#,
+        )
+        .expect("fixture manifest should be written");
+        std::fs::write(
+            profile
+                .join("node_modules")
+                .join("oss-prompt-optimizer")
+                .join("package.json"),
+            br#"{"name":"oss-prompt-optimizer"}"#,
+        )
+        .expect("fixture package should be written");
+
+        let report = super::remove_package_from_profile(&profile, "oss-prompt-optimizer")
+            .expect("repair should succeed");
+        assert!(report.removed_from_dependencies);
+        assert!(report.removed_from_bundles);
+        assert!(report.node_modules_removed);
+        let manifest =
+            std::fs::read_to_string(profile.join("package.json")).expect("manifest should read");
+        assert!(!manifest.contains("oss-prompt-optimizer"));
+        assert!(manifest.contains("dsh-context"));
+        assert!(!profile
+            .join("node_modules")
+            .join("oss-prompt-optimizer")
+            .exists());
+        assert!(profile.join("node_modules").join("dsh-context").exists());
+
+        std::fs::remove_dir_all(root).expect("test directory should be removed");
+    }
+
+    #[test]
+    fn remove_package_from_profile_errors_when_absent() {
+        let root =
+            std::env::temp_dir().join(format!("deeppi-dsh-repair-missing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let profile = root.join("profiles").join("web");
+        std::fs::create_dir_all(&profile).expect("fixture directory should exist");
+        std::fs::write(
+            profile.join("package.json"),
+            br#"{"name":"dsh-profile-web","dependencies":{}}"#,
+        )
+        .expect("fixture manifest should be written");
+        let error = super::remove_package_from_profile(&profile, "missing-pkg")
+            .expect_err("absent package should fail");
+        assert_eq!(
+            crate::message::message_code(&error),
+            Some("dsh.repair.not_in_profile")
+        );
+        assert!(error.contains("missing-pkg"));
+        std::fs::remove_dir_all(root).expect("test directory should be removed");
+    }
+}
+
+#[cfg(test)]
+mod activation_tests {
+    use super::{culprit_from_lines, diagnosis_kind, pending_plugins_from_lines};
+
+    fn lines(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn pending_plugins_are_extracted_from_activation_failure() {
+        let input = lines(&[
+            "Failed to load plugins",
+            "web boot: 3 entries did not activate",
+            "@quill507/dsh-auto-approval-llm: pending (waiting for service: uiSession)",
+            "dsh-better-reasoning-effort: pending (waiting for service: remote.settings)",
+        ]);
+        assert_eq!(
+            pending_plugins_from_lines(&input),
+            vec![
+                "@quill507/dsh-auto-approval-llm".to_string(),
+                "dsh-better-reasoning-effort".to_string()
+            ]
+        );
+        assert_eq!(
+            diagnosis_kind(&input, None, &pending_plugins_from_lines(&input)).as_deref(),
+            Some("activation-pending")
+        );
+    }
+
+    #[test]
+    fn pending_plugins_survive_a_single_concatenated_line() {
+        let input = lines(&[
+            "@quill507/dsh-auto-approval-llm: pending (waiting for service: uiSession)dsh-better-reasoning-effort: pending (waiting for service: remote.settings)@banana-peeljj12/dsh-trellis: pending (waiting for service: sidebarRight)",
+        ]);
+        assert_eq!(
+            pending_plugins_from_lines(&input),
+            vec![
+                "@quill507/dsh-auto-approval-llm".to_string(),
+                "dsh-better-reasoning-effort".to_string(),
+                "@banana-peeljj12/dsh-trellis".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn pending_plugins_skip_official_packages_and_deduplicate() {
+        let input = lines(&[
+            "@deepseek-ai/dsh-client-ui-slots: pending (waiting for service: sidebarRight)",
+            "dsh-context: pending (waiting for service: uiSession)",
+            "dsh-context: pending (waiting for service: uiSession)",
+        ]);
+        assert_eq!(
+            pending_plugins_from_lines(&input),
+            vec!["dsh-context".to_string()]
+        );
+    }
+
+    #[test]
+    fn diagnosis_kind_reports_import_failure_or_nothing() {
+        let input = lines(&["Error: failed to import loader entry demo (demo-pkg): boom"]);
+        let culprit = culprit_from_lines(&input);
+        assert_eq!(culprit.as_deref(), Some("demo-pkg"));
+        assert_eq!(
+            diagnosis_kind(&input, culprit.as_ref(), &[]).as_deref(),
+            Some("import-failure")
+        );
+        let unrelated = lines(&["Node.js v24.13.0"]);
+        assert_eq!(diagnosis_kind(&unrelated, None, &[]), None);
     }
 }

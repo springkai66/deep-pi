@@ -1,3 +1,5 @@
+import { resolveAppMessage } from "./app-messages";
+import { getLocale, t } from "./i18n.svelte";
 import type { GitDiffArea, GitEntry } from "./git-status";
 
 export type IndexAction = "stage" | "unstage" | "resolve";
@@ -26,7 +28,7 @@ export function createGitIndexWriter(
         const result = await write(projectId, { entry, action: indexActionForArea(area) }, crypto.randomUUID());
         if (result && !disposed) applied(projectId, entry.path);
       } catch (failure) {
-        error = `Git 操作未确认完成，请刷新状态后再操作：${String(failure)}`;
+        error = t("Git 操作未确认完成，请刷新状态后再操作：{error}", { error: resolveAppMessage(String(failure), getLocale()) });
       } finally {
         busy = false;
         if (!disposed) changed({ busy: false, projectId, error });

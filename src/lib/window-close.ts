@@ -1,3 +1,4 @@
+import { t } from "./i18n.svelte";
 import type { CloseBehavior } from "./settings";
 
 export interface WindowClosePorts {
@@ -25,7 +26,7 @@ export function createWindowCloseHandler(ports: WindowClosePorts) {
     pending = true;
     let releaseExit: (() => void) | undefined;
     try {
-      if (ports.blocked()) throw new Error(ports.blockedReason?.() ?? "任务正在切换模式，请完成后再关闭窗口");
+      if (ports.blocked()) throw new Error(ports.blockedReason?.() ?? t("任务正在切换模式，请完成后再关闭窗口"));
       let behavior = ports.behavior();
       if (behavior === "ask") {
         const choice = await ports.choose();
@@ -43,7 +44,7 @@ export function createWindowCloseHandler(ports: WindowClosePorts) {
         if (!prepared) return;
         if (typeof prepared === "function") releaseExit = prepared;
       }
-      if (ports.blocked()) throw new Error(ports.blockedReason?.() ?? "任务正在切换模式，请完成后再关闭窗口");
+      if (ports.blocked()) throw new Error(ports.blockedReason?.() ?? t("任务正在切换模式，请完成后再关闭窗口"));
       await ports.stopPi();
       await ports.stopDsh();
       await ports.destroy();

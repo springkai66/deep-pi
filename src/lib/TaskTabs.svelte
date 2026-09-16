@@ -14,6 +14,7 @@
   } from "@lucide/svelte";
   import { onMount } from "svelte";
   import type { Task } from "$lib/task";
+  import { t } from "$lib/i18n.svelte";
 
   interface Props {
     tasks: Task[];
@@ -97,7 +98,7 @@
 </script>
 
 <div class="task-tabs-shell">
-  <nav class="task-tabs" aria-label="Session 标签">
+  <nav class="task-tabs" aria-label={t("Session 标签")}>
     {#each tasks as task (task.id)}
       <div
         class="session-tab"
@@ -121,15 +122,15 @@
         <button
           type="button"
           class="session-tab-close"
-          aria-label={`关闭 ${task.title}`}
-          title="关闭 Session"
+          aria-label={t("关闭 {title}", { title: task.title })}
+          title={t("关闭 Session")}
           onclick={(event) => { event.stopPropagation(); onClose(task); }}
         >
           <X size={13} aria-hidden="true" />
         </button>
       </div>
     {/each}
-    <button type="button" class="session-tab-add" title="新建 Session" aria-label="新建 Session" onclick={onAdd}>
+    <button type="button" class="session-tab-add" title={t("新建 Session")} aria-label={t("新建 Session")} onclick={onAdd}>
       <Plus size={15} aria-hidden="true" />
     </button>
   </nav>
@@ -140,40 +141,40 @@
       class="context-menu"
       role="menu"
       tabindex="-1"
-      aria-label="Session 菜单"
+      aria-label={t("Session 菜单")}
       style={`left: ${contextMenu.x}px; top: ${contextMenu.y}px`}
       onclick={(event) => event.stopPropagation()}
       onkeydown={handleContextMenuKeydown}
     >
       <button type="button" role="menuitem" onclick={() => chooseAction("rename")}>
-        <Pencil size={14} />重命名
+        <Pencil size={14} />{t("重命名")}
       </button>
       {#if activeStatuses.includes(contextMenu.task.status)}
         <button type="button" role="menuitem" onclick={() => chooseAction("stop")}>
-          <Square size={14} />停止
+          <Square size={14} />{t("停止")}
         </button>
       {:else if contextMenu.task.archivedAt === null}
         <button type="button" role="menuitem" onclick={() => chooseAction("restart")}>
-          <RotateCcw size={14} />重启
+          <RotateCcw size={14} />{t("重启")}
         </button>
       {/if}
       {#if contextMenu.task.archivedAt === null}
         <button type="button" role="menuitem" onclick={() => chooseAction("archive")}>
-          <Archive size={14} />归档
+          <Archive size={14} />{t("归档")}
         </button>
       {:else}
         <button type="button" role="menuitem" onclick={() => chooseAction("restore")}>
-          <ArchiveRestore size={14} />恢复
+          <ArchiveRestore size={14} />{t("恢复")}
         </button>
       {/if}
       <button type="button" role="menuitem" onclick={() => chooseAction("splitRight")}>
-        <SplitSquareHorizontal size={14} />向右分割窗口
+        <SplitSquareHorizontal size={14} />{t("向右分割窗口")}
       </button>
       <button type="button" role="menuitem" onclick={() => chooseAction("splitDown")}>
-        <SplitSquareVertical size={14} />向下分割窗口
+        <SplitSquareVertical size={14} />{t("向下分割窗口")}
       </button>
       <button type="button" role="menuitem" onclick={() => chooseAction("remove")}>
-        <Trash2 size={14} />移除 Session
+        <Trash2 size={14} />{t("移除 Session")}
       </button>
     </div>
   {/if}
@@ -182,15 +183,20 @@
 <style>
   .task-tabs-shell {
     min-width: 0;
+    padding: 4px 8px;
   }
 
+  /* 药丸标签：胶囊式会话切换条，去掉了原先的整行直角标签。 */
   .task-tabs {
     display: flex;
+    gap: 4px;
     min-width: 0;
-    height: 32px;
+    height: auto;
+    padding: 3px;
     overflow-x: auto;
-    border-bottom: 1px solid var(--border);
-    background: var(--surface-alt);
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    background: color-mix(in srgb, var(--page-bg) 55%, transparent);
     scrollbar-width: thin;
   }
 
@@ -200,9 +206,10 @@
     align-items: center;
     gap: 6px;
     min-width: 128px;
-    height: 31px;
+    height: 28px;
     padding: 0 4px 0 9px;
-    border-right: 1px solid var(--border);
+    border: 0;
+    border-radius: 6px;
     color: var(--text-muted);
     background: transparent;
   }
@@ -214,8 +221,9 @@
 
   .session-tab.active {
     color: var(--text-strong);
+    font-weight: 600;
     background: var(--surface-raised);
-    box-shadow: inset 0 -2px var(--accent);
+    box-shadow: 0 2px 8px #0006;
   }
 
   .session-tab-label {
@@ -260,9 +268,11 @@
     display: grid;
     place-items: center;
     flex-shrink: 0;
-    width: 32px;
-    height: 31px;
+    width: 28px;
+    height: 28px;
+    padding: 0;
     border: 0;
+    border-radius: 6px;
     color: var(--text-muted);
     background: transparent;
     cursor: pointer;

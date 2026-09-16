@@ -9,7 +9,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use tauri::State;
 
-use crate::app_paths::AppPaths;
+use crate::{
+    app_paths::AppPaths,
+    message::{msg, msg_with},
+};
 
 const MAX_JSON_BYTES: usize = 1024 * 1024;
 const MAX_NAME_LENGTH: usize = 64;
@@ -32,14 +35,14 @@ pub enum ConfigScope {
 fn validate_project_path(path: &str) -> Result<PathBuf, String> {
     let trimmed = path.trim();
     if trimmed.is_empty() || trimmed.len() > MAX_PROJECT_PATH_LENGTH {
-        return Err("项目路径无效".into());
+        return Err(msg("agent_config.project_path_invalid"));
     }
     if trimmed.chars().any(char::is_control) {
-        return Err("项目路径包含非法字符".into());
+        return Err(msg("agent_config.project_path_invalid_chars"));
     }
     let project = Path::new(trimmed);
     if !project.is_dir() {
-        return Err("项目目录不存在".into());
+        return Err(msg("agent_config.project_missing"));
     }
     fs::canonicalize(project)
         .map_err(|error| format!("failed to resolve project directory: {error}"))
@@ -54,7 +57,7 @@ fn scope_pi_dir(
         ConfigScope::Global => Ok(paths.pi_home.clone()),
         ConfigScope::Project => {
             let project = validate_project_path(
-                project_path.ok_or_else(|| "项目范围需要项目路径".to_string())?,
+                project_path.ok_or_else(|| msg("agent_config.project_path_required"))?,
             )?;
             Ok(project.join(".pi"))
         }
@@ -112,13 +115,13 @@ pub struct SaveSkillRequest {
 pub fn validate_entry_name(name: &str) -> Result<(), String> {
     let trimmed = name.trim();
     if trimmed.is_empty() || trimmed.len() > MAX_NAME_LENGTH {
-        return Err("名称必须包含 1 到 64 个字符".into());
+        return Err(msg("agent_config.name_length"));
     }
     if !trimmed
         .chars()
         .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.'))
     {
-        return Err("名称只能包含字母、数字、点、下划线和短横线".into());
+        return Err(msg("agent_config.name_charset"));
     }
     Ok(())
 }
@@ -145,12 +148,16 @@ fn read_json_file(path: &Path) -> Result<Value, String> {
         Err(error) => return Err(format!("failed to read Pi config: {error}")),
     };
     if content.len() > MAX_JSON_BYTES {
-        return Err("Pi 配置文件超过 1 MiB".into());
+        return Err(msg("agent_config.file_too_large"));
     }
-    let value: Value =
-        serde_json::from_str(&content).map_err(|error| format!("Pi 配置不是有效 JSON: {error}"))?;
+    let value: Value = serde_json::from_str(&content).map_err(|error| {
+        msg_with(
+            "agent_config.invalid_json",
+            &[("error", &error.to_string())],
+        )
+    })?;
     if !value.is_object() {
-        return Err("Pi 配置必须是 JSON 对象".into());
+        return Err(msg("agent_config.not_object"));
     }
     Ok(value)
 }
@@ -187,7 +194,7 @@ pub async fn list_mcp_servers(
             return Ok(Vec::new());
         };
         if servers.len() > MAX_MCP_SERVERS {
-            return Err("MCP 服务数量超过上限".into());
+            return Err(msg("agent_config.mcp_limit_reached"));
         }
         Ok(servers
             .iter()
@@ -210,14 +217,14 @@ pub async fn save_mcp_server(
         let name = request.name.trim();
         validate_entry_name(name)?;
         if !request.config.is_object() {
-            return Err("MCP 配置必须是 JSON 对象".into());
+            return Err(msg("agent_config.mcp_not_object"));
         }
         if serde_json::to_vec(&request.config)
             .map_err(|error| error.to_string())?
             .len()
             > MAX_MCP_CONFIG_BYTES
         {
-            return Err("MCP 配置过大".into());
+            return Err(msg("agent_config.mcp_too_large"));
         }
         let path = mcp_file(
             &paths,
@@ -231,7 +238,7 @@ pub async fn save_mcp_server(
             .cloned()
             .unwrap_or_default();
         if !servers.contains_key(name) && servers.len() >= MAX_MCP_SERVERS {
-            return Err("MCP 服务数量超过上限".into());
+            return Err(msg("agent_config.mcp_limit_reached"));
         }
         servers.insert(name.to_string(), request.config);
         value["mcpServers"] = Value::Object(servers);
@@ -360,10 +367,10 @@ pub async fn save_skill(
         validate_entry_name(name)?;
         let description = request.description.trim();
         if description.is_empty() || description.len() > MAX_SKILL_DESCRIPTION_LENGTH {
-            return Err("Skill 描述必须包含 1 到 512 个字符".into());
+            return Err(msg("agent_config.skill_description_length"));
         }
         if request.content.is_empty() || request.content.len() > MAX_SKILL_CONTENT_BYTES {
-            return Err("Skill 内容必须包含 1 到 65536 字节".into());
+            return Err(msg("agent_config.skill_content_length"));
         }
         let dir = skill_dir(
             &paths,
