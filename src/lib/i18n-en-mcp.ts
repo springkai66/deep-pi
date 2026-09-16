@@ -149,6 +149,8 @@ export const EN_MCP: Record<string, string> = {
   "打开官网": "Open website",
   "共 {total} 条，匹配 {shown} 条": "{shown} of {total} entries shown",
   "作者：{author}": "Author: {author}",
+  "全部分类": "All categories",
+  "分类筛选": "Filter by category",
 
   /* ---------- MCP 市场（agenticskills.io） ---------- */
   "MCP 市场": "MCP marketplace",

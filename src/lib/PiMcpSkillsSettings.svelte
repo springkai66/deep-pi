@@ -20,10 +20,17 @@
     slug: string;
     name: string;
     description?: string | null;
+    longDescription?: string | null;
     author?: string | null;
+    category?: string | null;
     tags?: string[];
+    platforms?: string[];
     installs?: number | null;
     quality?: string | number | null;
+    license?: string | null;
+    lastUpdated?: string | null;
+    githubUrl?: string | null;
+    skillMdUrl?: string | null;
     featured?: boolean;
   }
 
@@ -50,14 +57,18 @@
     slug: string;
     name: string;
     description?: string | null;
+    longDescription?: string | null;
     author?: string | null;
     category?: string | null;
     transport?: string[];
     official?: boolean;
     requiresApiKey?: boolean;
     popularity?: number | null;
+    websiteUrl?: string | null;
+    configSource?: string | null;
     tags?: string[];
     featured?: boolean;
+    snippets?: AgenticMcpSnippet[];
   }
 
   interface AgenticMcpSnippet {
@@ -116,6 +127,8 @@
   let mcpDetailSlug = $state<string | null>(null);
   let mcpDetail = $state<AgenticMcpDetail | null>(null);
   let mcpDetailLoading = $state<string | null>(null);
+  /** 分类筛选：null = 全部分类。 */
+  let mcpCategory = $state<string | null>(null);
 
   let skillQuery = $state("");
   let skillEntries = $state<AgenticSkillEntry[]>([]);
@@ -125,6 +138,8 @@
   let skillDetailSlug = $state<string | null>(null);
   let skillDetail = $state<AgenticSkillDetail | null>(null);
   let skillDetailLoading = $state<string | null>(null);
+  /** 分类筛选：null = 全部分类。 */
+  let skillCategory = $state<string | null>(null);
 
   let serverName = $state("");
   let serverConfig = $state("");
@@ -145,35 +160,47 @@
   );
   $effect(() => onBusyChange(componentBusy));
 
-  /** 已加载的全量目录按关键词本地过滤，输入时不打后端。 */
+  /** 已加载的全量目录按关键词 + 分类本地过滤，输入时不打后端。 */
   const filteredMcpEntries = $derived(
-    mcpEntries.filter((entry) =>
-      matchesKeyword(mcpQuery, entry.name, entry.slug, entry.description, entry.author, entry.category),
+    mcpEntries.filter(
+      (entry) =>
+        (mcpCategory === null || entry.category === mcpCategory) &&
+        matchesKeyword(mcpQuery, entry.name, entry.slug, entry.description, entry.author, entry.category),
     ),
   );
   const filteredSkillEntries = $derived(
-    skillEntries.filter((entry) =>
-      matchesKeyword(skillQuery, entry.name, entry.slug, entry.description, entry.author),
+    skillEntries.filter(
+      (entry) =>
+        (skillCategory === null || entry.category === skillCategory) &&
+        matchesKeyword(skillQuery, entry.name, entry.slug, entry.description, entry.author, entry.category),
     ),
   );
 
-  // 详情面板的派生值：展开哪一条就渲染哪一条，避免模板里到处判空。
-  const skillDetailLongDescription = $derived(skillDetail?.longDescription || skillDetail?.description || "");
-  const skillDetailTags = $derived(skillDetail?.tags ?? []);
-  const skillDetailPlatforms = $derived(skillDetail?.platforms ?? []);
-  const skillDetailLicense = $derived(skillDetail?.license ?? "");
-  const skillDetailUpdated = $derived(skillDetail?.lastUpdated ?? "");
-  const skillDetailSiteUrl = $derived(skillSiteUrl(skillDetail));
-  const skillDetailSkillMdUrl = $derived(skillDetail?.skillMdUrl ?? "");
+  /** 分类筛选选项：当前已加载条目里出现过的分类，按条目数从多到少、同数量按名称排序。 */
+  const mcpCategoryOptions = $derived(categoryOptions(mcpEntries));
+  const skillCategoryOptions = $derived(categoryOptions(skillEntries));
 
-  const mcpDetailLongDescription = $derived(mcpDetail?.longDescription || mcpDetail?.description || "");
-  const mcpDetailAuthor = $derived(mcpDetail?.author ?? "");
-  const mcpDetailTrustLevel = $derived(mcpDetail?.trustLevel ?? "");
-  const mcpDetailConfigSource = $derived(mcpDetail?.configSource ?? "");
-  const mcpDetailTags = $derived(mcpDetail?.tags ?? []);
-  const mcpDetailSnippets = $derived(mcpDetail?.snippets ?? []);
-  const mcpDetailSiteUrl = $derived(mcpSiteUrl(mcpDetail));
-  const mcpDetailWebsiteUrl = $derived(mcpDetail?.websiteUrl ?? "");
+  // 详情面板的派生值：展开哪一条就渲染哪一条；条目自带字段优先，缺字段才回落到详情接口。
+  const skillDetailEntry = $derived(skillEntries.find((entry) => entry.slug === skillDetailSlug) ?? null);
+  const skillDetailView = $derived(mergeSkillDetail(skillDetailEntry, skillDetail));
+  const skillDetailLongDescription = $derived(skillDetailView?.longDescription || skillDetailView?.description || "");
+  const skillDetailTags = $derived(skillDetailView?.tags ?? []);
+  const skillDetailPlatforms = $derived(skillDetailView?.platforms ?? []);
+  const skillDetailLicense = $derived(skillDetailView?.license ?? "");
+  const skillDetailUpdated = $derived(skillDetailView?.lastUpdated ?? "");
+  const skillDetailSiteUrl = $derived(skillSiteUrl(skillDetailView));
+  const skillDetailSkillMdUrl = $derived(skillDetailView?.skillMdUrl ?? "");
+
+  const mcpDetailEntry = $derived(mcpEntries.find((entry) => entry.slug === mcpDetailSlug) ?? null);
+  const mcpDetailView = $derived(mergeMcpDetail(mcpDetailEntry, mcpDetail));
+  const mcpDetailLongDescription = $derived(mcpDetailView?.longDescription || mcpDetailView?.description || "");
+  const mcpDetailAuthor = $derived(mcpDetailView?.author ?? "");
+  const mcpDetailTrustLevel = $derived(mcpDetailView?.trustLevel ?? "");
+  const mcpDetailConfigSource = $derived(mcpDetailView?.configSource ?? "");
+  const mcpDetailTags = $derived(mcpDetailView?.tags ?? []);
+  const mcpDetailSnippets = $derived(mcpDetailView?.snippets ?? []);
+  const mcpDetailSiteUrl = $derived(mcpSiteUrl(mcpDetailView));
+  const mcpDetailWebsiteUrl = $derived(mcpDetailView?.websiteUrl ?? "");
 
   onDestroy(() => onBusyChange(false));
 
@@ -314,6 +341,39 @@
     return values.some((value) => (value ?? "").toLowerCase().includes(needle));
   }
 
+  /** 分类筛选选项：当前已加载条目里出现过的分类，按条目数从多到少排序，同数量按名称排序。 */
+  function categoryOptions(entries: { category?: string | null }[]): { category: string; count: number }[] {
+    const counts = new Map<string, number>();
+    for (const entry of entries) {
+      const category = (entry.category ?? "").trim();
+      if (!category) continue;
+      counts.set(category, (counts.get(category) ?? 0) + 1);
+    }
+    return [...counts.entries()]
+      .map(([category, count]) => ({ category, count }))
+      .sort((a, b) => b.count - a.count || a.category.localeCompare(b.category, "en"));
+  }
+
+  /** 条目自带详情字段：有任意一项就直接渲染，缺字段时才请求详情接口。 */
+  function hasLocalSkillDetail(entry: AgenticSkillEntry): boolean {
+    return Boolean(
+      entry.longDescription ||
+        entry.license ||
+        entry.lastUpdated ||
+        (entry.platforms?.length ?? 0) > 0 ||
+        (entry.tags?.length ?? 0) > 0,
+    );
+  }
+
+  function hasLocalMcpDetail(entry: AgenticMcpEntry): boolean {
+    return Boolean(
+      entry.longDescription ||
+        entry.configSource ||
+        entry.websiteUrl ||
+        (entry.snippets?.length ?? 0) > 0,
+    );
+  }
+
   /** 列表行最多展示的标签数。 */
   function topTags(tags: string[] | null | undefined, limit = 3): string[] {
     return (tags ?? []).slice(0, limit);
@@ -334,6 +394,51 @@
   function mcpSiteUrl(detail: AgenticMcpDetail | null | undefined): string {
     if (!detail) return AGENTIC_SKILLS_SITE;
     return detail.sourceUrl || detail.websiteUrl || `${AGENTIC_SKILLS_SITE}/mcp/${detail.slug}`;
+  }
+
+  /** 详情面板数据：条目自带字段优先，缺失字段才回落到详情接口数据。 */
+  function mergeSkillDetail(entry: AgenticSkillEntry | null, detail: AgenticSkillDetail | null): AgenticSkillDetail | null {
+    if (!entry && !detail) return null;
+    return {
+      slug: entry?.slug ?? detail?.slug ?? "",
+      name: entry?.name ?? detail?.name ?? "",
+      description: entry?.description ?? detail?.description ?? null,
+      longDescription: entry?.longDescription ?? detail?.longDescription ?? null,
+      author: entry?.author ?? detail?.author ?? null,
+      authorUrl: detail?.authorUrl ?? null,
+      tags: entry?.tags?.length ? entry.tags : (detail?.tags ?? []),
+      platforms: entry?.platforms?.length ? entry.platforms : (detail?.platforms ?? []),
+      license: entry?.license ?? detail?.license ?? null,
+      quality: entry?.quality ?? detail?.quality ?? null,
+      lastUpdated: entry?.lastUpdated ?? detail?.lastUpdated ?? null,
+      githubUrl: entry?.githubUrl ?? detail?.githubUrl ?? null,
+      skillMdUrl: entry?.skillMdUrl ?? detail?.skillMdUrl ?? null,
+      installCommand: detail?.installCommand ?? null,
+      sourceUrl: detail?.sourceUrl ?? null,
+    };
+  }
+
+  function mergeMcpDetail(entry: AgenticMcpEntry | null, detail: AgenticMcpDetail | null): AgenticMcpDetail | null {
+    if (!entry && !detail) return null;
+    return {
+      slug: entry?.slug ?? detail?.slug ?? "",
+      name: entry?.name ?? detail?.name ?? "",
+      description: entry?.description ?? detail?.description ?? null,
+      longDescription: entry?.longDescription ?? detail?.longDescription ?? null,
+      author: entry?.author ?? detail?.author ?? null,
+      authorUrl: detail?.authorUrl ?? null,
+      category: entry?.category ?? detail?.category ?? null,
+      official: entry?.official ?? detail?.official ?? false,
+      trustLevel: detail?.trustLevel ?? null,
+      transport: entry?.transport?.length ? entry.transport : (detail?.transport ?? []),
+      requiresApiKey: entry?.requiresApiKey ?? detail?.requiresApiKey ?? false,
+      websiteUrl: entry?.websiteUrl ?? detail?.websiteUrl ?? null,
+      configSource: entry?.configSource ?? detail?.configSource ?? null,
+      popularity: entry?.popularity ?? detail?.popularity ?? null,
+      tags: entry?.tags?.length ? entry.tags : (detail?.tags ?? []),
+      snippets: entry?.snippets?.length ? entry.snippets : (detail?.snippets ?? []),
+      sourceUrl: detail?.sourceUrl ?? null,
+    };
   }
 
   /** 用系统浏览器打开站点链接；opener 插件不可用时回落到 window.open。 */
@@ -362,6 +467,7 @@
     mcpSearched = true;
     try {
       mcpEntries = await invoke<AgenticMcpEntry[]>("search_agentic_mcp", { request: { query: "" } });
+      if (mcpCategory !== null && !mcpEntries.some((entry) => entry.category === mcpCategory)) mcpCategory = null;
       mcpDetailSlug = null;
       mcpDetail = null;
     } catch (error) {
@@ -377,6 +483,7 @@
     skillSearched = true;
     try {
       skillEntries = await invoke<AgenticSkillEntry[]>("search_agentic_skills", { request: { query: "" } });
+      if (skillCategory !== null && !skillEntries.some((entry) => entry.category === skillCategory)) skillCategory = null;
       skillDetailSlug = null;
       skillDetail = null;
     } catch (error) {
@@ -394,6 +501,8 @@
     }
     mcpDetailSlug = entry.slug;
     mcpDetail = null;
+    // 条目自带详情字段时直接展开，不打后端；缺字段才请求详情接口兜底。
+    if (hasLocalMcpDetail(entry)) return;
     mcpDetailLoading = entry.slug;
     try {
       const detail = await invoke<AgenticMcpDetail>("agentic_mcp_detail", { request: { slug: entry.slug } });
@@ -414,6 +523,8 @@
     }
     skillDetailSlug = entry.slug;
     skillDetail = null;
+    // 条目自带详情字段时直接展开，不打后端；缺字段才请求详情接口兜底。
+    if (hasLocalSkillDetail(entry)) return;
     skillDetailLoading = entry.slug;
     try {
       const detail = await invoke<AgenticSkillDetail>("agentic_skill_detail", { request: { slug: entry.slug } });
@@ -569,6 +680,19 @@
           {t("刷新市场")}
         </button>
       </form>
+      {#if mcpEntries.length > 0}
+        <div class="category-filter" role="group" aria-label={t("分类筛选")}>
+          <button type="button" class="category-chip" aria-pressed={mcpCategory === null} onclick={() => (mcpCategory = null)}>
+            {t("全部分类")}
+          </button>
+          {#each mcpCategoryOptions as option (option.category)}
+            <button type="button" class="category-chip" aria-pressed={mcpCategory === option.category}
+              onclick={() => (mcpCategory = mcpCategory === option.category ? null : option.category)}>
+              {option.category}
+            </button>
+          {/each}
+        </div>
+      {/if}
       {#if mcpLoading && mcpEntries.length === 0}
         <p class="muted" role="status">{t("正在加载 MCP 目录…")}</p>
       {:else if filteredMcpEntries.length === 0}
@@ -582,7 +706,7 @@
                 <small>{entry.description || entry.slug}</small>
                 <span class="market-meta">
                   {#if entry.author}<span>{t("作者：{author}", { author: entry.author })}</span>{/if}
-                  {#if entry.category}<span>{t("分类：{category}", { category: entry.category })}</span>{/if}
+                  {#if entry.category}<span class="category-chip" title={t("分类：{category}", { category: entry.category })}>{entry.category}</span>{/if}
                   {#if (entry.transport ?? []).length}<span>{t("传输：{transport}", { transport: (entry.transport ?? []).join(" · ") })}</span>{/if}
                   {#if formatAmount(entry.popularity)}<span class="downloads">{t("热度 {count}", { count: formatAmount(entry.popularity) })}</span>{/if}
                   {#if entry.official}<span class="market-flag">{t("官方")}</span>{/if}
@@ -601,7 +725,7 @@
                 <div class="market-detail">
                   {#if mcpDetailLoading === entry.slug}
                     <p class="muted" role="status">{t("正在加载详情…")}</p>
-                  {:else if mcpDetail}
+                  {:else if mcpDetailView}
                     {#if mcpDetailLongDescription}<p class="detail-text">{mcpDetailLongDescription}</p>{/if}
                     <div class="detail-row">
                       {#if mcpDetailAuthor}<span>{t("作者：{author}", { author: mcpDetailAuthor })}</span>{/if}
@@ -646,6 +770,19 @@
           {t("刷新市场")}
         </button>
       </form>
+      {#if skillEntries.length > 0}
+        <div class="category-filter" role="group" aria-label={t("分类筛选")}>
+          <button type="button" class="category-chip" aria-pressed={skillCategory === null} onclick={() => (skillCategory = null)}>
+            {t("全部分类")}
+          </button>
+          {#each skillCategoryOptions as option (option.category)}
+            <button type="button" class="category-chip" aria-pressed={skillCategory === option.category}
+              onclick={() => (skillCategory = skillCategory === option.category ? null : option.category)}>
+              {option.category}
+            </button>
+          {/each}
+        </div>
+      {/if}
       {#if skillLoading && skillEntries.length === 0}
         <p class="muted" role="status">{t("正在加载 Skills 目录…")}</p>
       {:else if filteredSkillEntries.length === 0}
@@ -660,6 +797,7 @@
                 <small>{entry.description || entry.slug}</small>
                 <span class="market-meta">
                   {#if entry.author}<span>{t("作者：{author}", { author: entry.author })}</span>{/if}
+                  {#if entry.category}<span class="category-chip" title={t("分类：{category}", { category: entry.category })}>{entry.category}</span>{/if}
                   {#if formatAmount(entry.installs)}<span class="downloads">{t("安装量 {count}", { count: formatAmount(entry.installs) })}</span>{/if}
                   {#if formatAmount(entry.quality)}<span>{t("质量 {level}", { level: formatAmount(entry.quality) })}</span>{/if}
                   {#each tags as tag (tag)}<span class="tag">{tag}</span>{/each}
@@ -677,7 +815,7 @@
                 <div class="market-detail">
                   {#if skillDetailLoading === entry.slug}
                     <p class="muted" role="status">{t("正在加载详情…")}</p>
-                  {:else if skillDetail}
+                  {:else if skillDetailView}
                     {#if skillDetailLongDescription}<p class="detail-text">{skillDetailLongDescription}</p>{/if}
                     <div class="detail-row">
                       {#if skillDetailLicense}<span>{t("许可证：{license}", { license: skillDetailLicense })}</span>{/if}
@@ -744,6 +882,11 @@
   .market-list li { flex-wrap: wrap; }
   .market-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 10px; color: var(--text-muted); }
   .market-flag { flex-shrink: 0; padding: 1px 5px; border: 1px solid var(--border-strong); border-radius: 3px; color: var(--text); font-size: 10px; }
+  .category-chip { flex-shrink: 0; display: inline-flex; align-items: center; padding: 1px 5px; border: 1px solid var(--border-strong); border-radius: 3px; color: var(--text-muted); font-family: var(--code-font); font-size: 10px; letter-spacing: .04em; text-transform: uppercase; }
+  button.category-chip { background: transparent; cursor: pointer; }
+  button.category-chip:hover { border-color: var(--accent); color: var(--text-strong); }
+  .category-chip[aria-pressed="true"] { border-color: var(--accent); background: var(--accent); color: var(--accent-ink); font-weight: 700; }
+  .category-filter { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; min-width: 0; max-width: 100%; overflow-x: auto; }
   .market-source { flex-shrink: 0; padding: 1px 5px; border: 1px solid var(--border); border-radius: 3px; color: var(--text-muted); font-size: 10px; }
   .tag { padding: 1px 5px; border-radius: 3px; background: var(--surface-hover); color: var(--text-muted); font-size: 10px; }
   .secondary-action { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; min-height: 26px; padding: 0 10px; border: 1px solid var(--border); border-radius: 4px; background: transparent; color: var(--text-muted); font-size: 11px; cursor: pointer; }
