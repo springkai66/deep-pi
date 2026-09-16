@@ -5,6 +5,7 @@ export const SETTINGS_CATEGORIES = [
   { id: "extensions", label: "Pi 扩展", group: "Pi Coding Agent" },
   { id: "mcp", label: "MCP 服务", group: "Pi Coding Agent" },
   { id: "skills", label: "Skills 技能", group: "Pi Coding Agent" },
+  { id: "workflows", label: "工作流", group: "Pi Coding Agent" },
   { id: "dsh", label: "DSH 服务", group: "DSH (DeepSeek Harness)" },
   { id: "runtime", label: "运行时与更新", group: "系统" },
   { id: "advanced", label: "高级与诊断", group: "系统" },

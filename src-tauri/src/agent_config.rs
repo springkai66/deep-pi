@@ -50,7 +50,9 @@ fn validate_project_path(path: &str) -> Result<PathBuf, String> {
         .map_err(|error| format!("failed to resolve project directory: {error}"))
 }
 
-fn scope_pi_dir(
+/// 作用域对应的 `.pi` 目录：global = 托管 Pi 主目录，project = `<project>/.pi`。
+/// `pub(crate)`：工作流状态文件（`workflows.json`）与技能 / MCP 配置放在同一层。
+pub(crate) fn scope_pi_dir(
     paths: &AppPaths,
     scope: ConfigScope,
     project_path: Option<&str>,
@@ -243,6 +245,22 @@ pub(crate) fn save_mcp_server_config(
     write_json_file(&path, &value)
 }
 
+/// `mcp.json` 里是否已有同名服务（工作流安装用它把「已存在」的组件计入跳过，不覆盖）。
+pub(crate) fn mcp_server_exists(
+    paths: &AppPaths,
+    scope: ConfigScope,
+    project_path: Option<&str>,
+    name: &str,
+) -> Result<bool, String> {
+    let name = name.trim();
+    validate_entry_name(name)?;
+    let value = read_json_file(&mcp_file(paths, scope, project_path)?)?;
+    Ok(value
+        .get("mcpServers")
+        .and_then(Value::as_object)
+        .is_some_and(|servers| servers.contains_key(name)))
+}
+
 #[tauri::command]
 pub async fn save_mcp_server(
     paths: State<'_, AppPaths>,
@@ -404,6 +422,16 @@ pub(crate) fn save_skill_content(
         .map_err(|error| format!("failed to write SKILL.md: {error}"))?;
     file.commit()
         .map_err(|error| format!("failed to commit SKILL.md: {error}"))
+}
+
+/// 技能目录是否已存在（工作流安装用它把「已存在」的组件计入跳过，不覆盖）。
+pub(crate) fn skill_dir_exists(
+    paths: &AppPaths,
+    scope: ConfigScope,
+    project_path: Option<&str>,
+    name: &str,
+) -> Result<bool, String> {
+    Ok(skill_dir(paths, scope, project_path, name)?.is_dir())
 }
 
 #[tauri::command]

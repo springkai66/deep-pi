@@ -83,6 +83,32 @@
     contextUsage: { tokens: number | null; contextWindow: number | null; percent: number | null } | null;
   }
   let streamingBehavior = $state<"followUp" | "steer">("followUp");
+  /// 工作流（agenticskills.io 打包的「技能 + MCP」）：技能安装后按任务自动激活，选择器只负责把站点的起手提示填进草稿。
+  interface InstalledWorkflow {
+    slug: string;
+    name: string;
+    category?: string | null;
+    skillCount?: number | null;
+    mcpCount?: number | null;
+    installedAt?: string | null;
+    components?: { kind?: string; slug?: string; name?: string; url?: string }[];
+  }
+  interface WorkflowDetail {
+    slug: string;
+    name: string;
+    description?: string | null;
+    category?: string | null;
+    level?: string | null;
+    setupTime?: string | null;
+    components?: { kind?: string; slug?: string; name?: string; url?: string }[];
+    steps?: { name?: string; text?: string }[];
+    kickoffPrompt?: string | null;
+    sourceUrl?: string | null;
+  }
+  let workflows = $state<InstalledWorkflow[]>([]);
+  let workflowBusy = $state(false);
+  /// slug → 详情：重复选择同一个工作流时不再请求后端。
+  const workflowDetails = new Map<string, WorkflowDetail>();
   let input = $state<HTMLTextAreaElement>();
   let transcript = $state<HTMLDivElement>();
   let transcriptContent = $state<HTMLDivElement>();
@@ -256,6 +282,100 @@
       if (flashTimer) { clearTimeout(flashTimer); flashTimer = null; }
     };
   });
+
+  /// 当前任务的项目路径：`list_tasks` 的记录里带 projectPath，用来顺带读取项目范围的工作流。
+  /// 任务没有项目上下文（或查询失败）时返回 null，此时只读全局配置。
+  async function taskProjectPath(): Promise<string | null> {
+    const tasks = await invoke<{ id?: string; projectPath?: string }[]>("list_tasks");
+    const path = tasks.find((task) => task.id === taskId)?.projectPath;
+    return typeof path === "string" && path.trim() ? path : null;
+  }
+
+  /// 已安装工作流：全局 + 当前项目各读一次，按 slug 去重（项目覆盖全局）。
+  /// 读取失败或没有安装任何工作流时保持空列表 → 选择器不渲染（不留空下拉）；失败只记录日志，不打断对话。
+  $effect(() => {
+    void taskId;                       // 切换任务时重新读取
+    void runId;                        // 会话重启后项目上下文可能变化
+    let alive = true;
+    void (async () => {
+      try {
+        const globalList = await invoke<InstalledWorkflow[]>("list_installed_workflows", { scope: "global", projectPath: null });
+        if (!alive) return;
+        const projectPath = await taskProjectPath().catch(() => null);
+        if (!alive) return;
+        const projectList = projectPath
+          ? await invoke<InstalledWorkflow[]>("list_installed_workflows", { scope: "project", projectPath }).catch((cause) => {
+              console.warn("list_installed_workflows (project) failed:", cause);
+              return [] as InstalledWorkflow[];
+            })
+          : [];
+        if (!alive) return;
+        const merged = new Map<string, InstalledWorkflow>();
+        for (const item of [...(Array.isArray(globalList) ? globalList : []), ...(Array.isArray(projectList) ? projectList : [])]) {
+          if (!item || typeof item.slug !== "string" || !item.slug.trim()) continue;
+          merged.set(item.slug, item);
+        }
+        workflows = [...merged.values()];
+      } catch (cause) {
+        if (!alive) return;
+        workflows = [];
+        console.warn("list_installed_workflows failed:", cause);
+      }
+    })();
+    return () => { alive = false; };
+  });
+
+  /// 选项副文本：只显示存在的技能 / MCP 数量。
+  function workflowMeta(workflow: InstalledWorkflow): string {
+    const parts: string[] = [];
+    const skills = typeof workflow.skillCount === "number" ? workflow.skillCount : 0;
+    const mcps = typeof workflow.mcpCount === "number" ? workflow.mcpCount : 0;
+    if (skills > 0) parts.push(t("{count} 个技能", { count: skills }));
+    if (mcps > 0) parts.push(`${mcps} MCP`);
+    return parts.length ? ` · ${parts.join(" / ")}` : "";
+  }
+
+  /// 站点没给起手提示时的中性兜底：用步骤名拼一句话，最多 6 个步骤名，超出加省略号。
+  function workflowStepsPrompt(detail: WorkflowDetail): string {
+    const steps = (detail.steps ?? [])
+      .map((step) => (typeof step?.name === "string" ? step.name.trim() : ""))
+      .filter(Boolean);
+    if (!steps.length) return t("按「{name}」工作流执行。", { name: detail.name });
+    const shown = steps.slice(0, 6);
+    const more = steps.length > shown.length ? "…" : "";
+    return t("按「{name}」工作流执行：{steps}", { name: detail.name, steps: `${shown.join(" → ")}${more}` });
+  }
+
+  /// 选中工作流：拉取（或复用缓存的）详情，把起手提示填进草稿——只填草稿，不自动发送。
+  /// 草稿为空时直接填入；草稿非空时不覆盖用户已写内容，而是换行接在后面。
+  async function applyWorkflow(slug: string) {
+    const workflow = workflows.find((item) => item.slug === slug);
+    if (!workflow) return;
+    const current = generation;
+    workflowBusy = true;
+    try {
+      let detail = workflowDetails.get(slug);
+      if (!detail) {
+        detail = await invoke<WorkflowDetail>("agentic_workflow_detail", { request: { slug } });
+        workflowDetails.set(slug, detail);
+      }
+      if (current !== generation) return;
+      const prompt = typeof detail.kickoffPrompt === "string" && detail.kickoffPrompt.trim()
+        ? detail.kickoffPrompt.trim()
+        : workflowStepsPrompt(detail);
+      draft = draft.trim() ? `${draft.trimEnd()}\n\n${prompt}` : prompt;
+      notice = t("已把「{name}」的起手提示填入输入框，可编辑后发送", { name: workflow.name });
+      if (visible) {
+        await tick();
+        input?.focus();
+        input?.setSelectionRange(draft.length, draft.length);
+      }
+    } catch (cause) {
+      if (current === generation) notice = tm(String(cause));
+    } finally {
+      if (current === generation) workflowBusy = false;
+    }
+  }
   const canSend = $derived(!switching && connected && !initializing && !sending && !stopping && !conversation.closed && !!draft.trim());
   const groupedModels = $derived.by(() => {
     const groups = new Map<string, typeof models>();
@@ -944,6 +1064,22 @@
       <select aria-label={t("运行时消息处理方式")} bind:value={streamingBehavior}>
         <option value="followUp">{t("排队跟进")}</option><option value="steer">{t("优先引导")}</option>
       </select>
+      {#if workflows.length}
+        <select aria-label={t("工作流")} value="" disabled={workflowBusy}
+          title={t("技能安装后按任务自动激活；选中工作流只把站点的起手提示填进输入框")}
+          onchange={(event) => {
+            const select = event.currentTarget;
+            const slug = select.value;
+            select.value = "";             // 提示已填入草稿：恢复为「不使用工作流」，避免误以为选择持续生效
+            void applyWorkflow(slug);
+          }}>
+          <option value="">{t("不使用工作流")}</option>
+          {#each workflows as workflow (workflow.slug)}
+            <option value={workflow.slug}>{workflow.name}{workflowMeta(workflow)}</option>
+          {/each}
+        </select>
+        <small class="workflow-hint" title={t("技能安装后按任务自动激活；选中工作流只把站点的起手提示填进输入框")}>{t("技能安装后按任务自动激活；选中工作流只把站点的起手提示填进输入框")}</small>
+      {/if}
       <span class="connection-status" role="status">{statusText}</span>
       {#if conversation.busy || conversation.queue.length}
         <button type="button" class="send-button" disabled={switching || stopping} title={t("停止当前响应并清空队列")} aria-label={t("停止当前响应并清空队列")} onclick={() => void interrupt()}><Square size={16} /></button>
@@ -1019,6 +1155,7 @@
   .ring-fg { fill: none; stroke: var(--accent); stroke-linecap: round; transition: stroke-dasharray .4s ease, stroke .3s ease; }
   .context-ring:hover:not(:disabled) .ring-fg { stroke: var(--accent); filter: brightness(1.15); }
   select { min-width: 0; max-width: 130px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface-alt); padding: 4px; color: var(--text-muted); font-size: 11px; }
+  .workflow-hint { flex: 0 1 auto; min-width: 0; max-width: 240px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--text-muted); font-size: 10px; }
   .connection-status { flex: 1; font-size: 11px; color: var(--text-muted); }
   .send-button { display: grid; place-items: center; width: 30px; height: 30px; padding: 0; flex-shrink: 0; border: 0; border-radius: 4px; background: var(--surface-hover); color: var(--text); }
   .primary-send { background: var(--accent); color: var(--accent-ink); }

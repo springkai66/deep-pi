@@ -88,6 +88,14 @@ export const EN_CHAT: Record<string, string> = {
   "停止当前响应并清空队列": "Stop the current response and clear the queue",
   "增强提示词（改写为更清晰的结构化提示）": "Enhance prompt (rewrite it into a clearer, structured prompt)",
   "增强提示词": "Enhance prompt",
+  "不使用工作流": "No workflow",
+  "{count} 个技能": "{count} skills",
+  "技能安装后按任务自动激活；选中工作流只把站点的起手提示填进输入框":
+    "Skills activate automatically per task; choosing a workflow only fills its kickoff prompt into the input box",
+  "按「{name}」工作流执行。": "Run the “{name}” workflow.",
+  "按「{name}」工作流执行：{steps}": "Run the “{name}” workflow: {steps}",
+  "已把「{name}」的起手提示填入输入框，可编辑后发送":
+    "Inserted the “{name}” kickoff prompt into the input box — edit it before sending",
 
   // —— 设置页：标题与导航 ——
   "设置": "Settings",

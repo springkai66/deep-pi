@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ArrowLeft, Monitor, Palette, Server, Download, PackageOpen, Puzzle, Sparkles, Wrench, Globe, Upload, Trash2 } from "@lucide/svelte";
+  import { ArrowLeft, Monitor, Palette, Server, Download, PackageOpen, Puzzle, Sparkles, Workflow, Wrench, Globe, Upload, Trash2 } from "@lucide/svelte";
   import type { Snippet } from "svelte";
   import { onMount } from "svelte";
   import { invoke as nativeInvoke } from "@tauri-apps/api/core";
@@ -17,6 +17,7 @@
   import { SETTINGS_CATEGORIES, nextSettingsCategory, parseTaskLimit, settingsGroups, type SettingsCategory } from "./settings-navigation";
   import ExternalEditorSettings from "./ExternalEditorSettings.svelte";
   import DiagnosticsPanel from "./DiagnosticsPanel.svelte";
+  import PiMcpSkillsSettings from "./PiMcpSkillsSettings.svelte";
   import { t, tm, getLocale } from "$lib/i18n.svelte";
   import { appMessageText } from "./app-messages";
   import { LOCALES, LOCALE_LABELS } from "./locale";
@@ -32,20 +33,26 @@
     extensions: Snippet;
     mcp: Snippet;
     skills: Snippet;
+    /** 可选：+page.svelte 传入时优先渲染；未传入时由本组件内置渲染（沿用上次的项目范围）。 */
+    workflows?: Snippet;
     dsh: Snippet;
     closeBlocked?: boolean;
     saving?: boolean;
     onDiagnosticsBusy: (busy: boolean) => void;
     confirmDiagnosticsClear: () => Promise<boolean>;
   }
-  let { category, onCategoryChange, onChangeSettings, onEditorSaved, onClose, models, extensions, mcp, skills, dsh, closeBlocked = false, saving = false, onDiagnosticsBusy, confirmDiagnosticsClear, ...runtime }: Props = $props();
-  const icons = { general: Monitor, appearance: Palette, models: Server, extensions: PackageOpen, mcp: Puzzle, skills: Sparkles, dsh: Globe, runtime: Download, advanced: Wrench };
+  let { category, onCategoryChange, onChangeSettings, onEditorSaved, onClose, models, extensions, mcp, skills, workflows, dsh, closeBlocked = false, saving = false, onDiagnosticsBusy, confirmDiagnosticsClear, ...runtime }: Props = $props();
+  const icons = { general: Monitor, appearance: Palette, models: Server, extensions: PackageOpen, mcp: Puzzle, skills: Sparkles, workflows: Workflow, dsh: Globe, runtime: Download, advanced: Wrench };
   let modelsVisited = $state(false);
   let extensionsVisited = $state(false);
   let mcpVisited = $state(false);
   let skillsVisited = $state(false);
+  let workflowsVisited = $state(false);
   let dshVisited = $state(false);
   let advancedVisited = $state(false);
+  /** 工作流市场的 busy 与错误：面板在本组件内兜底渲染时的本地状态。 */
+  let workflowsBusy = $state(false);
+  let workflowsError = $state("");
   let taskLimitError = $state("");
   let systemFonts = $state<string[]>([]);
   onMount(() => {
@@ -149,6 +156,7 @@
     if (category === "extensions") extensionsVisited = true;
     if (category === "mcp") mcpVisited = true;
     if (category === "skills") skillsVisited = true;
+    if (category === "workflows") workflowsVisited = true;
     if (category === "dsh") dshVisited = true;
     if (category === "advanced") advancedVisited = true;
   });
@@ -173,7 +181,7 @@
 
 <section class="settings-page" aria-label={t("设置")}>
   <header class="settings-header">
-    <button class="quiet-button icon-button" type="button" aria-label={t("返回工作区")} title={closeBlocked ? t("请先完成或取消当前操作") : t("返回工作区")} disabled={closeBlocked} onclick={onClose}><ArrowLeft size={17} /></button>
+    <button class="quiet-button icon-button" type="button" aria-label={t("返回工作区")} title={closeBlocked || workflowsBusy ? t("请先完成或取消当前操作") : t("返回工作区")} disabled={closeBlocked || workflowsBusy} onclick={onClose}><ArrowLeft size={17} /></button>
     <h1>{t("设置")}</h1>
     {#if saving}<span class="muted" role="status">{t("正在保存…")}</span>{/if}
   </header>
@@ -306,6 +314,21 @@
       <div class="settings-panel embedded-panel" hidden={category !== "mcp"}>{#if mcpVisited}{@render mcp()}{/if}</div>
       <div class="settings-panel embedded-panel" hidden={category !== "skills"}>{#if skillsVisited}{@render skills()}{/if}</div>
       <div class="settings-panel embedded-panel" hidden={category !== "dsh"}>{#if dshVisited}{@render dsh()}{/if}</div>
+      <div class="settings-panel embedded-panel" hidden={category !== "workflows"}>
+        {#if workflowsVisited}
+          {#if workflows}
+            {@render workflows()}
+          {:else}
+            <PiMcpSkillsSettings
+              mode="workflows"
+              onError={(error) => { workflowsError = tm(String(error)); }}
+              projectPath={runtime.settings.lastProject ?? null}
+              onBusyChange={(busy) => { workflowsBusy = busy; }}
+            />
+            {#if workflowsError}<p class="panel-error" role="alert">{tm(workflowsError)}</p>{/if}
+          {/if}
+        {/if}
+      </div>
       <div class="settings-panel" hidden={category !== "advanced"}>
         <ExternalEditorSettings editor={runtime.settings.externalEditor} onSaved={onEditorSaved} />
         {#if advancedVisited}<DiagnosticsPanel onBusyChange={onDiagnosticsBusy} confirmClear={confirmDiagnosticsClear} />{/if}
@@ -363,4 +386,5 @@
   .theme-copy small { font-size: 11px; color: var(--text-muted); overflow-wrap: anywhere; }
   .theme-status { margin: 8px 0 0; font-size: 12px; color: var(--accent); overflow-wrap: anywhere; }
   .theme-error { margin: 8px 0 0; font-size: 12px; color: var(--status-failed); overflow-wrap: anywhere; }
+  .panel-error { margin: 8px 0 0; font-size: 12px; color: var(--status-failed); overflow-wrap: anywhere; }
 </style>

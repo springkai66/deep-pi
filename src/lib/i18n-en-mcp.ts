@@ -181,4 +181,32 @@ export const EN_MCP: Record<string, string> = {
   "已安装技能 {name}": "Skill {name} installed",
   "技能来自 agenticskills.io，安装后重启 Pi 任务生效。":
     "Skills come from agenticskills.io; installed Skills take effect after Pi tasks are restarted.",
+
+  /* ---------- 设置导航：工作流分类 ---------- */
+  "工作流": "Workflows",
+  "工作流设置": "Workflow settings",
+
+  /* ---------- 工作流市场（agenticskills.io） ---------- */
+  "工作流市场": "Workflows marketplace",
+  "筛选工作流": "Filter workflows",
+  "按名称、描述或分类筛选工作流…": "Filter workflows by name, description, or category…",
+  "正在加载工作流目录…": "Loading the workflow catalog…",
+  "没有匹配的工作流": "No matching workflows",
+  "安装工作流": "Install workflow",
+  "重新安装": "Reinstall",
+  "配置时间：{time}": "Setup time: {time}",
+  "难度：{level}": "Level: {level}",
+  "技能": "Skills",
+  "步骤": "Steps",
+  "起手提示": "Kickoff prompt",
+  "{skills} 个技能 · {mcp} 个 MCP": "{skills} skills · {mcp} MCP servers",
+  "安装结果：{name}": "Installation result: {name}",
+  "跳过 {count} 个已存在的组件": "Skipped {count} existing components",
+  "工作流来自 agenticskills.io，安装会写入技能与 MCP 配置；重新安装会跳过已存在的组件。":
+    "Workflows come from agenticskills.io; installing writes Skills and MCP configuration, and reinstalling skips components that already exist.",
+  "已安装工作流": "Installed workflows",
+  "刷新已安装工作流": "Refresh installed workflows",
+  "正在读取已安装工作流…": "Reading installed workflows…",
+  "尚未安装工作流": "No workflows installed yet",
+  "安装于 {date}": "Installed {date}",
 };

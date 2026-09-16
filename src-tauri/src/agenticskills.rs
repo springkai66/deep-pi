@@ -8,13 +8,21 @@
 //!   作为 chunk 不可用时的降级来源（无分类，只写短缓存）。
 //! - 详情页把数据塞在 Next.js flight 数据 `self.__next_f.push([1,"…"])` 里，
 //!   反转义后按平衡括号扫描出目标对象再用 serde_json 解析（详情命令与安装兜底）。
+//! - 工作流（`/workflows`）不在数据 chunk 里：列表页用 JSON-LD `ItemList` 拿全量 slug + name、
+//!   用 HTML 卡片补分类 / 难度 / 描述 / 计数；详情页用 JSON-LD `HowTo`（组件 + 步骤 + 起手提示词）。
+//!   安装是「一个按钮装齐」：组件逐个走既有技能 / MCP 安装路径，已存在就跳过、失败不中断。
+//! - 已安装的工作流记在 `<pi_home>/workflows.json`（项目范围在 `<project>/.pi/workflows.json`）。
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
+    fs,
+    io::Write,
+    path::{Path, PathBuf},
     sync::Mutex,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use atomic_write_file::AtomicWriteFile;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{State, Url};
@@ -43,6 +51,13 @@ const MAX_OBJECT_LITERAL_BYTES: usize = 128 * 1024;
 const MIN_CHUNK_ENTRIES: usize = 10;
 const MAX_RESULTS: usize = 200;
 const MAX_SLUG_LENGTH: usize = 64;
+/// 工作流列表页（打包好的「技能 + MCP」集合）。
+const AGENTIC_WORKFLOWS_URL: &str = "https://agenticskills.io/workflows";
+/// 工作流结果上限：站点只有 20 多个，留足本地过滤后的空间。
+const MAX_WORKFLOW_RESULTS: usize = 100;
+/// 已安装工作流状态文件的上限：条目数与文件大小，防止手改的文件把界面 / 内存撑坏。
+const MAX_INSTALLED_WORKFLOWS: usize = 64;
+const MAX_WORKFLOW_FILE_BYTES: usize = 256 * 1024;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -134,6 +149,110 @@ pub struct AgenticMcpDetail {
     pub source_url: String,
 }
 
+/// 工作流列表条目：JSON-LD 给 slug + name，卡片补分类 / 难度 / 描述 / 组件计数。
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgenticWorkflowEntry {
+    pub slug: String,
+    pub name: String,
+    pub category: Option<String>,
+    pub level: Option<String>,
+    pub description: Option<String>,
+    pub skill_count: u32,
+    pub mcp_count: u32,
+}
+
+/// 工作流里的单个组件：`kind` 由站点 url 路径决定（`/skills/` → `skill`、`/mcp/` → `mcp`）。
+/// 既随安装结果出参，也要能从 `workflows.json` 读回。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgenticWorkflowComponent {
+    pub kind: String,
+    pub slug: String,
+    pub name: String,
+    pub url: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgenticWorkflowStep {
+    pub name: String,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgenticWorkflowDetail {
+    pub slug: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub category: Option<String>,
+    pub level: Option<String>,
+    pub setup_time: Option<String>,
+    pub components: Vec<AgenticWorkflowComponent>,
+    pub steps: Vec<AgenticWorkflowStep>,
+    pub kickoff_prompt: Option<String>,
+    pub source_url: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgenticWorkflowInstall {
+    pub slug: String,
+    pub scope: ConfigScope,
+    #[serde(default)]
+    pub project_path: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgenticWorkflowFailure {
+    pub kind: String,
+    pub slug: String,
+    pub error: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgenticWorkflowInstallResult {
+    pub workflow: String,
+    pub skills: Vec<String>,
+    pub mcp: Vec<String>,
+    pub skipped: Vec<String>,
+    pub failures: Vec<AgenticWorkflowFailure>,
+}
+
+/// 本地状态文件里的一条「已安装工作流」（`workflows.json` 的 value）。
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstalledWorkflow {
+    pub slug: String,
+    pub name: String,
+    pub category: Option<String>,
+    pub skill_count: u32,
+    pub mcp_count: u32,
+    pub installed_at: String,
+    pub components: Vec<AgenticWorkflowComponent>,
+}
+
+/// 状态文件里的原始记录：slug 是 map 的键，不重复存；字段缺省时按最宽松的方式读回。
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InstalledWorkflowRecord {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    category: Option<String>,
+    #[serde(default)]
+    skill_count: u32,
+    #[serde(default)]
+    mcp_count: u32,
+    #[serde(default)]
+    installed_at: String,
+    #[serde(default)]
+    components: Vec<AgenticWorkflowComponent>,
+}
+
 /// 数据 chunk 里解析出来的目录：技能、MCP 服务器与仓库统计（`repoStars`）。
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct CatalogChunk {
@@ -199,7 +318,23 @@ pub struct AgenticCatalogCache {
     chunk_url: Mutex<Option<(Instant, String)>>,
 }
 
+/// 工作流命令的签名不接收 `AppHandle`（前端已冻结），取不到托管的 `AgenticCatalogCache`，
+/// 因此工作流安装自己持有一个进程级目录缓存：装一个工作流时技能与 MCP 组件共用同一份数据。
+static WORKFLOW_CATALOG_CACHE: AgenticCatalogCache = AgenticCatalogCache::new();
+
+/// 工作流列表缓存：形态与 `AgenticCatalogCache` 一致（`(写入时间, 结果, 是否降级)`，TTL 600s）。
+static WORKFLOW_CACHE: Mutex<CatalogSnapshot<AgenticWorkflowEntry>> = Mutex::new(None);
+
 impl AgenticCatalogCache {
+    /// 供模块级 `static` 使用（`Default::default` 不是 `const`）。
+    const fn new() -> Self {
+        Self {
+            skills: Mutex::new(None),
+            mcp: Mutex::new(None),
+            chunk_url: Mutex::new(None),
+        }
+    }
+
     fn skills(&self) -> Option<Vec<AgenticSkillEntry>> {
         let guard = self.skills.lock().ok()?;
         fresh_entries(guard.as_ref())
@@ -1178,6 +1313,109 @@ pub fn parse_mcp_catalog(html: &str) -> Vec<AgenticMcpEntry> {
     entries
 }
 
+// ── 工作流列表页（`/workflows`）──────────────────────────────────────────────
+//
+// 工作流是打包好的技能集合（有时含 MCP 服务器），数据不在目录 chunk 里：
+// JSON-LD `ItemList` 给全量 slug + name，HTML 卡片再补分类 / 难度 / 描述 / 计数。
+
+fn is_workflow_level(text: &str) -> bool {
+    matches!(
+        text.to_ascii_lowercase().as_str(),
+        "beginner" | "intermediate" | "advanced"
+    )
+}
+
+/// 卡片与详情页都有的「分类 / 难度」徽标：容器里的前两个 span。
+/// 难度用已知取值兜底判定，顺序反过来时也能认出来。
+fn workflow_badges(body: &str) -> (Option<String>, Option<String>) {
+    let Some(at) = body.find("flex items-center gap-2 mb-") else {
+        return (None, None);
+    };
+    let region = &body[at..];
+    // 徽标容器里只有两个 span，后面第一个 `</div>` 就是它的收尾。
+    let end = region.find("</div>").unwrap_or(region.len().min(1024));
+    let badges: Vec<String> = pills(&region[..end])
+        .into_iter()
+        .filter_map(|pill| non_empty(&pill.text))
+        .collect();
+    match (badges.first().cloned(), badges.get(1).cloned()) {
+        (Some(category), Some(level)) if is_workflow_level(&category) => {
+            (Some(level), Some(category))
+        }
+        (category, level) => (category, level),
+    }
+}
+
+/// 卡片底部的计数：`5 skills` / `4 MCP`（`<!-- -->` 注释会被 `strip_tags` 去掉）。
+fn workflow_counts(body: &str) -> (u32, u32) {
+    let mut skills = 0;
+    let mut mcp = 0;
+    for pill in pills(body) {
+        let Some((number, label)) = pill.text.trim().split_once(char::is_whitespace) else {
+            continue;
+        };
+        let Ok(count) = number.parse::<u32>() else {
+            continue;
+        };
+        let label = label.trim().to_ascii_lowercase();
+        if label.starts_with("skill") {
+            skills = count;
+        } else if label.starts_with("mcp") {
+            mcp = count;
+        }
+    }
+    (skills, mcp)
+}
+
+fn apply_workflow_card(entry: &mut AgenticWorkflowEntry, body: &str) {
+    if let Some(name) = element_text(body, "h2") {
+        entry.name = name;
+    }
+    if entry.description.is_none() {
+        entry.description = paragraph_text(body, "line-clamp-3");
+    }
+    let (category, level) = workflow_badges(body);
+    entry.category = category;
+    entry.level = level;
+    let (skills, mcp) = workflow_counts(body);
+    entry.skill_count = skills;
+    entry.mcp_count = mcp;
+}
+
+/// 列表页解析：JSON-LD 拿全量 21 条，卡片补富信息（卡片没有的条目保持默认计数）。
+pub(crate) fn parse_workflow_catalog(html: &str) -> Vec<AgenticWorkflowEntry> {
+    let mut entries: Vec<AgenticWorkflowEntry> = Vec::new();
+    let mut index: HashMap<String, usize> = HashMap::new();
+    for (slug, name) in json_ld_entries(html) {
+        if index.contains_key(&slug) {
+            continue;
+        }
+        index.insert(slug.clone(), entries.len());
+        entries.push(AgenticWorkflowEntry {
+            slug,
+            name,
+            ..AgenticWorkflowEntry::default()
+        });
+    }
+    each_card(html, "workflows", |slug, body| {
+        let position = match index.get(slug) {
+            Some(position) => *position,
+            None => {
+                let position = entries.len();
+                entries.push(AgenticWorkflowEntry {
+                    slug: slug.to_owned(),
+                    name: slug.to_owned(),
+                    ..AgenticWorkflowEntry::default()
+                });
+                index.insert(slug.to_owned(), position);
+                position
+            }
+        };
+        apply_workflow_card(&mut entries[position], body);
+    });
+    entries
+}
+
 /// 把 `self.__next_f.push([1,"…"])` 的字符串字面量逐段反转义后拼成 flight 数据。
 fn flight_payload(html: &str) -> String {
     const MARKER: &str = "self.__next_f.push([1,";
@@ -1296,6 +1534,154 @@ pub fn parse_mcp_detail(html: &str) -> Option<AgenticMcpDetail> {
     let payload = flight_payload(html);
     let value = find_detail_object(&payload, "\"server\":")?;
     Some(mcp_detail_from_value(&value))
+}
+
+// ── 工作流详情页（`/workflows/<slug>`）───────────────────────────────────────
+//
+// 详情页的 JSON-LD 是 `[HowTo, BreadcrumbList, WebPage]`：组件 / 步骤 / 耗时在 HowTo 里，
+// 展示名用 WebPage 的（HowTo 的 name 是 SEO 标题「How to Set Up the … Workflow」）。
+
+/// 逐个解析页面里的 `application/ld+json` 脚本块（数组会摊平）。
+pub(crate) fn json_ld_objects(html: &str) -> Vec<Value> {
+    let mut values: Vec<Value> = Vec::new();
+    let mut cursor = 0;
+    while let Some(relative) = html[cursor..].find("application/ld+json") {
+        let marker = cursor + relative;
+        let Some(content_start) = html[marker..].find('>').map(|offset| marker + offset + 1) else {
+            break;
+        };
+        let Some(content_end) = html[content_start..]
+            .find("</script>")
+            .map(|offset| content_start + offset)
+        else {
+            break;
+        };
+        cursor = content_end;
+        let Ok(value) = serde_json::from_str::<Value>(&html[content_start..content_end]) else {
+            continue;
+        };
+        match value {
+            Value::Array(items) => values.extend(items),
+            single => values.push(single),
+        }
+    }
+    values
+}
+
+/// 详情页 `WebPage` 节点里的真实工作流名（与列表页条目一致，比 HowTo 的 SEO 标题适合展示）。
+fn workflow_page_name(objects: &[Value], slug: &str) -> Option<String> {
+    let suffix = format!("/workflows/{slug}");
+    objects.iter().find_map(|value| {
+        if value.get("@type").and_then(Value::as_str) != Some("WebPage") {
+            return None;
+        }
+        let url = json_string(value, "url")?;
+        url.trim_end_matches('/')
+            .ends_with(&suffix)
+            .then(|| json_string(value, "name"))
+            .flatten()
+    })
+}
+
+/// `tool[]` → 组件：`kind` 只看 url 路径，其它路径（如 `/tools/…`）忽略。
+fn workflow_component_from_tool(item: &Value) -> Option<AgenticWorkflowComponent> {
+    let url = json_string(item, "url")?;
+    let path = url.split(['?', '#']).next().unwrap_or(&url);
+    let kind = if path.contains("/skills/") {
+        "skill"
+    } else if path.contains("/mcp/") {
+        "mcp"
+    } else {
+        return None;
+    };
+    let slug = validate_slug(&slug_from_url(path)?).ok()?.to_owned();
+    Some(AgenticWorkflowComponent {
+        kind: kind.to_owned(),
+        name: json_string(item, "name").unwrap_or_else(|| slug.clone()),
+        slug,
+        url,
+    })
+}
+
+fn workflow_components(howto: &Value) -> Vec<AgenticWorkflowComponent> {
+    let mut components: Vec<AgenticWorkflowComponent> = Vec::new();
+    let mut seen: HashSet<(String, String)> = HashSet::new();
+    let tools = howto.get("tool").and_then(Value::as_array);
+    for item in tools.into_iter().flatten() {
+        let Some(component) = workflow_component_from_tool(item) else {
+            continue;
+        };
+        if seen.insert((component.kind.clone(), component.slug.clone())) {
+            components.push(component);
+        }
+    }
+    components
+}
+
+fn workflow_steps(howto: &Value) -> Vec<AgenticWorkflowStep> {
+    let steps = howto.get("step").and_then(Value::as_array);
+    steps
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            let name = json_string(item, "name").unwrap_or_default();
+            let text = json_string(item, "text").unwrap_or_default();
+            (!name.is_empty() || !text.is_empty()).then_some(AgenticWorkflowStep { name, text })
+        })
+        .collect()
+}
+
+/// 步骤文本里的起手提示词：`… Prompt: "…"`（全角 / 半角冒号都认，引号必须是双引号）。
+/// 没有 Prompt、或引号不闭合 → `None`。
+fn kickoff_prompt_from_text(text: &str) -> Option<String> {
+    let mut cursor = 0;
+    while let Some(relative) = text[cursor..].find("Prompt") {
+        let at = cursor + relative + "Prompt".len();
+        cursor = at;
+        let rest = text[at..].trim_start();
+        let Some(rest) = rest.strip_prefix(':').or_else(|| rest.strip_prefix('：')) else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        let Some(rest) = rest.strip_prefix('"') else {
+            continue;
+        };
+        let Some(end) = rest.find('"') else {
+            return None;
+        };
+        let prompt = rest[..end].trim();
+        if !prompt.is_empty() {
+            return Some(prompt.to_owned());
+        }
+    }
+    None
+}
+
+/// 详情页解析：HowTo 缺失（站点改版 / 404 页）→ `None`。
+pub(crate) fn parse_workflow_detail(html: &str, slug: &str) -> Option<AgenticWorkflowDetail> {
+    let objects = json_ld_objects(html);
+    let howto = objects
+        .iter()
+        .find(|value| value.get("@type").and_then(Value::as_str) == Some("HowTo"))?;
+    let steps = workflow_steps(howto);
+    let kickoff_prompt = steps
+        .iter()
+        .find_map(|step| kickoff_prompt_from_text(&step.text));
+    let (category, level) = workflow_badges(html);
+    Some(AgenticWorkflowDetail {
+        slug: slug.to_owned(),
+        name: workflow_page_name(&objects, slug)
+            .or_else(|| json_string(howto, "name"))
+            .unwrap_or_else(|| slug.to_owned()),
+        description: json_string(howto, "description"),
+        category,
+        level,
+        setup_time: json_string(howto, "totalTime"),
+        components: workflow_components(howto),
+        steps,
+        kickoff_prompt,
+        source_url: format!("{AGENTIC_WORKFLOWS_URL}/{slug}"),
+    })
 }
 
 /// 把站点给出的配置片段解析成可写入 mcp.json 的服务器对象。
@@ -1830,6 +2216,348 @@ fn install_mcp(
     Ok(name)
 }
 
+// ── 工作流抓取 / 安装 / 本地状态 ─────────────────────────────────────────────
+
+fn fetch_workflow_detail(slug: &str) -> Result<AgenticWorkflowDetail, String> {
+    let slug = validate_slug(slug)?.to_owned();
+    let html = request_html(&format!("{AGENTIC_WORKFLOWS_URL}/{slug}"))?;
+    parse_workflow_detail(&html, &slug).ok_or_else(|| msg("market.agenticskills_detail_missing"))
+}
+
+/// 工作流列表：缓存（TTL 600s）→ 列表页；站点改版导致解析为空时按详情缺失报错。
+fn cached_workflow_catalog() -> Result<Vec<AgenticWorkflowEntry>, String> {
+    if let Ok(guard) = WORKFLOW_CACHE.lock() {
+        if let Some(entries) = fresh_entries(guard.as_ref()) {
+            return Ok(entries);
+        }
+    }
+    let html = request_html(AGENTIC_WORKFLOWS_URL)?;
+    let entries = parse_workflow_catalog(&html);
+    if entries.is_empty() {
+        return Err(msg("market.agenticskills_detail_missing"));
+    }
+    if let Ok(mut guard) = WORKFLOW_CACHE.lock() {
+        *guard = Some((Instant::now(), entries.clone(), false));
+    }
+    Ok(entries)
+}
+
+fn filter_workflows(entries: Vec<AgenticWorkflowEntry>, query: &str) -> Vec<AgenticWorkflowEntry> {
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return entries.into_iter().take(MAX_WORKFLOW_RESULTS).collect();
+    }
+    entries
+        .into_iter()
+        .filter(|entry| {
+            [
+                Some(entry.slug.as_str()),
+                Some(entry.name.as_str()),
+                entry.description.as_deref(),
+                entry.category.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|value| value.to_lowercase().contains(&needle))
+        })
+        .take(MAX_WORKFLOW_RESULTS)
+        .collect()
+}
+
+/// 逐个组件安装：`install` 返回 `Ok(true)` 新装、`Ok(false)` 已存在（跳过）、`Err` 失败。
+/// 单个组件失败只记进 `failures`，不影响其它组件。
+fn install_workflow_components<F>(
+    components: &[AgenticWorkflowComponent],
+    mut install: F,
+) -> (
+    Vec<String>,
+    Vec<String>,
+    Vec<String>,
+    Vec<AgenticWorkflowFailure>,
+)
+where
+    F: FnMut(&AgenticWorkflowComponent) -> Result<bool, String>,
+{
+    let mut skills: Vec<String> = Vec::new();
+    let mut mcp: Vec<String> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+    let mut failures: Vec<AgenticWorkflowFailure> = Vec::new();
+    for component in components {
+        match install(component) {
+            Ok(true) if component.kind == "mcp" => mcp.push(component.slug.clone()),
+            Ok(true) => skills.push(component.slug.clone()),
+            Ok(false) => skipped.push(component.slug.clone()),
+            Err(error) => failures.push(AgenticWorkflowFailure {
+                kind: component.kind.clone(),
+                slug: component.slug.clone(),
+                error,
+            }),
+        }
+    }
+    (skills, mcp, skipped, failures)
+}
+
+/// 组件是否已在目标位置：技能看目录、MCP 看 `mcp.json` 里的同名服务。
+fn workflow_component_installed(
+    paths: &AppPaths,
+    scope: ConfigScope,
+    project_path: Option<&str>,
+    component: &AgenticWorkflowComponent,
+) -> Result<bool, String> {
+    match component.kind.as_str() {
+        "skill" => {
+            let name = skill_name_for(&component.slug)?.to_owned();
+            agent_config::skill_dir_exists(paths, scope, project_path, &name)
+        }
+        "mcp" => {
+            let name = mcp_server_name(&component.slug, None)?;
+            agent_config::mcp_server_exists(paths, scope, project_path, &name)
+        }
+        _ => Err(msg("market.agenticskills_detail_missing")),
+    }
+}
+
+/// 安装一个组件：已存在 → `Ok(false)`（不覆盖）；新装 → `Ok(true)`。
+/// 数据来源优先目录条目（`skill_md_url` / `snippets`），没有才回退到详情页（见既有安装函数）。
+fn install_workflow_component(
+    paths: &AppPaths,
+    cache: &AgenticCatalogCache,
+    request: &AgenticWorkflowInstall,
+    component: &AgenticWorkflowComponent,
+) -> Result<bool, String> {
+    if workflow_component_installed(
+        paths,
+        request.scope,
+        request.project_path.as_deref(),
+        component,
+    )? {
+        return Ok(false);
+    }
+    let project_path = request.project_path.clone();
+    match component.kind.as_str() {
+        "skill" => {
+            install_skill(
+                paths,
+                cache,
+                &AgenticSkillInstall {
+                    slug: component.slug.clone(),
+                    scope: request.scope,
+                    project_path,
+                },
+            )?;
+            Ok(true)
+        }
+        "mcp" => {
+            // 服务名固定用 slug：与详情里的组件、状态文件里的条目一一对应，便于界面匹配。
+            install_mcp(
+                paths,
+                cache,
+                &AgenticMcpInstall {
+                    slug: component.slug.clone(),
+                    name: None,
+                    scope: request.scope,
+                    project_path,
+                },
+            )?;
+            Ok(true)
+        }
+        _ => Err(msg("market.agenticskills_detail_missing")),
+    }
+}
+
+/// 安装时间：与任务记录一致，用 Unix epoch 毫秒的十进制字符串（可排序、可 `new Date`）。
+fn installed_at_now() -> String {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().to_string())
+        .unwrap_or_default()
+}
+
+/// 工作流状态文件：全局 `<pi_home>/workflows.json`、项目 `<project>/.pi/workflows.json`。
+fn workflows_file(
+    paths: &AppPaths,
+    scope: ConfigScope,
+    project_path: Option<&str>,
+) -> Result<PathBuf, String> {
+    Ok(agent_config::scope_pi_dir(paths, scope, project_path)?.join("workflows.json"))
+}
+
+/// 文件大小超限（手改 / 异常写入）时不读内容，避免把内存撑坏。
+fn read_small_text_file(path: &Path) -> Option<String> {
+    let metadata = fs::metadata(path).ok()?;
+    if !metadata.is_file() || metadata.len() > MAX_WORKFLOW_FILE_BYTES as u64 {
+        return None;
+    }
+    fs::read_to_string(path).ok()
+}
+
+/// 读取状态文件：文件缺失 / 读失败 / JSON 非法 / 结构不对一律当空表（界面不因此报错）。
+fn read_installed_workflow_file(path: &Path) -> BTreeMap<String, InstalledWorkflow> {
+    let Some(content) = read_small_text_file(path) else {
+        return BTreeMap::new();
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&content) else {
+        return BTreeMap::new();
+    };
+    let Some(records) = value.get("workflows").and_then(Value::as_object) else {
+        return BTreeMap::new();
+    };
+    records
+        .iter()
+        .filter_map(|(slug, raw)| {
+            if validate_slug(slug).is_err() {
+                return None;
+            }
+            let record: InstalledWorkflowRecord = serde_json::from_value(raw.clone()).ok()?;
+            let name = non_empty(&record.name).unwrap_or_else(|| slug.clone());
+            Some((
+                slug.clone(),
+                InstalledWorkflow {
+                    slug: slug.clone(),
+                    name,
+                    category: record.category,
+                    skill_count: record.skill_count,
+                    mcp_count: record.mcp_count,
+                    installed_at: record.installed_at,
+                    components: record.components,
+                },
+            ))
+        })
+        .collect()
+}
+
+/// 已安装工作流（按 slug 排序，最多 `MAX_INSTALLED_WORKFLOWS` 条）。
+/// 作用域路径非法（项目范围缺 `projectPath`）才报错，其余情况返回空数组。
+fn read_installed_workflows(
+    paths: &AppPaths,
+    scope: ConfigScope,
+    project_path: Option<&str>,
+) -> Result<Vec<InstalledWorkflow>, String> {
+    let path = workflows_file(paths, scope, project_path)?;
+    Ok(read_installed_workflow_file(&path)
+        .into_values()
+        .take(MAX_INSTALLED_WORKFLOWS)
+        .collect())
+}
+
+/// 删掉 `installedAt` 最旧的一条（时间不可解析时按最旧处理，同级按 slug）。
+fn remove_oldest_installed_workflow(workflows: &mut BTreeMap<String, InstalledWorkflow>) {
+    let mut entries: Vec<(u64, String)> = workflows
+        .iter()
+        .map(|(slug, workflow)| {
+            (
+                workflow.installed_at.parse::<u64>().unwrap_or(0),
+                slug.clone(),
+            )
+        })
+        .collect();
+    entries.sort();
+    if let Some((_, slug)) = entries.first() {
+        workflows.remove(slug);
+    }
+}
+
+/// 序列化前的上限保护：条目数 64、文件大小 256 KiB，超出按 `installedAt` 从旧到新丢弃。
+fn installed_workflows_json(
+    workflows: &BTreeMap<String, InstalledWorkflow>,
+) -> Result<Vec<u8>, String> {
+    let mut kept = workflows.clone();
+    loop {
+        while kept.len() > MAX_INSTALLED_WORKFLOWS {
+            remove_oldest_installed_workflow(&mut kept);
+        }
+        let bytes = serde_json::to_vec_pretty(&serde_json::json!({ "workflows": &kept }))
+            .map_err(|error| format!("failed to serialize workflows: {error}"))?;
+        if bytes.len() <= MAX_WORKFLOW_FILE_BYTES {
+            return Ok(bytes);
+        }
+        if kept.is_empty() {
+            return Err(msg("agent_config.file_too_large"));
+        }
+        remove_oldest_installed_workflow(&mut kept);
+    }
+}
+
+/// 记录一个已安装的工作流（覆盖同 slug 的旧记录），原子写入。
+fn store_installed_workflow(
+    paths: &AppPaths,
+    scope: ConfigScope,
+    project_path: Option<&str>,
+    workflow: InstalledWorkflow,
+) -> Result<(), String> {
+    let path = workflows_file(paths, scope, project_path)?;
+    let mut workflows = read_installed_workflow_file(&path);
+    workflows.insert(workflow.slug.clone(), workflow);
+    let content = installed_workflows_json(&workflows)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create workflows directory: {error}"))?;
+    }
+    let mut file = AtomicWriteFile::open(&path)
+        .map_err(|error| format!("failed to open workflows file: {error}"))?;
+    file.write_all(&content)
+        .map_err(|error| format!("failed to write workflows file: {error}"))?;
+    file.commit()
+        .map_err(|error| format!("failed to commit workflows file: {error}"))
+}
+
+/// 详情 → 状态记录：计数按详情里的组件构成（与站点卡片一致）。
+fn installed_workflow_record(
+    detail: &AgenticWorkflowDetail,
+    installed_at: String,
+) -> InstalledWorkflow {
+    let count = |kind: &str| {
+        detail
+            .components
+            .iter()
+            .filter(|component| component.kind == kind)
+            .count() as u32
+    };
+    InstalledWorkflow {
+        slug: detail.slug.clone(),
+        name: detail.name.clone(),
+        category: detail.category.clone(),
+        skill_count: count("skill"),
+        mcp_count: count("mcp"),
+        installed_at,
+        components: detail.components.clone(),
+    }
+}
+
+/// 一个按钮装齐：先取详情（组件清单），逐件安装（已存在跳过、失败不中断），
+/// 最后写入本地状态文件（供「已安装」标记与输入框下方的选择器使用）。
+fn install_workflow(
+    paths: &AppPaths,
+    request: &AgenticWorkflowInstall,
+) -> Result<AgenticWorkflowInstallResult, String> {
+    let slug = validate_slug(&request.slug)?.to_owned();
+    let detail = fetch_workflow_detail(&slug)?;
+    if detail.components.is_empty() {
+        return Err(msg("market.agenticskills_detail_missing"));
+    }
+    // 目录只抓一次：技能 / MCP 组件都从同一份 chunk 里找条目，找不到再回退各自详情页。
+    let cache = &WORKFLOW_CATALOG_CACHE;
+    let _ = cached_skill_catalog(cache);
+    let _ = cached_mcp_catalog(cache);
+    let (skills, mcp, skipped, failures) =
+        install_workflow_components(&detail.components, |component| {
+            install_workflow_component(paths, cache, request, component)
+        });
+    store_installed_workflow(
+        paths,
+        request.scope,
+        request.project_path.as_deref(),
+        installed_workflow_record(&detail, installed_at_now()),
+    )?;
+    Ok(AgenticWorkflowInstallResult {
+        workflow: slug,
+        skills,
+        mcp,
+        skipped,
+        failures,
+    })
+}
+
 #[tauri::command]
 pub async fn search_agentic_skills(
     app: tauri::AppHandle,
@@ -1906,18 +2634,68 @@ pub async fn install_agentic_mcp(
     .map_err(|error| format!("agentic MCP install worker failed: {error}"))?
 }
 
+#[tauri::command]
+pub async fn search_agentic_workflows(
+    request: AgenticQuery,
+) -> Result<Vec<AgenticWorkflowEntry>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let entries = cached_workflow_catalog()?;
+        Ok(filter_workflows(entries, &request.query))
+    })
+    .await
+    .map_err(|error| format!("agentic workflow search worker failed: {error}"))?
+}
+
+#[tauri::command]
+pub async fn agentic_workflow_detail(
+    request: AgenticSlug,
+) -> Result<AgenticWorkflowDetail, String> {
+    tauri::async_runtime::spawn_blocking(move || fetch_workflow_detail(&request.slug))
+        .await
+        .map_err(|error| format!("agentic workflow detail worker failed: {error}"))?
+}
+
+#[tauri::command]
+pub async fn install_agentic_workflow(
+    paths: State<'_, AppPaths>,
+    request: AgenticWorkflowInstall,
+) -> Result<AgenticWorkflowInstallResult, String> {
+    let paths = paths.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || install_workflow(&paths, &request))
+        .await
+        .map_err(|error| format!("agentic workflow install worker failed: {error}"))?
+}
+
+#[tauri::command]
+pub async fn list_installed_workflows(
+    paths: State<'_, AppPaths>,
+    scope: ConfigScope,
+    project_path: Option<String>,
+) -> Result<Vec<InstalledWorkflow>, String> {
+    let paths = paths.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        read_installed_workflows(&paths, scope, project_path.as_deref())
+    })
+    .await
+    .map_err(|error| format!("agentic workflow list worker failed: {error}"))?
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         agent_config, catalog_chunk_candidates, config_from_snippets, filter_mcp, filter_skills,
-        format_stars, js_literals_to_json, mcp_install_snippets, mcp_server_name,
+        filter_workflows, format_stars, install_workflow_components, installed_workflows_json,
+        js_literals_to_json, kickoff_prompt_from_text, mcp_install_snippets, mcp_server_name,
         parse_catalog_chunk, parse_mcp_catalog, parse_mcp_detail, parse_mcp_snippet,
-        parse_skill_catalog, parse_skill_detail, skill_description_text, skill_install_source,
-        skill_name_for, truncate_bytes, validate_slug, AgenticMcpInstall, AgenticMcpSnippet,
-        AgenticSkillInstall, ConfigScope,
+        parse_skill_catalog, parse_skill_detail, parse_workflow_catalog, parse_workflow_detail,
+        read_installed_workflows, skill_description_text, skill_install_source, skill_name_for,
+        store_installed_workflow, truncate_bytes, validate_slug, workflow_component_installed,
+        AgenticMcpInstall, AgenticMcpSnippet, AgenticSkillInstall, AgenticWorkflowComponent,
+        ConfigScope, InstalledWorkflow, MAX_INSTALLED_WORKFLOWS,
     };
     use crate::app_paths::AppPaths;
     use crate::message::message_code;
+    use std::collections::BTreeMap;
     use std::fs;
     use std::path::PathBuf;
 
@@ -2589,6 +3367,330 @@ var t=[{slug:"notion",name:"Notion",description:"Pages, databases, search, and c
         assert!(catalog_chunk_candidates("<html><body>no chunks</body></html>").is_empty());
     }
 
+    // ── 工作流（`/workflows`）────────────────────────────────────────────────
+
+    /// 列表页小样本：JSON-LD `ItemList`（2 条）+ 一张卡片。卡片里有分类 / 难度 / 描述与
+    /// 计数 span（真实页面会在数字与文字之间插 `<!-- -->` 注释节点）。
+    const WORKFLOW_CATALOG_HTML: &str = r#"
+      <script type="application/ld+json">[{"@context":"https://schema.org","@type":"CollectionPage",
+        "url":"https://agenticskills.io/workflows","mainEntity":{"@type":"ItemList","numberOfItems":2,"itemListElement":[
+          {"@type":"ListItem","position":1,"url":"https://agenticskills.io/workflows/fullstack-saas","name":"Full-Stack SaaS"},
+          {"@type":"ListItem","position":2,"url":"https://agenticskills.io/workflows/disciplined-development","name":"Disciplined Development"}
+        ]}},{"@context":"https://schema.org","@type":"BreadcrumbList"}]</script>
+      <a class="group block bg-white border-r border-b border-[var(--line)] p-6" href="/workflows/fullstack-saas"><div class="flex items-center gap-2 mb-3"><span class="inline-block px-2.5 py-0.5 text-[10px] font-mono uppercase tracking-[0.12em] text-white bg-[var(--ink)] border border-[var(--ink)]">Development</span><span class="inline-block px-2 py-0.5 text-[10px] font-mono uppercase tracking-[0.12em] border text-[var(--ink)] bg-[var(--paper-3)] border-[var(--line-2)]">Intermediate</span></div><h2 class="text-lg font-semibold text-[var(--ink)] mb-2 line-clamp-2">Full-Stack SaaS</h2><p class="text-sm text-[var(--mute-1)] mb-4 line-clamp-3">The complete Next.js + Supabase + Vercel stack.</p><div class="flex items-center justify-between"><div class="flex items-center gap-3 text-xs text-[var(--mute-2)]"><span class="flex items-center gap-1"><svg class="lucide lucide-zap w-3.5 h-3.5"><path d="M4 14"></path></svg>5<!-- --> <!-- -->skills</span><span class="flex items-center gap-1"><svg class="lucide lucide-layers w-3.5 h-3.5"><path d="M12.83 2.18"></path></svg>4<!-- --> <!-- -->MCP servers</span></div><span class="flex items-center gap-1 as-micro">View<svg class="lucide lucide-arrow-right w-3.5 h-3.5"></svg></span></div></a>
+    "#;
+
+    /// 详情页小样本：`[HowTo, WebPage]`。HowTo 里有 2 个技能组件、1 个 MCP 组件、
+    /// 1 个非组件工具（`/tools/`）与 1 条重复组件；step 2 里带起手提示词。
+    const WORKFLOW_DETAIL_HTML: &str = r#"
+      <script type="application/ld+json">[{"@context":"https://schema.org","@type":"HowTo","name":"How to Set Up the Disciplined Development Workflow","description":"Plan before coding, then verify before completion.","totalTime":"PT2M","tool":[{"@type":"HowToTool","name":"Brainstorming","url":"https://agenticskills.io/skills/brainstorming"},{"@type":"HowToTool","name":"Test-Driven Development","url":"https://agenticskills.io/skills/test-driven-development"},{"@type":"HowToTool","name":"GitHub MCP","url":"https://agenticskills.io/mcp/github"},{"@type":"HowToTool","name":"Submit a Skill","url":"https://agenticskills.io/tools/submit"},{"@type":"HowToTool","name":"Brainstorming again","url":"https://agenticskills.io/skills/brainstorming"}],"step":[{"@type":"HowToStep","position":1,"name":"Install the skills","text":"Install the whole collection. All 8 skills auto-activate."},{"@type":"HowToStep","position":2,"name":"Run the sprint","text":"Run the sprint：Prompt: \"Find the keyword gap for <topic>, draft an optimized article.\""}]},{"@context":"https://schema.org","@type":"WebPage","name":"Disciplined Development","url":"https://agenticskills.io/workflows/disciplined-development","isPartOf":{"@type":"WebSite","url":"https://agenticskills.io"}}]</script>
+      <div class="mb-12"><div class="flex items-center gap-2 mb-4"><span class="inline-block px-3 py-1 text-[10px] font-mono uppercase tracking-[0.12em] text-white bg-[var(--ink)] border border-[var(--ink)]">Development</span><span class="inline-block px-3 py-1 text-[10px] font-mono uppercase tracking-[0.12em] border text-[var(--ink)] bg-white border-[var(--line)]">Beginner</span></div><h1 class="text-4xl">Disciplined Development</h1></div>
+    "#;
+
+    fn workflow_component(kind: &str, slug: &str) -> AgenticWorkflowComponent {
+        AgenticWorkflowComponent {
+            kind: kind.to_owned(),
+            slug: slug.to_owned(),
+            name: slug.to_owned(),
+            url: format!(
+                "https://agenticskills.io/{}/{slug}",
+                if kind == "mcp" { "mcp" } else { "skills" }
+            ),
+        }
+    }
+
+    #[test]
+    fn parses_workflow_catalog_with_card_metadata() {
+        let entries = parse_workflow_catalog(WORKFLOW_CATALOG_HTML);
+
+        assert_eq!(entries.len(), 2);
+        let entry = &entries[0];
+        assert_eq!(entry.slug, "fullstack-saas");
+        assert_eq!(entry.name, "Full-Stack SaaS");
+        assert_eq!(entry.category.as_deref(), Some("Development"));
+        assert_eq!(entry.level.as_deref(), Some("Intermediate"));
+        assert_eq!(
+            entry.description.as_deref(),
+            Some("The complete Next.js + Supabase + Vercel stack.")
+        );
+        assert_eq!(entry.skill_count, 5);
+        assert_eq!(entry.mcp_count, 4);
+
+        // JSON-LD 有、卡片没有的条目保持默认值（JSON-LD 的顺序在前）。
+        assert_eq!(entries[1].slug, "disciplined-development");
+        assert_eq!(entries[1].name, "Disciplined Development");
+        assert_eq!(entries[1].category, None);
+        assert_eq!(entries[1].level, None);
+        assert_eq!(entries[1].skill_count, 0);
+        assert_eq!(entries[1].mcp_count, 0);
+
+        assert!(parse_workflow_catalog("<html><body>no data</body></html>").is_empty());
+    }
+
+    #[test]
+    fn filters_workflows_locally_by_query() {
+        let entries = parse_workflow_catalog(WORKFLOW_CATALOG_HTML);
+
+        assert_eq!(filter_workflows(entries.clone(), "").len(), 2);
+        assert_eq!(filter_workflows(entries.clone(), "SAAS").len(), 1);
+        assert_eq!(filter_workflows(entries.clone(), "vercel").len(), 1);
+        assert_eq!(filter_workflows(entries.clone(), "development").len(), 2);
+        assert!(filter_workflows(entries, "missing").is_empty());
+    }
+
+    #[test]
+    fn parses_workflow_detail_with_components_and_kickoff_prompt() {
+        let detail = parse_workflow_detail(WORKFLOW_DETAIL_HTML, "disciplined-development")
+            .expect("workflow detail should parse");
+
+        assert_eq!(detail.slug, "disciplined-development");
+        // 展示名取 WebPage 的（HowTo 的 name 是 SEO 标题「How to Set Up …」）。
+        assert_eq!(detail.name, "Disciplined Development");
+        assert_eq!(
+            detail.description.as_deref(),
+            Some("Plan before coding, then verify before completion.")
+        );
+        assert_eq!(detail.category.as_deref(), Some("Development"));
+        assert_eq!(detail.level.as_deref(), Some("Beginner"));
+        assert_eq!(detail.setup_time.as_deref(), Some("PT2M"));
+        assert_eq!(
+            detail.source_url,
+            "https://agenticskills.io/workflows/disciplined-development"
+        );
+
+        // `/tools/` 路径被忽略、重复组件只留一份。
+        assert_eq!(detail.components.len(), 3);
+        assert_eq!(detail.components[0].kind, "skill");
+        assert_eq!(detail.components[0].slug, "brainstorming");
+        assert_eq!(detail.components[0].name, "Brainstorming");
+        assert_eq!(detail.components[1].kind, "skill");
+        assert_eq!(detail.components[1].slug, "test-driven-development");
+        assert_eq!(detail.components[2].kind, "mcp");
+        assert_eq!(detail.components[2].slug, "github");
+        assert_eq!(
+            detail.components[2].url,
+            "https://agenticskills.io/mcp/github"
+        );
+
+        assert_eq!(detail.steps.len(), 2);
+        assert_eq!(detail.steps[0].name, "Install the skills");
+        assert!(detail.steps[1].text.starts_with("Run the sprint"));
+        assert_eq!(
+            detail.kickoff_prompt.as_deref(),
+            Some("Find the keyword gap for <topic>, draft an optimized article.")
+        );
+
+        assert_eq!(
+            parse_workflow_detail("<html><body>no data</body></html>", "demo-workflow"),
+            None
+        );
+    }
+
+    #[test]
+    fn extracts_kickoff_prompt_forms() {
+        assert_eq!(
+            kickoff_prompt_from_text("Prompt: \"do the thing\""),
+            Some("do the thing".to_owned())
+        );
+        assert_eq!(
+            kickoff_prompt_from_text("Run the sprint：Prompt：\"全角冒号也认\""),
+            Some("全角冒号也认".to_owned())
+        );
+        assert_eq!(
+            kickoff_prompt_from_text("第一步：Prompt: \"  两侧空格  \" 之后"),
+            Some("两侧空格".to_owned())
+        );
+        // 引号不闭合 / 没有 Prompt / 只有 Prompt 没有引号 → None。
+        assert_eq!(kickoff_prompt_from_text("Prompt: \"unclosed"), None);
+        assert_eq!(kickoff_prompt_from_text("no prompt here"), None);
+        assert_eq!(kickoff_prompt_from_text("Prompt: no quotes"), None);
+    }
+
+    #[test]
+    fn workflow_detail_without_kickoff_prompt_is_none() {
+        let html = r#"<script type="application/ld+json">{"@context":"https://schema.org","@type":"HowTo","name":"Plain Workflow","tool":[{"@type":"HowToTool","name":"SEO Audit","url":"https://agenticskills.io/skills/seo-audit"}],"step":[{"@type":"HowToStep","position":1,"name":"Do it","text":"No prompt in this step."}]}</script>"#;
+
+        let detail = parse_workflow_detail(html, "plain-workflow").expect("detail should parse");
+
+        assert_eq!(detail.slug, "plain-workflow");
+        // 没有 WebPage 时回落到 HowTo 的 name。
+        assert_eq!(detail.name, "Plain Workflow");
+        assert_eq!(detail.category, None);
+        assert_eq!(detail.kickoff_prompt, None);
+        assert_eq!(detail.components.len(), 1);
+        assert_eq!(detail.steps.len(), 1);
+    }
+
+    #[test]
+    fn install_skips_existing_components_and_isolates_failures() {
+        let (paths, root) = temp_paths("workflow-install");
+        // 预置：一个技能目录 + mcp.json 里的一个服务 → 两个组件都应当被跳过。
+        fs::create_dir_all(paths.pi_home.join("skills/demo-skill")).expect("skill dir");
+        fs::write(
+            paths.pi_home.join("skills/demo-skill/SKILL.md"),
+            "---\nname: demo-skill\ndescription: demo\n---\n",
+        )
+        .expect("SKILL.md");
+        fs::write(
+            paths.pi_home.join("mcp.json"),
+            "{\"mcpServers\":{\"notion\":{\"command\":\"uvx\"}}}",
+        )
+        .expect("mcp.json");
+
+        let components = vec![
+            workflow_component("skill", "demo-skill"),
+            workflow_component("skill", "fresh-skill"),
+            workflow_component("mcp", "notion"),
+            workflow_component("mcp", "firecrawl"),
+            workflow_component("skill", "after-failure"),
+        ];
+        let (skills, mcp, skipped, failures) =
+            install_workflow_components(&components, |component| {
+                if workflow_component_installed(&paths, ConfigScope::Global, None, component)? {
+                    return Ok(false);
+                }
+                if component.slug == "firecrawl" {
+                    return Err(super::msg("market.agentic_mcp_no_config"));
+                }
+                Ok(true)
+            });
+
+        assert_eq!(skills, vec!["fresh-skill", "after-failure"]);
+        assert!(mcp.is_empty());
+        assert_eq!(skipped, vec!["demo-skill", "notion"]);
+        // 失败只记进 failures，不影响后面的组件。
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].kind, "mcp");
+        assert_eq!(failures[0].slug, "firecrawl");
+        assert_eq!(
+            message_code(&failures[0].error).as_deref(),
+            Some("market.agentic_mcp_no_config")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reads_and_writes_installed_workflow_state() {
+        let (paths, root) = temp_paths("workflow-state");
+
+        // 文件不存在 → 空数组。
+        assert!(read_installed_workflows(&paths, ConfigScope::Global, None)
+            .expect("missing file reads as empty")
+            .is_empty());
+
+        let record = InstalledWorkflow {
+            slug: "fullstack-saas".to_owned(),
+            name: "Full-Stack SaaS".to_owned(),
+            category: Some("Development".to_owned()),
+            skill_count: 5,
+            mcp_count: 4,
+            installed_at: "1735689600000".to_owned(),
+            components: vec![workflow_component("skill", "better-auth")],
+        };
+        store_installed_workflow(&paths, ConfigScope::Global, None, record.clone())
+            .expect("state should be written");
+        assert!(paths.pi_home.join("workflows.json").is_file());
+
+        let mut other = record.clone();
+        other.slug = "disciplined-development".to_owned();
+        other.name = "Disciplined Development".to_owned();
+        other.category = None;
+        other.mcp_count = 0;
+        store_installed_workflow(&paths, ConfigScope::Global, None, other.clone())
+            .expect("second state should be written");
+
+        // 按 slug 排序返回，组件一并读回。
+        let read = read_installed_workflows(&paths, ConfigScope::Global, None)
+            .expect("state should be read");
+        assert_eq!(read, vec![other.clone(), record.clone()]);
+        assert_eq!(read[1].components[0].kind, "skill");
+        assert_eq!(read[1].components[0].slug, "better-auth");
+
+        // 同 slug 再写一次是覆盖，不是追加。
+        store_installed_workflow(&paths, ConfigScope::Global, None, other)
+            .expect("state should be rewritten");
+        assert_eq!(
+            read_installed_workflows(&paths, ConfigScope::Global, None)
+                .expect("read")
+                .len(),
+            2
+        );
+
+        // 项目范围缺 projectPath → 作用域路径本身非法，报既有错误码。
+        assert_eq!(
+            message_code(
+                &read_installed_workflows(&paths, ConfigScope::Project, None)
+                    .expect_err("missing project path")
+            )
+            .as_deref(),
+            Some("agent_config.project_path_required")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn installed_workflow_state_tolerates_broken_files_and_caps_entries() {
+        let (paths, root) = temp_paths("workflow-state-broken");
+        let file = paths.pi_home.join("workflows.json");
+
+        fs::write(&file, "{ this is not json").expect("broken file");
+        assert!(read_installed_workflows(&paths, ConfigScope::Global, None)
+            .expect("broken json reads as empty")
+            .is_empty());
+
+        fs::write(&file, "{\"workflows\":{\"../escape\":{\"name\":\"Bad\"}}}").expect("bad slug");
+        assert!(read_installed_workflows(&paths, ConfigScope::Global, None)
+            .expect("bad slug is skipped")
+            .is_empty());
+
+        // 手写的残缺记录按默认值读回（name 回落 slug）。
+        fs::write(&file, "{\"workflows\":{\"plain\":{\"installedAt\":\"1\"}}}")
+            .expect("partial record");
+        let read = read_installed_workflows(&paths, ConfigScope::Global, None).expect("read");
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].name, "plain");
+        assert_eq!(read[0].skill_count, 0);
+
+        // 70 条 → 读取截断到 64 条。
+        let records: Vec<String> = (0..70)
+            .map(|index| format!("wf-{index:02}"))
+            .map(|slug| format!("\"{slug}\":{{\"name\":\"{slug}\",\"installedAt\":\"{slug}\"}}"))
+            .collect();
+        fs::write(
+            &file,
+            format!("{{\"workflows\":{{{}}}}}", records.join(",")),
+        )
+        .expect("many records");
+        assert_eq!(
+            read_installed_workflows(&paths, ConfigScope::Global, None)
+                .expect("read many")
+                .len(),
+            MAX_INSTALLED_WORKFLOWS
+        );
+
+        // 写入同样截断：超出的按 installedAt 从旧到新丢弃，保留最新 64 条。
+        let mut workflows: BTreeMap<String, InstalledWorkflow> = BTreeMap::new();
+        for index in 0..70u64 {
+            let slug = format!("wf-{index:02}");
+            workflows.insert(
+                slug.clone(),
+                InstalledWorkflow {
+                    slug,
+                    name: format!("Workflow {index}"),
+                    installed_at: format!("{}", 1_700_000_000_000 + index),
+                    ..InstalledWorkflow::default()
+                },
+            );
+        }
+        let bytes = installed_workflows_json(&workflows).expect("capped json");
+        let value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        let kept = value["workflows"].as_object().expect("object");
+        assert_eq!(kept.len(), MAX_INSTALLED_WORKFLOWS);
+        assert!(!kept.contains_key("wf-00"));
+        assert!(kept.contains_key("wf-69"));
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     #[ignore = "requires network access to agenticskills.io"]
     fn fetches_live_agenticskills_catalogs_and_details() {
@@ -2655,5 +3757,64 @@ var t=[{slug:"notion",name:"Notion",description:"Pages, databases, search, and c
         assert!(detail.skill_md_url.is_some());
         let detail = super::fetch_mcp_detail("playwright").expect("MCP detail");
         assert!(!detail.snippets.is_empty());
+
+        // 工作流：列表 ≥ 15 条且卡片元信息齐全；详情同时含技能与 MCP 组件；
+        // seo-content-sprint 的 step 里带起手提示词。
+        let workflows =
+            super::cached_workflow_catalog().expect("workflow list should be reachable");
+        let workflows_with_category = workflows
+            .iter()
+            .filter(|entry| entry.category.is_some())
+            .count();
+        let workflows_with_counts = workflows
+            .iter()
+            .filter(|entry| entry.skill_count > 0 || entry.mcp_count > 0)
+            .count();
+        println!(
+            "workflows={} withCategory={workflows_with_category} withCounts={workflows_with_counts}",
+            workflows.len()
+        );
+        assert!(
+            workflows.len() >= 15,
+            "expected at least 15 workflows on the list page"
+        );
+        assert_eq!(
+            workflows_with_category,
+            workflows.len(),
+            "every workflow card should carry a category"
+        );
+        assert!(
+            workflows_with_counts * 10 > workflows.len() * 9,
+            "almost every workflow card should carry component counts"
+        );
+
+        let fullstack = super::fetch_workflow_detail("fullstack-saas").expect("workflow detail");
+        let skill_components = fullstack
+            .components
+            .iter()
+            .filter(|component| component.kind == "skill")
+            .count();
+        let mcp_components = fullstack
+            .components
+            .iter()
+            .filter(|component| component.kind == "mcp")
+            .count();
+        println!(
+            "fullstack-saas name={} components={} skills={skill_components} mcp={mcp_components} setupTime={:?} level={:?}",
+            fullstack.name,
+            fullstack.components.len(),
+            fullstack.setup_time,
+            fullstack.level
+        );
+        assert!(skill_components > 0, "fullstack-saas should list skills");
+        assert!(mcp_components > 0, "fullstack-saas should list MCP servers");
+        assert!(fullstack.setup_time.is_some());
+
+        let sprint = super::fetch_workflow_detail("seo-content-sprint").expect("SEO workflow");
+        println!("seo-content-sprint kickoff={:?}", sprint.kickoff_prompt);
+        assert!(
+            sprint.kickoff_prompt.is_some(),
+            "seo-content-sprint should carry a kickoff prompt"
+        );
     }
 }

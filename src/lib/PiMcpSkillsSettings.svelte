@@ -2,7 +2,7 @@
   import { invoke as nativeInvoke } from "@tauri-apps/api/core";
   import { Download, Plus, RefreshCw, Search, Store, Trash2 } from "@lucide/svelte";
   import { onDestroy, onMount } from "svelte";
-  import { t } from "$lib/i18n.svelte";
+  import { t, tm } from "$lib/i18n.svelte";
 
   interface McpServerEntry {
     name: string;
@@ -97,16 +97,79 @@
     sourceUrl?: string | null;
   }
 
+  /** agenticskills.io 工作流条目（后端 search_agentic_workflows 返回）。 */
+  interface AgenticWorkflowEntry {
+    slug: string;
+    name: string;
+    category?: string | null;
+    level?: string | null;
+    description?: string | null;
+    skillCount: number;
+    mcpCount: number;
+  }
+
+  /** 工作流的组成部分：技能或 MCP。 */
+  interface AgenticWorkflowComponent {
+    kind: "skill" | "mcp";
+    slug: string;
+    name: string;
+    url: string;
+  }
+
+  interface AgenticWorkflowStep {
+    name: string;
+    text: string;
+  }
+
+  interface AgenticWorkflowDetail {
+    slug: string;
+    name: string;
+    description?: string | null;
+    category?: string | null;
+    level?: string | null;
+    setupTime?: string | null;
+    components: AgenticWorkflowComponent[];
+    steps: AgenticWorkflowStep[];
+    kickoffPrompt?: string | null;
+    sourceUrl: string;
+  }
+
+  interface AgenticWorkflowFailure {
+    kind: string;
+    slug: string;
+    error: string;
+  }
+
+  /** 整条工作流的安装结果（后端 install_agentic_workflow 返回）。 */
+  interface AgenticWorkflowInstallResult {
+    skills: string[];
+    mcp: string[];
+    skipped: string[];
+    failures: AgenticWorkflowFailure[];
+  }
+
+  /** 当前 scope 下已安装的工作流（后端 list_installed_workflows 返回）。 */
+  interface InstalledWorkflow {
+    slug: string;
+    name: string;
+    category?: string | null;
+    skillCount: number;
+    mcpCount: number;
+    installedAt: string;
+    components?: AgenticWorkflowComponent[];
+  }
+
   interface Props {
-    mode: "mcp" | "skills";
-    confirm: (title: string, message: string, confirmLabel?: string) => Promise<boolean>;
+    mode: "mcp" | "skills" | "workflows";
+    /** 破坏性操作的确认框；只有 MCP / Skills 模式会用到，工作流市场没有删除操作。 */
+    confirm?: (title: string, message: string, confirmLabel?: string) => Promise<boolean>;
     onError: (error: unknown) => void;
     projectPath?: string | null;
     onBusyChange?: (busy: boolean) => void;
     invokeCommand?: typeof nativeInvoke;
   }
 
-  let { mode, confirm, onError, projectPath = null, onBusyChange = () => {}, invokeCommand = nativeInvoke }: Props = $props();
+  let { mode, confirm = async () => false, onError, projectPath = null, onBusyChange = () => {}, invokeCommand = nativeInvoke }: Props = $props();
   const invoke = <T,>(command: string, args?: Parameters<typeof nativeInvoke>[1]) => invokeCommand<T>(command, args);
 
   let scope = $state<"global" | "project">("global");
@@ -141,6 +204,21 @@
   /** 分类筛选：null = 全部分类。 */
   let skillCategory = $state<string | null>(null);
 
+  // 工作流市场状态（与 MCP / Skills 的目录状态各自独立）。
+  let workflowQuery = $state("");
+  let workflowEntries = $state<AgenticWorkflowEntry[]>([]);
+  let workflowLoading = $state(false);
+  let workflowSearched = $state(false);
+  let busyWorkflowEntry = $state<string | null>(null);
+  let workflowDetailSlug = $state<string | null>(null);
+  let workflowDetail = $state<AgenticWorkflowDetail | null>(null);
+  let workflowDetailLoading = $state<string | null>(null);
+  /** 当前 scope 下已安装的工作流：市场条目的「已安装」徽标与已安装列表共用。 */
+  let installedWorkflows = $state<InstalledWorkflow[]>([]);
+  /** 最近一次安装的结果摘要；slug 决定摘要显示在哪一行下面。 */
+  let workflowResult = $state<{ slug: string; name: string; result: AgenticWorkflowInstallResult } | null>(null);
+  let copiedPromptSlug = $state<string | null>(null);
+
   let serverName = $state("");
   let serverConfig = $state("");
   let skillName = $state("");
@@ -155,8 +233,10 @@
     busy ||
       busyMcpEntry !== null ||
       busySkillEntry !== null ||
+      busyWorkflowEntry !== null ||
       mcpDetailLoading !== null ||
-      skillDetailLoading !== null,
+      skillDetailLoading !== null ||
+      workflowDetailLoading !== null,
   );
   $effect(() => onBusyChange(componentBusy));
 
@@ -180,6 +260,12 @@
   const mcpCategoryOptions = $derived(categoryOptions(mcpEntries));
   const skillCategoryOptions = $derived(categoryOptions(skillEntries));
 
+  const filteredWorkflowEntries = $derived(
+    workflowEntries.filter((entry) => matchesKeyword(workflowQuery, entry.name, entry.description, entry.category)),
+  );
+  /** 当前 scope 下已安装工作流的 slug 集合，用来给市场条目打「已安装」徽标。 */
+  const installedWorkflowSlugs = $derived(new Set(installedWorkflows.map((entry) => entry.slug)));
+
   // 详情面板的派生值：展开哪一条就渲染哪一条；条目自带字段优先，缺字段才回落到详情接口。
   const skillDetailEntry = $derived(skillEntries.find((entry) => entry.slug === skillDetailSlug) ?? null);
   const skillDetailView = $derived(mergeSkillDetail(skillDetailEntry, skillDetail));
@@ -200,6 +286,12 @@
   const mcpDetailTags = $derived(mcpDetailView?.tags ?? []);
   const mcpDetailSnippets = $derived(mcpDetailView?.snippets ?? []);
   const mcpDetailSiteUrl = $derived(mcpSiteUrl(mcpDetailView));
+
+  // 工作流详情派生值：展开哪一条就渲染哪一条。
+  const workflowSkillComponents = $derived((workflowDetail?.components ?? []).filter((component) => component.kind === "skill"));
+  const workflowMcpComponents = $derived((workflowDetail?.components ?? []).filter((component) => component.kind === "mcp"));
+  const workflowSteps = $derived(workflowDetail?.steps ?? []);
+  const workflowKickoffPrompt = $derived(workflowDetail?.kickoffPrompt ?? "");
   const mcpDetailWebsiteUrl = $derived(mcpDetailView?.websiteUrl ?? "");
 
   onDestroy(() => onBusyChange(false));
@@ -209,8 +301,10 @@
     try {
       if (mode === "mcp") {
         servers = await invoke<McpServerEntry[]>("list_mcp_servers", { scope, projectPath });
-      } else {
+      } else if (mode === "skills") {
         skills = await invoke<SkillEntry[]>("list_skills", { scope, projectPath });
+      } else {
+        installedWorkflows = await invoke<InstalledWorkflow[]>("list_installed_workflows", { scope, projectPath });
       }
     } catch (error) {
       onError(error);
@@ -396,6 +490,11 @@
     return detail.sourceUrl || detail.websiteUrl || `${AGENTIC_SKILLS_SITE}/mcp/${detail.slug}`;
   }
 
+  function workflowSiteUrl(detail: AgenticWorkflowDetail | null | undefined): string {
+    if (!detail) return AGENTIC_SKILLS_SITE;
+    return detail.sourceUrl || `${AGENTIC_SKILLS_SITE}/workflows/${detail.slug}`;
+  }
+
   /** 详情面板数据：条目自带字段优先，缺失字段才回落到详情接口数据。 */
   function mergeSkillDetail(entry: AgenticSkillEntry | null, detail: AgenticSkillDetail | null): AgenticSkillDetail | null {
     if (!entry && !detail) return null;
@@ -458,7 +557,11 @@
       if (!mcpSearched && !mcpLoading) void loadMcpMarket();
       return;
     }
-    if (!skillSearched && !skillLoading) void loadSkillMarket();
+    if (mode === "skills") {
+      if (!skillSearched && !skillLoading) void loadSkillMarket();
+      return;
+    }
+    if (!workflowSearched && !workflowLoading) void loadWorkflowMarket();
   }
 
   async function loadMcpMarket() {
@@ -573,9 +676,74 @@
     if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
     return String(value);
   }
+
+  // ---------- 工作流市场（agenticskills.io；一条工作流只留一个安装入口） ----------
+
+  /** 进入市场 tab 时按需拉一次全量工作流目录（query 为空串）。 */
+  async function loadWorkflowMarket() {
+    if (workflowLoading) return;
+    workflowLoading = true;
+    workflowSearched = true;
+    try {
+      workflowEntries = await invoke<AgenticWorkflowEntry[]>("search_agentic_workflows", { request: { query: "" } });
+      workflowDetailSlug = null;
+      workflowDetail = null;
+    } catch (error) {
+      onError(error);
+    } finally {
+      workflowLoading = false;
+    }
+  }
+
+  async function toggleWorkflowDetail(entry: AgenticWorkflowEntry) {
+    if (workflowDetailSlug === entry.slug) {
+      workflowDetailSlug = null;
+      workflowDetail = null;
+      return;
+    }
+    workflowDetailSlug = entry.slug;
+    workflowDetail = null;
+    workflowDetailLoading = entry.slug;
+    try {
+      const detail = await invoke<AgenticWorkflowDetail>("agentic_workflow_detail", { request: { slug: entry.slug } });
+      if (workflowDetailSlug === entry.slug) workflowDetail = detail;
+    } catch (error) {
+      if (workflowDetailSlug === entry.slug) workflowDetailSlug = null;
+      onError(error);
+    } finally {
+      if (workflowDetailLoading === entry.slug) workflowDetailLoading = null;
+    }
+  }
+
+  /** 安装整条工作流：组件级安装由后端统一处理，界面只保留这一个安装按钮。 */
+  async function installAgenticWorkflow(entry: AgenticWorkflowEntry) {
+    if (busyWorkflowEntry) return;
+    busyWorkflowEntry = entry.slug;
+    try {
+      const result = await invoke<AgenticWorkflowInstallResult>("install_agentic_workflow", {
+        request: { slug: entry.slug, scope, projectPath },
+      });
+      workflowResult = { slug: entry.slug, name: entry.name, result };
+      await refresh();
+    } catch (error) {
+      onError(error);
+    } finally {
+      busyWorkflowEntry = null;
+    }
+  }
+
+  /** 起手提示整段复制；失败时交回上层错误处理。 */
+  async function copyWorkflowPrompt(slug: string, prompt: string) {
+    try {
+      await navigator.clipboard.writeText(prompt);
+      copiedPromptSlug = slug;
+    } catch (error) {
+      onError(t("复制失败：{error}", { error: tm(String(error)) }));
+    }
+  }
 </script>
 
-<section class="mcp-skills-page" aria-label={mode === "mcp" ? t("MCP 服务设置") : t("Skills 技能设置")}>
+<section class="mcp-skills-page" aria-label={mode === "mcp" ? t("MCP 服务设置") : mode === "skills" ? t("Skills 技能设置") : t("工作流设置")}>
   <div class="page-controls">
     <div class="scope-switch" role="tablist" aria-label={t("配置范围")}>
       <button type="button" class:active={scope === "global"} aria-pressed={scope === "global"}
@@ -629,7 +797,7 @@
           </button>
         </div>
       </section>
-    {:else}
+    {:else if mode === "skills"}
       <section class="settings-group">
         <div class="group-header">
           <h3>{t("Skills 技能")}</h3>
@@ -664,6 +832,35 @@
             <Plus size={14} />{t("添加 Skill")}
           </button>
         </div>
+      </section>
+    {:else}
+      <section class="settings-group">
+        <div class="group-header">
+          <h3>{t("已安装工作流")}</h3>
+          <button type="button" class="icon-action" aria-label={t("刷新已安装工作流")} title={t("刷新")} disabled={loading} onclick={() => void refresh()}>
+            <RefreshCw size={14} />
+          </button>
+        </div>
+        {#if loading}
+          <p class="muted" role="status">{t("正在读取已安装工作流…")}</p>
+        {:else if installedWorkflows.length === 0}
+          <p class="muted" role="status">{t("尚未安装工作流")}</p>
+        {:else}
+          <ul class="entry-list">
+            {#each installedWorkflows as entry (entry.slug)}
+              <li>
+                <div class="entry-main">
+                  <strong>{entry.name}</strong>
+                  <small>{entry.category || entry.slug}</small>
+                  <span class="market-meta">
+                    <span>{t("{skills} 个技能 · {mcp} 个 MCP", { skills: entry.skillCount, mcp: entry.mcpCount })}</span>
+                    {#if entry.installedAt}<span>{t("安装于 {date}", { date: entry.installedAt })}</span>{/if}
+                  </span>
+                </div>
+              </li>
+            {/each}
+          </ul>
+        {/if}
       </section>
     {/if}
   {:else if mode === "mcp"}
@@ -756,7 +953,7 @@
       {/if}
       <p class="muted" role="status">{t("筛选目录后点击「安装」，新服务在重启 Pi 任务后生效。")}</p>
     </section>
-  {:else}
+  {:else if mode === "skills"}
     <section class="settings-group">
       <div class="group-header">
         <h3>{t("Skills 市场")}</h3>
@@ -841,6 +1038,134 @@
       {/if}
       <p class="muted" role="status">{t("技能来自 agenticskills.io，安装后重启 Pi 任务生效。")}</p>
     </section>
+  {:else}
+    <section class="settings-group">
+      <div class="group-header">
+        <h3>{t("工作流市场")}</h3>
+        <span class="muted">{t("市场来源：agenticskills.io")}</span>
+      </div>
+      <form class="market-search" onsubmit={(event) => { event.preventDefault(); void loadWorkflowMarket(); }}>
+        <Search size={14} />
+        <input bind:value={workflowQuery} placeholder={t("按名称、描述或分类筛选工作流…")} aria-label={t("筛选工作流")} autocomplete="off" />
+        <button type="submit" class="primary-action compact" disabled={workflowLoading || busyWorkflowEntry !== null} aria-label={t("刷新市场")} title={t("刷新市场")}>
+          {#if workflowLoading}<span class="spin"><RefreshCw size={13} /></span>{:else}<RefreshCw size={13} />{/if}
+          {t("刷新市场")}
+        </button>
+      </form>
+      {#if workflowLoading && workflowEntries.length === 0}
+        <p class="muted" role="status">{t("正在加载工作流目录…")}</p>
+      {:else if filteredWorkflowEntries.length === 0}
+        <p class="muted" role="status">{t("没有匹配的工作流")}</p>
+      {:else}
+        <ul class="entry-list market-list">
+          {#each filteredWorkflowEntries as entry (entry.slug)}
+            {@const installed = installedWorkflowSlugs.has(entry.slug)}
+            <li>
+              <div class="entry-main">
+                <strong>{entry.name}</strong>
+                <small>{entry.description || entry.slug}</small>
+                <span class="market-meta">
+                  {#if entry.category}<span class="category-chip" title={t("分类：{category}", { category: entry.category })}>{entry.category}</span>{/if}
+                  {#if entry.level}<span>{t("难度：{level}", { level: entry.level })}</span>{/if}
+                  <span>{t("{skills} 个技能 · {mcp} 个 MCP", { skills: entry.skillCount, mcp: entry.mcpCount })}</span>
+                  {#if installed}<span class="market-flag">{t("已安装")}</span>{/if}
+                </span>
+              </div>
+              <span class="market-source">agenticskills.io</span>
+              <button type="button" class="secondary-action" disabled={workflowDetailLoading !== null} onclick={() => void toggleWorkflowDetail(entry)}>
+                {workflowDetailLoading === entry.slug ? t("加载中…") : workflowDetailSlug === entry.slug ? t("收起") : t("详情")}
+              </button>
+              <button type="button" class="primary-action compact" disabled={busyWorkflowEntry !== null} onclick={() => void installAgenticWorkflow(entry)}>
+                {#if busyWorkflowEntry === entry.slug}<span class="spin"><RefreshCw size={12} /></span>{:else}<Download size={12} />{/if}
+                {installed ? t("重新安装") : t("安装工作流")}
+              </button>
+              {#if workflowDetailSlug === entry.slug}
+                <div class="market-detail">
+                  {#if workflowDetailLoading === entry.slug}
+                    <p class="muted" role="status">{t("正在加载详情…")}</p>
+                  {:else if workflowDetail}
+                    {#if workflowDetail.description}<p class="detail-text">{workflowDetail.description}</p>{/if}
+                    <div class="detail-row">
+                      {#if workflowDetail.category}<span>{t("分类：{category}", { category: workflowDetail.category })}</span>{/if}
+                      {#if workflowDetail.level}<span>{t("难度：{level}", { level: workflowDetail.level })}</span>{/if}
+                      {#if workflowDetail.setupTime}<span>{t("配置时间：{time}", { time: workflowDetail.setupTime })}</span>{/if}
+                      <span>{t("{skills} 个技能 · {mcp} 个 MCP", { skills: workflowSkillComponents.length, mcp: workflowMcpComponents.length })}</span>
+                    </div>
+                    {#if workflowSkillComponents.length > 0 || workflowMcpComponents.length > 0}
+                      <small class="detail-label">{t("组件")}</small>
+                      <div class="component-groups">
+                        {#if workflowSkillComponents.length > 0}
+                          <div>
+                            <small class="detail-label">{t("技能")} · {workflowSkillComponents.length}</small>
+                            <ul class="component-list">
+                              {#each workflowSkillComponents as component (component.slug)}
+                                <li><span>{component.name}</span><code>{component.slug}</code></li>
+                              {/each}
+                            </ul>
+                          </div>
+                        {/if}
+                        {#if workflowMcpComponents.length > 0}
+                          <div>
+                            <small class="detail-label">{t("MCP 服务")} · {workflowMcpComponents.length}</small>
+                            <ul class="component-list">
+                              {#each workflowMcpComponents as component (component.slug)}
+                                <li><span>{component.name}</span><code>{component.slug}</code></li>
+                              {/each}
+                            </ul>
+                          </div>
+                        {/if}
+                      </div>
+                    {/if}
+                    {#if workflowSteps.length > 0}
+                      <small class="detail-label">{t("步骤")}</small>
+                      <ol class="step-list">
+                        {#each workflowSteps as step, index (`${index}-${step.name}`)}
+                          <li>
+                            <strong>{step.name}</strong>
+                            <p>{step.text}</p>
+                          </li>
+                        {/each}
+                      </ol>
+                    {/if}
+                    {#if workflowKickoffPrompt}
+                      <small class="detail-label">{t("起手提示")}</small>
+                      <div class="prompt-block">
+                        <pre class="detail-pre">{workflowKickoffPrompt}</pre>
+                        <button type="button" class="secondary-action" onclick={() => void copyWorkflowPrompt(entry.slug, workflowKickoffPrompt)}>
+                          {copiedPromptSlug === entry.slug ? t("已复制") : t("复制")}
+                        </button>
+                      </div>
+                    {/if}
+                    <div class="detail-actions">
+                      <button type="button" class="link-action" onclick={() => void openSiteUrl(workflowSiteUrl(workflowDetail))}>{t("在站点打开")}</button>
+                    </div>
+                  {/if}
+                </div>
+              {/if}
+              {#if workflowResult && workflowResult.slug === entry.slug}
+                <div class="market-detail install-summary" role="status">
+                  <strong>{t("安装结果：{name}", { name: workflowResult.name })}</strong>
+                  <div class="detail-row">
+                    <span>{t("{skills} 个技能 · {mcp} 个 MCP", { skills: workflowResult.result.skills.length, mcp: workflowResult.result.mcp.length })}</span>
+                    <span>{t("跳过 {count} 个已存在的组件", { count: workflowResult.result.skipped.length })}</span>
+                  </div>
+                  {#if workflowResult.result.failures.length > 0}
+                    <small class="detail-label">{t("失败")}</small>
+                    <ul class="failure-list">
+                      {#each workflowResult.result.failures as failure (`${failure.kind}-${failure.slug}`)}
+                        <li><code>{failure.kind} · {failure.slug}</code><span>{tm(failure.error)}</span></li>
+                      {/each}
+                    </ul>
+                  {/if}
+                </div>
+              {/if}
+            </li>
+          {/each}
+        </ul>
+        <p class="muted" role="status">{t("共 {total} 条，匹配 {shown} 条", { total: workflowEntries.length, shown: filteredWorkflowEntries.length })}</p>
+      {/if}
+      <p class="muted" role="status">{t("工作流来自 agenticskills.io，安装会写入技能与 MCP 配置；重新安装会跳过已存在的组件。")}</p>
+    </section>
   {/if}
   {#if statusMessage}<p class="status" role="status">{statusMessage}</p>{/if}
 </section>
@@ -897,4 +1222,19 @@
   .detail-actions { display: flex; flex-wrap: wrap; gap: 10px; }
   .link-action { padding: 0; border: 0; background: transparent; color: var(--accent); font: inherit; font-size: 11px; text-decoration: underline; cursor: pointer; }
   .detail-pre { max-height: 220px; margin: 0; padding: 8px 10px; overflow: auto; border: 1px solid var(--border); border-radius: 4px; background: var(--page-bg); color: var(--text); font-family: var(--code-font); font-size: 11px; white-space: pre-wrap; word-break: break-word; }
+  /* ---------- 工作流市场（agenticskills.io） ---------- */
+  .detail-label { font-size: 10px; color: var(--text-muted); }
+  .component-groups { display: grid; gap: 8px; }
+  .component-list, .step-list, .failure-list { list-style: none; margin: 4px 0 0; padding: 0; display: grid; gap: 4px; }
+  .component-list li, .step-list li, .failure-list li { padding: 0; border: 0; border-radius: 0; background: transparent; color: var(--text); font-size: 11px; }
+  .component-list li { display: flex; align-items: baseline; gap: 8px; }
+  .component-list code, .failure-list code { color: var(--text-muted); font-family: var(--code-font); font-size: 10px; }
+  .failure-list li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; }
+  .failure-list span { color: var(--status-failed); overflow-wrap: anywhere; }
+  .step-list li { display: block; }
+  .step-list strong { font-size: 11px; color: var(--text-strong); }
+  .step-list p { margin: 2px 0 0; color: var(--text-muted); white-space: pre-wrap; }
+  .prompt-block { display: grid; gap: 6px; justify-items: start; }
+  .install-summary { border-top-color: var(--accent); }
+  .install-summary strong { font-size: 12px; color: var(--text-strong); }
 </style>

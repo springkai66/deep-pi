@@ -4,9 +4,9 @@ import { SETTINGS_CATEGORIES, nextSettingsCategory, parseTaskLimit, settingsGrou
 describe("settings navigation", () => {
   it("provides the planned categories with stable unique identifiers", () => {
     expect(SETTINGS_CATEGORIES.map((category) => category.id)).toEqual([
-      "general", "appearance", "models", "extensions", "mcp", "skills", "dsh", "runtime", "advanced",
+      "general", "appearance", "models", "extensions", "mcp", "skills", "workflows", "dsh", "runtime", "advanced",
     ]);
-    expect(new Set(SETTINGS_CATEGORIES.map((category) => category.id)).size).toBe(9);
+    expect(new Set(SETTINGS_CATEGORIES.map((category) => category.id)).size).toBe(10);
   });
 
   it("separates Pi and DSH categories into their own navigation groups", () => {
@@ -15,14 +15,15 @@ describe("settings navigation", () => {
     const dshGroup = groups.find((group) => group.label === "DSH (DeepSeek Harness)");
     expect(dshGroup?.categories.map((category) => category.id)).toEqual(["dsh"]);
     const piGroup = groups.find((group) => group.label === "Pi Coding Agent");
-    expect(piGroup?.categories.map((category) => category.id)).toEqual(["models", "extensions", "mcp", "skills"]);
+    expect(piGroup?.categories.map((category) => category.id)).toEqual(["models", "extensions", "mcp", "skills", "workflows"]);
   });
 
   it("supports arrows and boundary keys without capturing unrelated keys", () => {
     expect(nextSettingsCategory("general", "ArrowUp")).toBe("advanced");
     expect(nextSettingsCategory("advanced", "ArrowRight")).toBe("general");
     expect(nextSettingsCategory("models", "ArrowDown")).toBe("extensions");
-    expect(nextSettingsCategory("skills", "ArrowDown")).toBe("dsh");
+    expect(nextSettingsCategory("skills", "ArrowDown")).toBe("workflows");
+    expect(nextSettingsCategory("workflows", "ArrowDown")).toBe("dsh");
     expect(nextSettingsCategory("runtime", "Home")).toBe("general");
     expect(nextSettingsCategory("runtime", "End")).toBe("advanced");
     expect(nextSettingsCategory("general", "p")).toBeNull();
