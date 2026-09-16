@@ -152,6 +152,15 @@ export const EN_MCP: Record<string, string> = {
   "全部分类": "All categories",
   "分类筛选": "Filter by category",
 
+  /* ---------- 市场（agenticskills.io）排序与整行展开 ---------- */
+  "排序": "Sort",
+  "默认排序": "Default order",
+  "热度": "Popularity",
+  "官方优先": "Official first",
+  "最新更新": "Newest first",
+  "名称（A–Z）": "Name (A–Z)",
+  "展开或收起 {name} 的详情": "Show or hide details for {name}",
+
   /* ---------- MCP 市场（agenticskills.io） ---------- */
   "MCP 市场": "MCP marketplace",
   "筛选 MCP 服务": "Filter MCP servers",

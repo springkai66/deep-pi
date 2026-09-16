@@ -29,6 +29,10 @@
     quality?: string | number | null;
     license?: string | null;
     lastUpdated?: string | null;
+    /** 原始星标数（schema 已冻结；热度排序统一走 heat）。 */
+    stars?: number | null;
+    /** 热度统一口径（MCP 侧可能由 popularity 文本折算）；缺失表示未知，排序时排最后。 */
+    heat?: number | null;
     githubUrl?: string | null;
     skillMdUrl?: string | null;
     featured?: boolean;
@@ -64,6 +68,10 @@
     official?: boolean;
     requiresApiKey?: boolean;
     popularity?: number | null;
+    /** 原始星标数（schema 已冻结；热度排序统一走 heat）。 */
+    stars?: number | null;
+    /** 热度统一口径（缺失表示未知，排序时排最后）。 */
+    heat?: number | null;
     websiteUrl?: string | null;
     configSource?: string | null;
     tags?: string[];
@@ -159,6 +167,11 @@
     components?: AgenticWorkflowComponent[];
   }
 
+  /** MCP 市场排序方式：「默认」保持后端目录顺序，其余在本地排序。 */
+  type McpSortOrder = "default" | "heat" | "official" | "name";
+
+  /** Skills 市场排序方式：「最新」按 lastUpdated 降序。 */
+  type SkillSortOrder = "default" | "heat" | "updated" | "name";
   interface Props {
     mode: "mcp" | "skills" | "workflows";
     /** 破坏性操作的确认框；只有 MCP / Skills 模式会用到，工作流市场没有删除操作。 */
@@ -192,6 +205,8 @@
   let mcpDetailLoading = $state<string | null>(null);
   /** 分类筛选：null = 全部分类。 */
   let mcpCategory = $state<string | null>(null);
+  /** 市场排序：MCP 与 Skills 各一份状态，只影响本地已加载目录的展示顺序。 */
+  let mcpSort = $state<McpSortOrder>("default");
 
   let skillQuery = $state("");
   let skillEntries = $state<AgenticSkillEntry[]>([]);
@@ -203,6 +218,8 @@
   let skillDetailLoading = $state<string | null>(null);
   /** 分类筛选：null = 全部分类。 */
   let skillCategory = $state<string | null>(null);
+  /** 市场排序：MCP 与 Skills 各一份状态，只影响本地已加载目录的展示顺序。 */
+  let skillSort = $state<SkillSortOrder>("default");
 
   // 工作流市场状态（与 MCP / Skills 的目录状态各自独立）。
   let workflowQuery = $state("");
@@ -240,19 +257,25 @@
   );
   $effect(() => onBusyChange(componentBusy));
 
-  /** 已加载的全量目录按关键词 + 分类本地过滤，输入时不打后端。 */
+  /** 已加载的全量目录按关键词 + 分类本地过滤，再按当前排序方式重排；输入时不打后端。 */
   const filteredMcpEntries = $derived(
-    mcpEntries.filter(
-      (entry) =>
-        (mcpCategory === null || entry.category === mcpCategory) &&
-        matchesKeyword(mcpQuery, entry.name, entry.slug, entry.description, entry.author, entry.category),
+    sortMcpEntries(
+      mcpEntries.filter(
+        (entry) =>
+          (mcpCategory === null || entry.category === mcpCategory) &&
+          matchesKeyword(mcpQuery, entry.name, entry.slug, entry.description, entry.author, entry.category),
+      ),
+      mcpSort,
     ),
   );
   const filteredSkillEntries = $derived(
-    skillEntries.filter(
-      (entry) =>
-        (skillCategory === null || entry.category === skillCategory) &&
-        matchesKeyword(skillQuery, entry.name, entry.slug, entry.description, entry.author, entry.category),
+    sortSkillEntries(
+      skillEntries.filter(
+        (entry) =>
+          (skillCategory === null || entry.category === skillCategory) &&
+          matchesKeyword(skillQuery, entry.name, entry.slug, entry.description, entry.author, entry.category),
+      ),
+      skillSort,
     ),
   );
 
@@ -446,6 +469,67 @@
     return [...counts.entries()]
       .map(([category, count]) => ({ category, count }))
       .sort((a, b) => b.count - a.count || a.category.localeCompare(b.category, "en"));
+  }
+
+  /** 稳定排序：比较结果相同时用原始下标兜底，保证「缺失值保持相对顺序」。 */
+  function stableSort<T>(entries: T[], compare: (a: T, b: T) => number): T[] {
+    return entries
+      .map((entry, index) => ({ entry, index }))
+      .sort((a, b) => compare(a.entry, b.entry) || a.index - b.index)
+      .map((item) => item.entry);
+  }
+
+  /** 热度降序；heat 缺失（undefined / null / 非有限数）排最后，缺失项之间保持原有顺序。 */
+  function compareHeat(a: { heat?: number | null }, b: { heat?: number | null }): number {
+    const left = typeof a.heat === "number" && Number.isFinite(a.heat) ? a.heat : null;
+    const right = typeof b.heat === "number" && Number.isFinite(b.heat) ? b.heat : null;
+    if (left === null && right === null) return 0;
+    if (left === null) return 1;
+    if (right === null) return -1;
+    return right - left;
+  }
+
+  /** 最近更新降序：YYYY-MM-DD 的字典序即时间序；lastUpdated 缺失排最后，保持原有顺序。 */
+  function compareLastUpdated(a: { lastUpdated?: string | null }, b: { lastUpdated?: string | null }): number {
+    const left = (a.lastUpdated ?? "").trim();
+    const right = (b.lastUpdated ?? "").trim();
+    if (!left && !right) return 0;
+    if (!left) return 1;
+    if (!right) return -1;
+    return right.localeCompare(left, "en");
+  }
+
+  /** 官方优先：official === true 的在前，组内保持默认顺序。 */
+  function compareOfficial(a: { official?: boolean }, b: { official?: boolean }): number {
+    return (b.official ? 1 : 0) - (a.official ? 1 : 0);
+  }
+
+  /** 名称升序：忽略大小写，按英文规则比较。 */
+  function compareName(a: { name: string }, b: { name: string }): number {
+    return a.name.toLowerCase().localeCompare(b.name.toLowerCase(), "en");
+  }
+
+  /** MCP 市场本地排序：对已加载目录排序，与关键词 / 分类筛选叠加（先过滤，后排序）。 */
+  function sortMcpEntries(entries: AgenticMcpEntry[], order: McpSortOrder): AgenticMcpEntry[] {
+    if (order === "heat") return stableSort(entries, compareHeat);
+    if (order === "official") return stableSort(entries, compareOfficial);
+    if (order === "name") return stableSort(entries, compareName);
+    return entries; // 默认排序：保持后端返回的目录顺序，不重排。
+  }
+
+  /** Skills 市场本地排序：对已加载目录排序，与关键词 / 分类筛选叠加（先过滤，后排序）。 */
+  function sortSkillEntries(entries: AgenticSkillEntry[], order: SkillSortOrder): AgenticSkillEntry[] {
+    if (order === "heat") return stableSort(entries, compareHeat);
+    if (order === "updated") return stableSort(entries, compareLastUpdated);
+    if (order === "name") return stableSort(entries, compareName);
+    return entries; // 默认排序：保持后端返回的目录顺序，不重排。
+  }
+
+  /** 行内键盘操作：Enter / Space 切换展开；Space 需阻止页面滚动。 */
+  function handleRowKeydown(event: KeyboardEvent, toggle: () => void) {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    toggle();
   }
 
   /** 条目自带详情字段：有任意一项就直接渲染，缺字段时才请求详情接口。 */
@@ -869,14 +953,22 @@
         <h3>{t("MCP 市场")}</h3>
         <span class="muted">{t("市场来源：agenticskills.io")}</span>
       </div>
-      <form class="market-search" onsubmit={(event) => { event.preventDefault(); void loadMcpMarket(); }}>
-        <Search size={14} />
-        <input bind:value={mcpQuery} placeholder={t("按名称、作者或分类筛选 MCP 服务…")} aria-label={t("筛选 MCP 服务")} autocomplete="off" />
-        <button type="submit" class="primary-action compact" disabled={mcpLoading || busyMcpEntry !== null} aria-label={t("刷新市场")} title={t("刷新市场")}>
-          {#if mcpLoading}<span class="spin"><RefreshCw size={13} /></span>{:else}<RefreshCw size={13} />{/if}
-          {t("刷新市场")}
-        </button>
-      </form>
+      <div class="market-toolbar">
+        <form class="market-search" onsubmit={(event) => { event.preventDefault(); void loadMcpMarket(); }}>
+          <Search size={14} />
+          <input bind:value={mcpQuery} placeholder={t("按名称、作者或分类筛选 MCP 服务…")} aria-label={t("筛选 MCP 服务")} autocomplete="off" />
+          <button type="submit" class="primary-action compact" disabled={mcpLoading || busyMcpEntry !== null} aria-label={t("刷新市场")} title={t("刷新市场")}>
+            {#if mcpLoading}<span class="spin"><RefreshCw size={13} /></span>{:else}<RefreshCw size={13} />{/if}
+            {t("刷新市场")}
+          </button>
+        </form>
+        <select class="market-sort" bind:value={mcpSort} aria-label={t("排序")}>
+          <option value="default">{t("默认排序")}</option>
+          <option value="heat">{t("热度")}</option>
+          <option value="official">{t("官方优先")}</option>
+          <option value="name">{t("名称（A–Z）")}</option>
+        </select>
+      </div>
       {#if mcpEntries.length > 0}
         <div class="category-filter" role="group" aria-label={t("分类筛选")}>
           <button type="button" class="category-chip" aria-pressed={mcpCategory === null} onclick={() => (mcpCategory = null)}>
@@ -897,27 +989,34 @@
       {:else}
         <ul class="entry-list market-list">
           {#each filteredMcpEntries as entry (entry.slug)}
-            <li>
-              <div class="entry-main">
-                <strong>{entry.name}</strong>
-                <small>{entry.description || entry.slug}</small>
-                <span class="market-meta">
-                  {#if entry.author}<span>{t("作者：{author}", { author: entry.author })}</span>{/if}
-                  {#if entry.category}<span class="category-chip" title={t("分类：{category}", { category: entry.category })}>{entry.category}</span>{/if}
-                  {#if (entry.transport ?? []).length}<span>{t("传输：{transport}", { transport: (entry.transport ?? []).join(" · ") })}</span>{/if}
-                  {#if formatAmount(entry.popularity)}<span class="downloads">{t("热度 {count}", { count: formatAmount(entry.popularity) })}</span>{/if}
-                  {#if entry.official}<span class="market-flag">{t("官方")}</span>{/if}
-                  {#if entry.requiresApiKey}<span class="market-flag">{t("需要 API Key")}</span>{/if}
-                </span>
+            <li class:expanded={mcpDetailSlug === entry.slug}>
+              <div class="market-row" role="button" tabindex="0"
+                aria-expanded={mcpDetailSlug === entry.slug} aria-busy={mcpDetailLoading === entry.slug}
+                aria-label={t("展开或收起 {name} 的详情", { name: entry.name })}
+                onclick={() => void toggleMcpDetail(entry)}
+                onkeydown={(event) => handleRowKeydown(event, () => void toggleMcpDetail(entry))}>
+                <div class="entry-main">
+                  <strong>{entry.name}</strong>
+                  <small>{entry.description || entry.slug}</small>
+                  <span class="market-meta">
+                    {#if entry.author}<span>{t("作者：{author}", { author: entry.author })}</span>{/if}
+                    {#if entry.category}<span class="category-chip" title={t("分类：{category}", { category: entry.category })}>{entry.category}</span>{/if}
+                    {#if (entry.transport ?? []).length}<span>{t("传输：{transport}", { transport: (entry.transport ?? []).join(" · ") })}</span>{/if}
+                    {#if formatAmount(entry.popularity)}<span class="downloads">{t("热度 {count}", { count: formatAmount(entry.popularity) })}</span>{/if}
+                    {#if entry.official}<span class="market-flag">{t("官方")}</span>{/if}
+                    {#if entry.requiresApiKey}<span class="market-flag">{t("需要 API Key")}</span>{/if}
+                  </span>
+                </div>
+                <span class="market-source">agenticskills.io</span>
+                {#if mcpDetailLoading === entry.slug}
+                  <span class="spin" aria-hidden="true"><RefreshCw size={12} /></span>
+                {/if}
+                <button type="button" class="primary-action compact" disabled={busyMcpEntry !== null}
+                  onclick={(event) => { event.stopPropagation(); void installAgenticMcp(entry); }}>
+                  {#if busyMcpEntry === entry.slug}<span class="spin"><RefreshCw size={12} /></span>{:else}<Download size={12} />{/if}
+                  {t("安装")}
+                </button>
               </div>
-              <span class="market-source">agenticskills.io</span>
-              <button type="button" class="secondary-action" disabled={mcpDetailLoading !== null} onclick={() => void toggleMcpDetail(entry)}>
-                {mcpDetailLoading === entry.slug ? t("加载中…") : mcpDetailSlug === entry.slug ? t("收起") : t("详情")}
-              </button>
-              <button type="button" class="primary-action compact" disabled={busyMcpEntry !== null} onclick={() => void installAgenticMcp(entry)}>
-                {#if busyMcpEntry === entry.slug}<span class="spin"><RefreshCw size={12} /></span>{:else}<Download size={12} />{/if}
-                {t("安装")}
-              </button>
               {#if mcpDetailSlug === entry.slug}
                 <div class="market-detail">
                   {#if mcpDetailLoading === entry.slug}
@@ -938,9 +1037,9 @@
                       {/each}
                     {/if}
                     <div class="detail-actions">
-                      <button type="button" class="link-action" onclick={() => void openSiteUrl(mcpDetailSiteUrl)}>{t("在站点打开")}</button>
+                      <button type="button" class="link-action" onclick={(event) => { event.stopPropagation(); void openSiteUrl(mcpDetailSiteUrl); }}>{t("在站点打开")}</button>
                       {#if mcpDetailWebsiteUrl}
-                        <button type="button" class="link-action" onclick={() => void openSiteUrl(mcpDetailWebsiteUrl)}>{t("打开官网")}</button>
+                        <button type="button" class="link-action" onclick={(event) => { event.stopPropagation(); void openSiteUrl(mcpDetailWebsiteUrl); }}>{t("打开官网")}</button>
                       {/if}
                     </div>
                   {/if}
@@ -959,14 +1058,22 @@
         <h3>{t("Skills 市场")}</h3>
         <span class="muted">{t("市场来源：agenticskills.io")}</span>
       </div>
-      <form class="market-search" onsubmit={(event) => { event.preventDefault(); void loadSkillMarket(); }}>
-        <Search size={14} />
-        <input bind:value={skillQuery} placeholder={t("按名称、作者或关键词筛选技能…")} aria-label={t("筛选技能")} autocomplete="off" />
-        <button type="submit" class="primary-action compact" disabled={skillLoading || busySkillEntry !== null} aria-label={t("刷新市场")} title={t("刷新市场")}>
-          {#if skillLoading}<span class="spin"><RefreshCw size={13} /></span>{:else}<RefreshCw size={13} />{/if}
-          {t("刷新市场")}
-        </button>
-      </form>
+      <div class="market-toolbar">
+        <form class="market-search" onsubmit={(event) => { event.preventDefault(); void loadSkillMarket(); }}>
+          <Search size={14} />
+          <input bind:value={skillQuery} placeholder={t("按名称、作者或关键词筛选技能…")} aria-label={t("筛选技能")} autocomplete="off" />
+          <button type="submit" class="primary-action compact" disabled={skillLoading || busySkillEntry !== null} aria-label={t("刷新市场")} title={t("刷新市场")}>
+            {#if skillLoading}<span class="spin"><RefreshCw size={13} /></span>{:else}<RefreshCw size={13} />{/if}
+            {t("刷新市场")}
+          </button>
+        </form>
+        <select class="market-sort" bind:value={skillSort} aria-label={t("排序")}>
+          <option value="default">{t("默认排序")}</option>
+          <option value="heat">{t("热度")}</option>
+          <option value="updated">{t("最新更新")}</option>
+          <option value="name">{t("名称（A–Z）")}</option>
+        </select>
+      </div>
       {#if skillEntries.length > 0}
         <div class="category-filter" role="group" aria-label={t("分类筛选")}>
           <button type="button" class="category-chip" aria-pressed={skillCategory === null} onclick={() => (skillCategory = null)}>
@@ -988,26 +1095,33 @@
         <ul class="entry-list market-list">
           {#each filteredSkillEntries as entry (entry.slug)}
             {@const tags = topTags(entry.tags)}
-            <li>
-              <div class="entry-main">
-                <strong>{entry.name}</strong>
-                <small>{entry.description || entry.slug}</small>
-                <span class="market-meta">
-                  {#if entry.author}<span>{t("作者：{author}", { author: entry.author })}</span>{/if}
-                  {#if entry.category}<span class="category-chip" title={t("分类：{category}", { category: entry.category })}>{entry.category}</span>{/if}
-                  {#if formatAmount(entry.installs)}<span class="downloads">{t("安装量 {count}", { count: formatAmount(entry.installs) })}</span>{/if}
-                  {#if formatAmount(entry.quality)}<span>{t("质量 {level}", { level: formatAmount(entry.quality) })}</span>{/if}
-                  {#each tags as tag (tag)}<span class="tag">{tag}</span>{/each}
-                </span>
+            <li class:expanded={skillDetailSlug === entry.slug}>
+              <div class="market-row" role="button" tabindex="0"
+                aria-expanded={skillDetailSlug === entry.slug} aria-busy={skillDetailLoading === entry.slug}
+                aria-label={t("展开或收起 {name} 的详情", { name: entry.name })}
+                onclick={() => void toggleSkillDetail(entry)}
+                onkeydown={(event) => handleRowKeydown(event, () => void toggleSkillDetail(entry))}>
+                <div class="entry-main">
+                  <strong>{entry.name}</strong>
+                  <small>{entry.description || entry.slug}</small>
+                  <span class="market-meta">
+                    {#if entry.author}<span>{t("作者：{author}", { author: entry.author })}</span>{/if}
+                    {#if entry.category}<span class="category-chip" title={t("分类：{category}", { category: entry.category })}>{entry.category}</span>{/if}
+                    {#if formatAmount(entry.installs)}<span class="downloads">{t("安装量 {count}", { count: formatAmount(entry.installs) })}</span>{/if}
+                    {#if formatAmount(entry.quality)}<span>{t("质量 {level}", { level: formatAmount(entry.quality) })}</span>{/if}
+                    {#each tags as tag (tag)}<span class="tag">{tag}</span>{/each}
+                  </span>
+                </div>
+                <span class="market-source">agenticskills.io</span>
+                {#if skillDetailLoading === entry.slug}
+                  <span class="spin" aria-hidden="true"><RefreshCw size={12} /></span>
+                {/if}
+                <button type="button" class="primary-action compact" disabled={busySkillEntry !== null}
+                  onclick={(event) => { event.stopPropagation(); void installAgenticSkill(entry); }}>
+                  {#if busySkillEntry === entry.slug}<span class="spin"><RefreshCw size={12} /></span>{:else}<Store size={12} />{/if}
+                  {t("安装")}
+                </button>
               </div>
-              <span class="market-source">agenticskills.io</span>
-              <button type="button" class="secondary-action" disabled={skillDetailLoading !== null} onclick={() => void toggleSkillDetail(entry)}>
-                {skillDetailLoading === entry.slug ? t("加载中…") : skillDetailSlug === entry.slug ? t("收起") : t("详情")}
-              </button>
-              <button type="button" class="primary-action compact" disabled={busySkillEntry !== null} onclick={() => void installAgenticSkill(entry)}>
-                {#if busySkillEntry === entry.slug}<span class="spin"><RefreshCw size={12} /></span>{:else}<Store size={12} />{/if}
-                {t("安装")}
-              </button>
               {#if skillDetailSlug === entry.slug}
                 <div class="market-detail">
                   {#if skillDetailLoading === entry.slug}
@@ -1023,9 +1137,9 @@
                       <span class="market-meta">{#each topTags(skillDetailTags, 6) as tag (tag)}<span class="tag">{tag}</span>{/each}</span>
                     {/if}
                     <div class="detail-actions">
-                      <button type="button" class="link-action" onclick={() => void openSiteUrl(skillDetailSiteUrl)}>{t("在站点打开")}</button>
+                      <button type="button" class="link-action" onclick={(event) => { event.stopPropagation(); void openSiteUrl(skillDetailSiteUrl); }}>{t("在站点打开")}</button>
                       {#if skillDetailSkillMdUrl}
-                        <button type="button" class="link-action" onclick={() => void openSiteUrl(skillDetailSkillMdUrl)}>{t("打开 SKILL.md")}</button>
+                        <button type="button" class="link-action" onclick={(event) => { event.stopPropagation(); void openSiteUrl(skillDetailSkillMdUrl); }}>{t("打开 SKILL.md")}</button>
                       {/if}
                     </div>
                   {/if}
@@ -1199,12 +1313,21 @@
   .market-search { display: flex; align-items: center; gap: 8px; margin-top: 10px; padding: 2px 4px 2px 10px; border: 1px solid var(--border-strong); border-radius: 5px; background: var(--surface); color: var(--text-muted); }
   .market-search input { flex: 1; min-width: 0; height: 32px; border: 0; outline: 0; background: transparent; color: var(--text); font: inherit; font-size: 12px; }
   .market-search .primary-action { justify-self: auto; }
+  .market-toolbar { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+  .market-toolbar .market-search { flex: 1; min-width: 0; margin-top: 0; }
+  .market-sort { flex-shrink: 0; height: 26px; max-width: 140px; padding: 0 4px; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--surface); color: var(--text); font: inherit; font-size: 11px; cursor: pointer; }
+  .market-sort:hover { border-color: var(--accent); color: var(--text-strong); }
   .status { margin: 0; font-size: 12px; color: var(--accent); }
   .spin { display: inline-grid; animation: mcp-spin 0.8s linear infinite; }
   @keyframes mcp-spin { to { transform: rotate(360deg); } }
   button:disabled { opacity: .45; cursor: default; }
   /* ---------- 市场列表（agenticskills.io） ---------- */
   .market-list li { flex-wrap: wrap; }
+  /* 整行可点击：展开/收起详情；行内安装按钮与展开区链接各自 stopPropagation。 */
+  .market-row { flex: 1 1 100%; min-width: 0; display: flex; align-items: center; gap: 8px; cursor: pointer; }
+  .market-row:hover { background: var(--surface-hover); }
+  .market-row:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+  .market-list li.expanded { border-color: var(--accent); }
   .market-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 10px; color: var(--text-muted); }
   .market-flag { flex-shrink: 0; padding: 1px 5px; border: 1px solid var(--border-strong); border-radius: 3px; color: var(--text); font-size: 10px; }
   .category-chip { flex-shrink: 0; display: inline-flex; align-items: center; padding: 1px 5px; border: 1px solid var(--border-strong); border-radius: 3px; color: var(--text-muted); font-family: var(--code-font); font-size: 10px; letter-spacing: .04em; text-transform: uppercase; }

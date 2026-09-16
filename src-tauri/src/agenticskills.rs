@@ -71,6 +71,10 @@ pub struct AgenticSkillEntry {
     pub tags: Vec<String>,
     pub platforms: Vec<String>,
     pub installs: Option<String>,
+    /// 原始 star 数（排序用；`installs` 只是显示文本）。
+    pub stars: Option<u64>,
+    /// 热度统一口径：技能与 `stars` 相同。
+    pub heat: Option<u64>,
     pub quality: Option<String>,
     pub license: Option<String>,
     pub last_updated: Option<String>,
@@ -112,6 +116,10 @@ pub struct AgenticMcpEntry {
     pub official: bool,
     pub requires_api_key: bool,
     pub popularity: Option<String>,
+    /// 原始 star 数（排序用）。
+    pub stars: Option<u64>,
+    /// 热度统一口径：`stars` 优先，否则从 `popularity` 文本里解析。
+    pub heat: Option<u64>,
     pub website_url: Option<String>,
     pub config_source: Option<String>,
     pub tags: Vec<String>,
@@ -787,6 +795,77 @@ fn is_mcp_object(value: &Value) -> bool {
         )
 }
 
+/// 文本里的原始计数（热度排序用）：`~36K visitors/wk` → 36000、`1.2M` → 1200000。
+///
+/// 只认开头的 `\d+(\.\d+)?[KM]?` 形态（可带 `~` 前缀与 `,` 千分位，小数最多 6 位）；
+/// 没有数字、负数、带非计数后缀（如 `46e3`）与超出 `u64` 的值一律 `None`——不用 0 冒充。
+fn parse_count_text(text: &str) -> Option<u64> {
+    /// 小数最多取这么多位：`10u128.pow` 与尾数拼接都不至于失控。
+    const MAX_FRACTION_DIGITS: usize = 6;
+    let trimmed = text.trim();
+    let trimmed = trimmed.strip_prefix('~').unwrap_or(trimmed).trim_start();
+    let bytes = trimmed.as_bytes();
+    let mut index = 0usize;
+    let mut digits = String::new();
+    while let Some(byte) = bytes.get(index).copied() {
+        if byte.is_ascii_digit() {
+            digits.push(byte as char);
+        } else if byte != b',' {
+            break;
+        }
+        index += 1;
+    }
+    if digits.is_empty() {
+        return None;
+    }
+    let mut fraction = String::new();
+    if bytes.get(index) == Some(&b'.') {
+        index += 1;
+        while fraction.len() < MAX_FRACTION_DIGITS
+            && bytes
+                .get(index)
+                .copied()
+                .is_some_and(|byte| byte.is_ascii_digit())
+        {
+            fraction.push(bytes[index] as char);
+            index += 1;
+        }
+    }
+    let multiplier: u128 = match bytes.get(index).copied() {
+        Some(b'K' | b'k') => {
+            index += 1;
+            1_000
+        }
+        Some(b'M' | b'm') => {
+            index += 1;
+            1_000_000
+        }
+        _ => 1,
+    };
+    // 指数写法（`46e3`）由 JS 字面量 → JSON 那条路径折成十进制，这里不认。
+    if bytes
+        .get(index)
+        .copied()
+        .is_some_and(|byte| byte.is_ascii_alphanumeric())
+    {
+        return None;
+    }
+    let mantissa = format!("{digits}{fraction}").parse::<u128>().ok()?;
+    let scale = 10u128.pow(fraction.len() as u32);
+    let value = mantissa.checked_mul(multiplier)? / scale;
+    u64::try_from(value).ok()
+}
+
+/// JSON 字段里的原始计数：数字直接 `as_u64`，字符串按 `parse_count_text` 解析
+/// （JS 字面量里的指数写法在 `js_literals_to_json` 时已经折成十进制）。
+fn json_count(value: &Value, key: &str) -> Option<u64> {
+    match value.get(key)? {
+        Value::Number(number) => number.as_u64(),
+        Value::String(text) => parse_count_text(text),
+        _ => None,
+    }
+}
+
 /// 复刻站点 `formatStarCount`：`>=1e6` → `1.2M`，`>=1e3` → `87.0K`，0 → 空串。
 pub(crate) fn format_stars(stars: u64) -> String {
     if stars == 0 {
@@ -804,9 +883,9 @@ pub(crate) fn format_stars(stars: u64) -> String {
 fn skill_entry_from_object(value: &Value, repo_stars: &BTreeMap<String, u64>) -> AgenticSkillEntry {
     let slug = json_string(value, "slug").unwrap_or_default();
     let (author, _) = author_fields(value);
-    let stars = value
-        .get("githubStars")
-        .and_then(Value::as_u64)
+    // 原始 star 数：条目自身的 `githubStars` / `repoStars` 优先，其次仓库统计映射。
+    let stars = json_count(value, "githubStars")
+        .or_else(|| json_count(value, "repoStars"))
         .or_else(|| repo_stars.get(&slug).copied());
     AgenticSkillEntry {
         name: json_string(value, "name").unwrap_or_else(|| slug.clone()),
@@ -818,6 +897,8 @@ fn skill_entry_from_object(value: &Value, repo_stars: &BTreeMap<String, u64>) ->
         tags: json_string_list(value, "tags"),
         platforms: json_string_list(value, "platforms"),
         installs: stars.map(format_stars).and_then(|text| non_empty(&text)),
+        stars,
+        heat: stars,
         quality: json_string(value, "quality"),
         license: json_string(value, "license"),
         last_updated: json_string(value, "lastUpdated"),
@@ -851,6 +932,13 @@ fn mcp_snippets(value: &Value) -> Vec<AgenticMcpSnippet> {
 fn mcp_entry_from_object(value: &Value) -> AgenticMcpEntry {
     let slug = json_string(value, "slug").unwrap_or_default();
     let (author, _) = author_fields(value);
+    let stars = json_count(value, "githubStars");
+    // 热度统一口径：有星用星，否则取 `popularity` 文本里的第一个计数。
+    let heat = stars.or_else(|| {
+        json_string(value, "popularity")
+            .as_deref()
+            .and_then(parse_count_text)
+    });
     AgenticMcpEntry {
         name: json_string(value, "name").unwrap_or_else(|| slug.clone()),
         slug,
@@ -862,6 +950,8 @@ fn mcp_entry_from_object(value: &Value) -> AgenticMcpEntry {
         official: json_bool(value, "isOfficial"),
         requires_api_key: json_bool(value, "requiresApiKey"),
         popularity: json_string(value, "popularity"),
+        stars,
+        heat,
         website_url: json_string(value, "websiteUrl"),
         config_source: json_string(value, "configSource"),
         tags: json_string_list(value, "tags"),
@@ -2686,12 +2776,13 @@ mod tests {
         agent_config, catalog_chunk_candidates, config_from_snippets, filter_mcp, filter_skills,
         filter_workflows, format_stars, install_workflow_components, installed_workflows_json,
         js_literals_to_json, kickoff_prompt_from_text, mcp_install_snippets, mcp_server_name,
-        parse_catalog_chunk, parse_mcp_catalog, parse_mcp_detail, parse_mcp_snippet,
-        parse_skill_catalog, parse_skill_detail, parse_workflow_catalog, parse_workflow_detail,
-        read_installed_workflows, skill_description_text, skill_install_source, skill_name_for,
-        store_installed_workflow, truncate_bytes, validate_slug, workflow_component_installed,
-        AgenticMcpInstall, AgenticMcpSnippet, AgenticSkillInstall, AgenticWorkflowComponent,
-        ConfigScope, InstalledWorkflow, MAX_INSTALLED_WORKFLOWS,
+        parse_catalog_chunk, parse_count_text, parse_mcp_catalog, parse_mcp_detail,
+        parse_mcp_snippet, parse_skill_catalog, parse_skill_detail, parse_workflow_catalog,
+        parse_workflow_detail, read_installed_workflows, skill_description_text,
+        skill_install_source, skill_name_for, store_installed_workflow, truncate_bytes,
+        validate_slug, workflow_component_installed, AgenticMcpInstall, AgenticMcpSnippet,
+        AgenticSkillInstall, AgenticWorkflowComponent, ConfigScope, InstalledWorkflow,
+        MAX_INSTALLED_WORKFLOWS,
     };
     use crate::app_paths::AppPaths;
     use crate::message::message_code;
@@ -3352,6 +3443,116 @@ var t=[{slug:"notion",name:"Notion",description:"Pages, databases, search, and c
         assert_eq!(format_stars(0), "");
     }
 
+    /// stars / heat 的小夹具：技能覆盖仓库统计映射、条目自身 `githubStars`（指数写法）与
+    /// 条目自身 `repoStars`；MCP 覆盖「有星」「只有 visitors/wk」「没有数字」几种形态。
+    const STARS_HEAT_CHUNK_JS: &str = r#"
+let s={"taste-skill":{repoStars:87002}};
+var i=[
+ {slug:"taste-skill",name:"Taste Skill",platforms:["codex"]},
+ {slug:"docs-writer",name:"Docs Writer",platforms:["codex"],githubStars:46e3},
+ {slug:"entry-stars",name:"Entry Stars",platforms:["codex"],repoStars:12000},
+ {slug:"plain-skill",name:"Plain Skill",platforms:["codex"]}
+];
+var t=[
+ {slug:"notion",name:"Notion",transport:["Streamable HTTP"],popularity:"~36K visitors/wk"},
+ {slug:"glama",name:"Glama",transport:["stdio"],popularity:"A/A/A on Glama"},
+ {slug:"official",name:"Official",transport:["stdio"],popularity:"Listed official"},
+ {slug:"yearly",name:"Yearly",transport:["stdio"],popularity:"1.2M visitors/mo"},
+ {slug:"starred",name:"Starred",transport:["stdio"],githubStars:46e3,popularity:"~36K visitors/wk"}
+];
+"#;
+
+    #[test]
+    fn exposes_raw_stars_and_heat_for_sorting() {
+        let chunk = parse_catalog_chunk(STARS_HEAT_CHUNK_JS);
+        let skill = |slug: &str| {
+            chunk
+                .skills
+                .iter()
+                .find(|entry| entry.slug == slug)
+                .expect("skill entry")
+        };
+
+        // 仓库统计映射里的 `repoStars` 是技能的原始值，`installs` 只用于显示。
+        let taste = skill("taste-skill");
+        assert_eq!(taste.stars, Some(87_002));
+        assert_eq!(taste.heat, Some(87_002));
+        assert_eq!(taste.installs.as_deref(), Some("87.0K"));
+
+        // 序列化契约：字段名保持 camelCase，缺省值就是 `null`（前端按可选字段处理）。
+        let serialized = serde_json::to_value(taste).expect("entry should serialize");
+        assert_eq!(serialized["stars"], 87_002);
+        assert_eq!(serialized["heat"], 87_002);
+
+        // 条目自身的 `githubStars:46e3` 优先于映射（指数写法在 JS→JSON 时折成 46000）。
+        let docs = skill("docs-writer");
+        assert_eq!(docs.stars, Some(46_000));
+        assert_eq!(docs.heat, Some(46_000));
+        assert_eq!(docs.installs.as_deref(), Some("46.0K"));
+
+        // 条目自身的 `repoStars` 也算数。
+        assert_eq!(skill("entry-stars").stars, Some(12_000));
+
+        // 没有任何计数的条目保持 `None`，不用 0 冒充。
+        let plain = skill("plain-skill");
+        assert_eq!(plain.stars, None);
+        assert_eq!(plain.heat, None);
+        assert_eq!(plain.installs, None);
+        let serialized = serde_json::to_value(plain).expect("entry should serialize");
+        assert!(serialized["stars"].is_null() && serialized["heat"].is_null());
+
+        let mcp = |slug: &str| {
+            chunk
+                .mcp
+                .iter()
+                .find(|entry| entry.slug == slug)
+                .expect("mcp entry")
+        };
+
+        // MCP：没有 `githubStars` 时从 `popularity` 文本里取计数。
+        let notion = mcp("notion");
+        assert_eq!(notion.stars, None);
+        assert_eq!(notion.heat, Some(36_000));
+        assert_eq!(notion.popularity.as_deref(), Some("~36K visitors/wk"));
+        assert_eq!(mcp("yearly").heat, Some(1_200_000));
+
+        // 文本里没有数字 → `None`。
+        assert_eq!(mcp("glama").heat, None);
+        assert_eq!(mcp("official").heat, None);
+
+        // MCP：有 `githubStars` 时热度用星数，不再看 `popularity`。
+        let starred = mcp("starred");
+        assert_eq!(starred.stars, Some(46_000));
+        assert_eq!(starred.heat, Some(46_000));
+    }
+
+    #[test]
+    fn parses_raw_count_boundaries() {
+        // K / M 换算、逗号千分位、`~` 前缀、小数与尾部文本。
+        assert_eq!(parse_count_text("~36K visitors/wk"), Some(36_000));
+        assert_eq!(parse_count_text("1.2M"), Some(1_200_000));
+        assert_eq!(parse_count_text("1.5K"), Some(1_500));
+        assert_eq!(parse_count_text("0.5M"), Some(500_000));
+        assert_eq!(parse_count_text("87,002"), Some(87_002));
+        assert_eq!(parse_count_text("~ 12,345K"), Some(12_345_000));
+        assert_eq!(parse_count_text("5000+ weekly"), Some(5_000));
+        assert_eq!(parse_count_text("46"), Some(46));
+
+        // 没有数字 / 负数 / 指数 / 越界 → `None`。
+        assert_eq!(parse_count_text(""), None);
+        assert_eq!(parse_count_text("   "), None);
+        assert_eq!(parse_count_text("Listed official"), None);
+        assert_eq!(parse_count_text("A/A/A on Glama"), None);
+        assert_eq!(parse_count_text("-5K"), None);
+        assert_eq!(parse_count_text("~-5K"), None);
+        assert_eq!(parse_count_text("~1e6"), None);
+        assert_eq!(parse_count_text("12M5"), None);
+        assert_eq!(parse_count_text(&u64::MAX.to_string()), Some(u64::MAX));
+        assert_eq!(parse_count_text(&(u64::MAX as u128 + 1).to_string()), None);
+        assert_eq!(parse_count_text(&format!("{}K", u64::MAX)), None);
+        assert_eq!(parse_count_text(&"9".repeat(60)), None);
+    }
+
     #[test]
     fn extracts_chunk_candidates_from_listing_html() {
         assert_eq!(
@@ -3710,8 +3911,13 @@ var t=[{slug:"notion",name:"Notion",description:"Pages, databases, search, and c
             .iter()
             .filter(|entry| entry.installs.is_some())
             .count();
+        let skills_with_stars = skills.iter().filter(|entry| entry.stars.is_some()).count();
+        let skills_heat_matches_stars = skills
+            .iter()
+            .filter(|entry| entry.heat == entry.stars)
+            .count();
         println!(
-            "skills={} withCategory={skills_with_category} withSkillMdUrl={skills_with_source} withInstalls={skills_with_installs}",
+            "skills={} withCategory={skills_with_category} withSkillMdUrl={skills_with_source} withInstalls={skills_with_installs} withStars={skills_with_stars} heatMatchesStars={skills_heat_matches_stars}",
             skills.len()
         );
         assert!(
@@ -3721,6 +3927,16 @@ var t=[{slug:"notion",name:"Notion",description:"Pages, databases, search, and c
         assert!(
             skills_with_source * 2 > skills.len(),
             "most skills should carry a SKILL.md url"
+        );
+        // 原始 star 数（排序用）：>90% 的技能应带星；技能热度与星数完全一致。
+        assert!(
+            skills_with_stars * 10 > skills.len() * 9,
+            "more than 90% of skills should carry raw star counts"
+        );
+        assert_eq!(
+            skills_heat_matches_stars,
+            skills.len(),
+            "skill heat should always mirror stars"
         );
 
         let mcp = super::cached_mcp_catalog(&cache).expect("MCP catalog should be reachable");
@@ -3734,9 +3950,25 @@ var t=[{slug:"notion",name:"Notion",description:"Pages, databases, search, and c
             .iter()
             .filter(|entry| !entry.snippets.is_empty())
             .count();
+        let mcp_with_stars = mcp.iter().filter(|entry| entry.stars.is_some()).count();
+        let mcp_with_heat = mcp.iter().filter(|entry| entry.heat.is_some()).count();
+        let weekly_visitors = mcp
+            .iter()
+            .filter(|entry| {
+                entry
+                    .popularity
+                    .as_deref()
+                    .is_some_and(|text| text.contains("visitors/wk"))
+            })
+            .collect::<Vec<_>>();
+        let weekly_heat_above_1k = weekly_visitors
+            .iter()
+            .filter(|entry| entry.heat.is_some_and(|heat| heat > 1_000))
+            .count();
         println!(
-            "mcp={} withCategory={mcp_with_category} withTransport={mcp_with_transport} withSnippets={mcp_with_snippets}",
-            mcp.len()
+            "mcp={} withCategory={mcp_with_category} withTransport={mcp_with_transport} withSnippets={mcp_with_snippets} withStars={mcp_with_stars} withHeat={mcp_with_heat} weeklyVisitors={} weeklyHeatAbove1k={weekly_heat_above_1k}",
+            mcp.len(),
+            weekly_visitors.len()
         );
         assert!(
             mcp_with_category * 10 > mcp.len() * 9,
@@ -3749,6 +3981,25 @@ var t=[{slug:"notion",name:"Notion",description:"Pages, databases, search, and c
         assert!(
             mcp_with_snippets >= 50,
             "expected at least 50 MCP entries with config snippets"
+        );
+        // 热度的统一口径：站点只给 17 条 MCP 的 `githubStars`、20 条带数字的 `popularity`
+        // （2026-06 实测 37/193），因此门槛按真实数据留出抖动空间。
+        assert!(
+            mcp_with_heat >= 30,
+            "expected at least 30 MCP entries with a heat count"
+        );
+        assert!(
+            mcp_with_stars > 0,
+            "expected githubStars to reach at least one MCP entry"
+        );
+        assert!(
+            !weekly_visitors.is_empty(),
+            "expected visitors/wk entries on the MCP page"
+        );
+        assert_eq!(
+            weekly_heat_above_1k,
+            weekly_visitors.len(),
+            "entries with visitors/wk popularity should carry heat above 1000"
         );
         // 第二次目录请求应当直接吃缓存里的 chunk URL（不用再拉列表页）。
         assert!(cache.chunk_url().is_some());
