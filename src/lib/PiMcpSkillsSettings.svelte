@@ -72,6 +72,10 @@
     stars?: number | null;
     /** 热度统一口径（缺失表示未知，排序时排最后）。 */
     heat?: number | null;
+    /** 站点审计通过数（后端 summary.passed）；缺失表示未知，排序时排最后。 */
+    auditPassed?: number | null;
+    /** 站点审计检查总数（后端 summary.total）；缺失或为 0 表示无有效审计数据。 */
+    auditTotal?: number | null;
     websiteUrl?: string | null;
     configSource?: string | null;
     tags?: string[];
@@ -100,6 +104,9 @@
     websiteUrl?: string | null;
     configSource?: string | null;
     popularity?: number | null;
+    /** 审计通过数 / 检查总数（详情接口与目录条目同名字段）；缺失表示未知。 */
+    auditPassed?: number | null;
+    auditTotal?: number | null;
     tags?: string[];
     snippets?: AgenticMcpSnippet[];
     sourceUrl?: string | null;
@@ -168,10 +175,11 @@
   }
 
   /** MCP 市场排序方式：「默认」保持后端目录顺序，其余在本地排序。 */
-  type McpSortOrder = "default" | "heat" | "official" | "name";
+  /** MCP 市场排序方式：「默认」保持后端目录顺序，其余在本地排序；「audit」按审计通过率降序。 */
+  type McpSortOrder = "default" | "heat" | "audit" | "official" | "name";
 
-  /** Skills 市场排序方式：「最新」按 lastUpdated 降序。 */
-  type SkillSortOrder = "default" | "heat" | "updated" | "name";
+  /** Skills 市场排序方式：「最新」按 lastUpdated 降序；「rank」按质量评级 S > A > B > C 降序。 */
+  type SkillSortOrder = "default" | "heat" | "rank" | "updated" | "name";
   interface Props {
     mode: "mcp" | "skills" | "workflows";
     /** 破坏性操作的确认框；只有 MCP / Skills 模式会用到，工作流市场没有删除操作。 */
@@ -308,6 +316,7 @@
   const mcpDetailConfigSource = $derived(mcpDetailView?.configSource ?? "");
   const mcpDetailTags = $derived(mcpDetailView?.tags ?? []);
   const mcpDetailSnippets = $derived(mcpDetailView?.snippets ?? []);
+  const mcpDetailAudit = $derived(auditSummary(mcpDetailView));
   const mcpDetailSiteUrl = $derived(mcpSiteUrl(mcpDetailView));
 
   // 工作流详情派生值：展开哪一条就渲染哪一条。
@@ -489,6 +498,53 @@
     return right - left;
   }
 
+  /** 审计通过数 / 检查总数：两字段都存在且 total > 0、passed 在 [0, total] 内才算有效，否则返回 null。 */
+  function auditSummary(
+    entry: { auditPassed?: number | null; auditTotal?: number | null } | null | undefined,
+  ): { passed: number; total: number } | null {
+    const total = typeof entry?.auditTotal === "number" && Number.isFinite(entry.auditTotal) ? entry.auditTotal : null;
+    const passed = typeof entry?.auditPassed === "number" && Number.isFinite(entry.auditPassed) ? entry.auditPassed : null;
+    if (total === null || total <= 0 || passed === null || passed < 0 || passed > total) return null;
+    return { passed, total };
+  }
+
+  /** 审计通过率（passed / total）：无有效审计数据（缺失 / total 为 0 / passed 越界）返回 null。 */
+  function auditRatio(entry: { auditPassed?: number | null; auditTotal?: number | null }): number | null {
+    const summary = auditSummary(entry);
+    return summary === null ? null : summary.passed / summary.total;
+  }
+
+  /** 审计评分降序：通过率高的在前；无有效审计数据的排最后，缺失项之间保持原有顺序。 */
+  function compareAudit(
+    a: { auditPassed?: number | null; auditTotal?: number | null },
+    b: { auditPassed?: number | null; auditTotal?: number | null },
+  ): number {
+    const left = auditRatio(a);
+    const right = auditRatio(b);
+    if (left === null && right === null) return 0;
+    if (left === null) return 1;
+    if (right === null) return -1;
+    return right - left;
+  }
+
+  /** 质量评级从好到差（站点实测只有这四档；其余取值视为未知）。 */
+  const SKILL_RANKS: string[] = ["S", "A", "B", "C"];
+
+  /** 评级序号：越小越好；缺失或未知取值返回 -1（排序时排最后）。 */
+  function rankIndex(quality: string | number | null | undefined): number {
+    if (typeof quality !== "string") return -1;
+    return SKILL_RANKS.indexOf(quality.trim().toUpperCase());
+  }
+
+  /** 评级降序（S > A > B > C）：缺失或未知排最后，同评级内保持原有顺序。 */
+  function compareRank(a: { quality?: string | number | null }, b: { quality?: string | number | null }): number {
+    const left = rankIndex(a.quality);
+    const right = rankIndex(b.quality);
+    if (left < 0) return right < 0 ? 0 : 1;
+    if (right < 0) return -1;
+    return left - right;
+  }
+
   /** 最近更新降序：YYYY-MM-DD 的字典序即时间序；lastUpdated 缺失排最后，保持原有顺序。 */
   function compareLastUpdated(a: { lastUpdated?: string | null }, b: { lastUpdated?: string | null }): number {
     const left = (a.lastUpdated ?? "").trim();
@@ -512,6 +568,7 @@
   /** MCP 市场本地排序：对已加载目录排序，与关键词 / 分类筛选叠加（先过滤，后排序）。 */
   function sortMcpEntries(entries: AgenticMcpEntry[], order: McpSortOrder): AgenticMcpEntry[] {
     if (order === "heat") return stableSort(entries, compareHeat);
+    if (order === "audit") return stableSort(entries, compareAudit);
     if (order === "official") return stableSort(entries, compareOfficial);
     if (order === "name") return stableSort(entries, compareName);
     return entries; // 默认排序：保持后端返回的目录顺序，不重排。
@@ -520,6 +577,7 @@
   /** Skills 市场本地排序：对已加载目录排序，与关键词 / 分类筛选叠加（先过滤，后排序）。 */
   function sortSkillEntries(entries: AgenticSkillEntry[], order: SkillSortOrder): AgenticSkillEntry[] {
     if (order === "heat") return stableSort(entries, compareHeat);
+    if (order === "rank") return stableSort(entries, compareRank);
     if (order === "updated") return stableSort(entries, compareLastUpdated);
     if (order === "name") return stableSort(entries, compareName);
     return entries; // 默认排序：保持后端返回的目录顺序，不重排。
@@ -618,6 +676,8 @@
       websiteUrl: entry?.websiteUrl ?? detail?.websiteUrl ?? null,
       configSource: entry?.configSource ?? detail?.configSource ?? null,
       popularity: entry?.popularity ?? detail?.popularity ?? null,
+      auditPassed: entry?.auditPassed ?? detail?.auditPassed ?? null,
+      auditTotal: entry?.auditTotal ?? detail?.auditTotal ?? null,
       tags: entry?.tags?.length ? entry.tags : (detail?.tags ?? []),
       snippets: entry?.snippets?.length ? entry.snippets : (detail?.snippets ?? []),
       sourceUrl: detail?.sourceUrl ?? null,
@@ -965,6 +1025,7 @@
         <select class="market-sort" bind:value={mcpSort} aria-label={t("排序")}>
           <option value="default">{t("默认排序")}</option>
           <option value="heat">{t("热度")}</option>
+          <option value="audit">{t("审计评分")}</option>
           <option value="official">{t("官方优先")}</option>
           <option value="name">{t("名称（A–Z）")}</option>
         </select>
@@ -989,6 +1050,7 @@
       {:else}
         <ul class="entry-list market-list">
           {#each filteredMcpEntries as entry (entry.slug)}
+            {@const audit = auditSummary(entry)}
             <li class:expanded={mcpDetailSlug === entry.slug}>
               <div class="market-row" role="button" tabindex="0"
                 aria-expanded={mcpDetailSlug === entry.slug} aria-busy={mcpDetailLoading === entry.slug}
@@ -1003,6 +1065,7 @@
                     {#if entry.category}<span class="category-chip" title={t("分类：{category}", { category: entry.category })}>{entry.category}</span>{/if}
                     {#if (entry.transport ?? []).length}<span>{t("传输：{transport}", { transport: (entry.transport ?? []).join(" · ") })}</span>{/if}
                     {#if formatAmount(entry.popularity)}<span class="downloads">{t("热度 {count}", { count: formatAmount(entry.popularity) })}</span>{/if}
+                    {#if audit}<span class="market-flag">{t("审计 {passed}/{total}", { passed: audit.passed, total: audit.total })}</span>{/if}
                     {#if entry.official}<span class="market-flag">{t("官方")}</span>{/if}
                     {#if entry.requiresApiKey}<span class="market-flag">{t("需要 API Key")}</span>{/if}
                   </span>
@@ -1027,6 +1090,7 @@
                       {#if mcpDetailAuthor}<span>{t("作者：{author}", { author: mcpDetailAuthor })}</span>{/if}
                       {#if mcpDetailTrustLevel}<span>{t("信任等级：{level}", { level: mcpDetailTrustLevel })}</span>{/if}
                       {#if mcpDetailConfigSource}<span>{t("配置来源：{source}", { source: mcpDetailConfigSource })}</span>{/if}
+                      {#if mcpDetailAudit}<span>{t("审计 {passed}/{total}", { passed: mcpDetailAudit.passed, total: mcpDetailAudit.total })}</span>{/if}
                       {#if mcpDetailTags.length}<span>{topTags(mcpDetailTags, 6).join(" · ")}</span>{/if}
                     </div>
                     {#if mcpDetailSnippets.length}
@@ -1070,6 +1134,7 @@
         <select class="market-sort" bind:value={skillSort} aria-label={t("排序")}>
           <option value="default">{t("默认排序")}</option>
           <option value="heat">{t("热度")}</option>
+          <option value="rank">{t("Rank（评级）")}</option>
           <option value="updated">{t("最新更新")}</option>
           <option value="name">{t("名称（A–Z）")}</option>
         </select>

@@ -2,7 +2,7 @@
 //!
 //! 站点是 Next.js 应用，没有公开 JSON API，数据来源有三处：
 //! - 列表页引用的数据 chunk（`/_next/static/immutable/chunks/<hash>.js`）里内嵌了
-//!   全量目录（技能 + MCP 服务器 + 仓库统计），字段最全且带 `category`。chunk 名带
+//!   全量目录（技能 + MCP 服务器 + 仓库统计 + MCP 审计结果），字段最全且带 `category`。chunk 名带
 //!   构建哈希，因此先抓列表页 HTML、再按文档顺序倒着试，命中后把 URL 记进缓存。
 //! - 列表页里的 JSON-LD `<script type="application/ld+json">`：只有 slug + name，
 //!   作为 chunk 不可用时的降级来源（无分类，只写短缓存）。
@@ -120,6 +120,10 @@ pub struct AgenticMcpEntry {
     pub stars: Option<u64>,
     /// 热度统一口径：`stars` 优先，否则从 `popularity` 文本里解析。
     pub heat: Option<u64>,
+    /// 官网审计口径的原始通过数（chunk 里 `mcpAuditResults[slug].summary.passed`，排序用）。
+    pub audit_passed: Option<u32>,
+    /// 官网审计口径的原始检查项总数（`summary.total`）：0 / 缺失 / 越界 / `passed > total` 时给 `None`。
+    pub audit_total: Option<u32>,
     pub website_url: Option<String>,
     pub config_source: Option<String>,
     pub tags: Vec<String>,
@@ -929,7 +933,8 @@ fn mcp_snippets(value: &Value) -> Vec<AgenticMcpSnippet> {
         .unwrap_or_default()
 }
 
-fn mcp_entry_from_object(value: &Value) -> AgenticMcpEntry {
+/// 审计数值按 slug 关联：映射里有才写，没写就是 `None`（前端按可选字段排序）。
+fn mcp_entry_from_object(value: &Value, audits: &BTreeMap<String, (u32, u32)>) -> AgenticMcpEntry {
     let slug = json_string(value, "slug").unwrap_or_default();
     let (author, _) = author_fields(value);
     let stars = json_count(value, "githubStars");
@@ -939,6 +944,10 @@ fn mcp_entry_from_object(value: &Value) -> AgenticMcpEntry {
             .as_deref()
             .and_then(parse_count_text)
     });
+    let (audit_passed, audit_total) = match audits.get(&slug) {
+        Some((passed, total)) => (Some(*passed), Some(*total)),
+        None => (None, None),
+    };
     AgenticMcpEntry {
         name: json_string(value, "name").unwrap_or_else(|| slug.clone()),
         slug,
@@ -952,6 +961,8 @@ fn mcp_entry_from_object(value: &Value) -> AgenticMcpEntry {
         popularity: json_string(value, "popularity"),
         stars,
         heat,
+        audit_passed,
+        audit_total,
         website_url: json_string(value, "websiteUrl"),
         config_source: json_string(value, "configSource"),
         tags: json_string_list(value, "tags"),
@@ -978,17 +989,52 @@ fn collect_repo_stars(value: &Value, stars: &mut BTreeMap<String, u64>) {
     }
 }
 
-/// 解析数据 chunk：技能、MCP 服务器与仓库统计。
+/// 数据 chunk 里的「MCP 审计结果」映射：`let a={notion:{lastAuditedAt:…,checks:{…},summary:{passed:1,total:2}}}`。
+///
+/// 与 `repo_stars` 同款做法：扫描到的对象里，值形如 `{…,summary:{passed,total}}` 的映射才算审计表，
+/// 每个键取 `summary.passed` / `summary.total` 两个原始数值（官网 MCP 页「Audit Score」的口径）。
+/// 只收有效条目：`total` 为 0 / 缺失、`passed` 缺失、`passed > total`、超出 `u32` 或键不是 slug
+/// 一律跳过（用 `None` 表示「没有可用的审计数值」，不用 0 或猜测值冒充）。
+fn collect_audit_scores(value: &Value, audits: &mut BTreeMap<String, (u32, u32)>) {
+    let Some(map) = value.as_object() else {
+        return;
+    };
+    if map.contains_key("slug") {
+        return;
+    }
+    for (key, entry) in map {
+        let Some(summary) = entry.get("summary") else {
+            continue;
+        };
+        let (Some(passed), Some(total)) = (
+            summary.get("passed").and_then(Value::as_u64),
+            summary.get("total").and_then(Value::as_u64),
+        ) else {
+            continue;
+        };
+        let (Ok(passed), Ok(total)) = (u32::try_from(passed), u32::try_from(total)) else {
+            continue;
+        };
+        if total == 0 || passed > total || validate_slug(key).is_err() {
+            continue;
+        }
+        audits.insert(key.clone(), (passed, total));
+    }
+}
+
+/// 解析数据 chunk：技能、MCP 服务器、仓库统计与 MCP 审计结果。
 ///
 /// 只有带目录字段的对象才收（导航/分类/组件里的对象会被跳过），解析失败的对象
 /// 全部忽略——chunk 里大部分花括号其实是普通 JS 代码。
 pub(crate) fn parse_catalog_chunk(js: &str) -> CatalogChunk {
     let objects = scan_object_literals(js);
     let mut repo_stars: BTreeMap<String, u64> = BTreeMap::new();
+    let mut audits: BTreeMap<String, (u32, u32)> = BTreeMap::new();
     for value in &objects {
         collect_repo_stars(value, &mut repo_stars);
+        collect_audit_scores(value, &mut audits);
     }
-    // 仓库统计在同一个 chunk 的另一段里，因此先收集再生成条目（`installs` 要用它）。
+    // 仓库统计与审计结果都在同一个 chunk 的另一段里，先收集再生成条目（`installs` / 排序字段要用）。
     let mut skills: Vec<AgenticSkillEntry> = Vec::new();
     let mut mcp: Vec<AgenticMcpEntry> = Vec::new();
     let mut seen_skills: HashSet<String> = HashSet::new();
@@ -1002,7 +1048,7 @@ pub(crate) fn parse_catalog_chunk(js: &str) -> CatalogChunk {
                 skills.push(skill_entry_from_object(value, &repo_stars));
             }
         } else if is_mcp_object(value) && seen_mcp.insert(slug) {
-            mcp.push(mcp_entry_from_object(value));
+            mcp.push(mcp_entry_from_object(value, &audits));
         }
     }
     CatalogChunk {
@@ -2773,16 +2819,16 @@ pub async fn list_installed_workflows(
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_config, catalog_chunk_candidates, config_from_snippets, filter_mcp, filter_skills,
-        filter_workflows, format_stars, install_workflow_components, installed_workflows_json,
-        js_literals_to_json, kickoff_prompt_from_text, mcp_install_snippets, mcp_server_name,
-        parse_catalog_chunk, parse_count_text, parse_mcp_catalog, parse_mcp_detail,
-        parse_mcp_snippet, parse_skill_catalog, parse_skill_detail, parse_workflow_catalog,
-        parse_workflow_detail, read_installed_workflows, skill_description_text,
-        skill_install_source, skill_name_for, store_installed_workflow, truncate_bytes,
-        validate_slug, workflow_component_installed, AgenticMcpInstall, AgenticMcpSnippet,
-        AgenticSkillInstall, AgenticWorkflowComponent, ConfigScope, InstalledWorkflow,
-        MAX_INSTALLED_WORKFLOWS,
+        agent_config, catalog_chunk_candidates, collect_audit_scores, config_from_snippets,
+        filter_mcp, filter_skills, filter_workflows, format_stars, install_workflow_components,
+        installed_workflows_json, js_literals_to_json, kickoff_prompt_from_text,
+        mcp_install_snippets, mcp_server_name, parse_catalog_chunk, parse_count_text,
+        parse_mcp_catalog, parse_mcp_detail, parse_mcp_snippet, parse_skill_catalog,
+        parse_skill_detail, parse_workflow_catalog, parse_workflow_detail,
+        read_installed_workflows, skill_description_text, skill_install_source, skill_name_for,
+        store_installed_workflow, truncate_bytes, validate_slug, workflow_component_installed,
+        AgenticMcpInstall, AgenticMcpSnippet, AgenticSkillInstall, AgenticWorkflowComponent,
+        ConfigScope, InstalledWorkflow, MAX_INSTALLED_WORKFLOWS,
     };
     use crate::app_paths::AppPaths;
     use crate::message::message_code;
@@ -3526,6 +3572,107 @@ var t=[
         assert_eq!(starred.heat, Some(46_000));
     }
 
+    /// 审计映射的小夹具：两个有效条目（有效值不同，验证按 slug 关联不串位）、
+    /// 缺 `summary` / `total:0` / `passed>total` / `u32` 越界 / 非数值 / 缺 `total` 的条目、
+    /// 非对象条目、目录里没有的 slug，以及一个坏 JSON 的目录对象。
+    const AUDIT_CHUNK_JS: &str = r#"
+let a={notion:{lastAuditedAt:"2026-08-07T02:33:33.532Z",auditMode:"hosted",hostedEndpoint:{tlsOnly:{status:"pass"}},checks:{F1_security_md:{status:"n/a"}},summary:{passed:1,total:2,evaluatedAt:"2026-08-07T02:33:33.533Z"}},linear:{lastAuditedAt:"2026-08-07T02:33:33.532Z",auditMode:"repo",checks:{},summary:{passed:2,total:7}},"missing-summary":{lastAuditedAt:"2026-08-07T02:33:33.532Z",auditMode:"repo",checks:{}},"zero-total":{lastAuditedAt:"2026-08-07T02:33:33.532Z",auditMode:"skipped",summary:{passed:0,total:0}},"over-total":{lastAuditedAt:"2026-08-07T02:33:33.532Z",summary:{passed:3,total:2}},overflow:{lastAuditedAt:"2026-08-07T02:33:33.532Z",summary:{passed:1,total:4294967296}},"no-total":{lastAuditedAt:"2026-08-07T02:33:33.532Z",summary:{passed:1}},"text-summary":{lastAuditedAt:"2026-08-07T02:33:33.532Z",summary:{passed:"1",total:2}},"not-an-object":"nope","no-directory":{lastAuditedAt:"2026-08-07T02:33:33.532Z",summary:{passed:5,total:7}}};
+var t=[
+ {slug:"notion",name:"Notion",transport:["Streamable HTTP"]},
+ {slug:"linear",name:"Linear",transport:["stdio"]},
+ {slug:"missing-summary",name:"Missing Summary",transport:["stdio"]},
+ {slug:"zero-total",name:"Zero Total",transport:["stdio"]},
+ {slug:"over-total",name:"Over Total",transport:["stdio"]},
+ {slug:"overflow",name:"Overflow",transport:["stdio"]},
+ {slug:"no-total",name:"No Total",transport:["stdio"]},
+ {slug:"text-summary",name:"Text Summary",transport:["stdio"]},
+ {slug:"bad-object",name:"Bad",transport:["stdio"],mystery:notDefinedAnywhere}
+];
+"#;
+
+    #[test]
+    fn exposes_mcp_audit_scores_from_chunk() {
+        let chunk = parse_catalog_chunk(AUDIT_CHUNK_JS);
+        let mcp = |slug: &str| {
+            chunk
+                .mcp
+                .iter()
+                .find(|entry| entry.slug == slug)
+                .expect("mcp entry")
+        };
+
+        // 有效条目按 slug 关联，`passed` / `total` 不串位。
+        let notion = mcp("notion");
+        assert_eq!(notion.audit_passed, Some(1));
+        assert_eq!(notion.audit_total, Some(2));
+        assert_eq!(mcp("linear").audit_passed, Some(2));
+        assert_eq!(mcp("linear").audit_total, Some(7));
+
+        // 缺 `summary` / `total:0` / `passed>total` / 越界 / 非数值 / 缺 `total` → 两个字段都 `None`。
+        for slug in [
+            "missing-summary",
+            "zero-total",
+            "over-total",
+            "overflow",
+            "no-total",
+            "text-summary",
+        ] {
+            let entry = mcp(slug);
+            assert_eq!(
+                (entry.audit_passed, entry.audit_total),
+                (None, None),
+                "{slug} should stay without audit values"
+            );
+        }
+
+        // 目录里没有对应 MCP 条目的 slug 被忽略（不凭空造条目）；坏 JSON 的目录对象同样跳过，
+        // 因此夹具里 9 条目录只剩 8 条。
+        assert!(!chunk.mcp.iter().any(|entry| entry.slug == "no-directory"));
+        assert!(!chunk.mcp.iter().any(|entry| entry.slug == "bad-object"));
+        assert_eq!(chunk.mcp.len(), 8);
+
+        // 序列化契约：字段名 camelCase，缺省值是 `null`（前端按可选字段自行比较）。
+        let serialized = serde_json::to_value(notion).expect("entry should serialize");
+        assert_eq!(serialized["auditPassed"], 1);
+        assert_eq!(serialized["auditTotal"], 2);
+        let serialized = serde_json::to_value(mcp("zero-total")).expect("entry should serialize");
+        assert!(serialized["auditPassed"].is_null() && serialized["auditTotal"].is_null());
+    }
+
+    #[test]
+    fn guards_audit_score_boundaries() {
+        let mut audits = BTreeMap::new();
+        // 目录对象（带 `slug`）与没有 `summary` 的映射都不算审计表。
+        collect_audit_scores(
+            &serde_json::json!({"slug":"notion","summary":{"passed":1,"total":2}}),
+            &mut audits,
+        );
+        collect_audit_scores(
+            &serde_json::json!({"notion":{"lastAuditedAt":"2026-08-07T02:33:33.532Z"}}),
+            &mut audits,
+        );
+        assert!(audits.is_empty());
+
+        // 只有 `0 < passed <= total` 且都在 `u32` 内、键是合法 slug 的条目才会被收下。
+        collect_audit_scores(
+            &serde_json::json!({
+                "notion":{"summary":{"passed":1,"total":2}},
+                "zero-total":{"summary":{"passed":0,"total":0}},
+                "over-total":{"summary":{"passed":3,"total":2}},
+                "overflow":{"summary":{"passed":1,"total":4_294_967_296u64}},
+                "overflow-passed":{"summary":{"passed":4_294_967_296u64,"total":4_294_967_296u64}},
+                "float":{"summary":{"passed":1.5,"total":2.0}},
+                "missing":{"lastAuditedAt":"2026-08-07T02:33:33.532Z"},
+                "scalar":"nope",
+                "Bad_Key":{"summary":{"passed":1,"total":2}}
+            }),
+            &mut audits,
+        );
+        let expected: BTreeMap<String, (u32, u32)> =
+            [("notion".to_owned(), (1u32, 2u32))].into_iter().collect();
+        assert_eq!(audits, expected);
+    }
+
     #[test]
     fn parses_raw_count_boundaries() {
         // K / M 换算、逗号千分位、`~` 前缀、小数与尾部文本。
@@ -3952,6 +4099,18 @@ var t=[
             .count();
         let mcp_with_stars = mcp.iter().filter(|entry| entry.stars.is_some()).count();
         let mcp_with_heat = mcp.iter().filter(|entry| entry.heat.is_some()).count();
+        let mcp_with_audit = mcp
+            .iter()
+            .filter(|entry| entry.audit_total.is_some())
+            .count();
+        // 审计值要么成对出现、要么都没有；有值时 `passed <= total`。
+        let audit_values_valid = mcp.iter().all(|entry| {
+            entry.audit_passed.is_some() == entry.audit_total.is_some()
+                && match (entry.audit_passed, entry.audit_total) {
+                    (Some(passed), Some(total)) => passed <= total,
+                    _ => true,
+                }
+        });
         let weekly_visitors = mcp
             .iter()
             .filter(|entry| {
@@ -3966,7 +4125,7 @@ var t=[
             .filter(|entry| entry.heat.is_some_and(|heat| heat > 1_000))
             .count();
         println!(
-            "mcp={} withCategory={mcp_with_category} withTransport={mcp_with_transport} withSnippets={mcp_with_snippets} withStars={mcp_with_stars} withHeat={mcp_with_heat} weeklyVisitors={} weeklyHeatAbove1k={weekly_heat_above_1k}",
+            "mcp={} withCategory={mcp_with_category} withTransport={mcp_with_transport} withSnippets={mcp_with_snippets} withStars={mcp_with_stars} withHeat={mcp_with_heat} withAudit={mcp_with_audit} auditValuesValid={audit_values_valid} weeklyVisitors={} weeklyHeatAbove1k={weekly_heat_above_1k}",
             mcp.len(),
             weekly_visitors.len()
         );
@@ -4000,6 +4159,30 @@ var t=[
             weekly_heat_above_1k,
             weekly_visitors.len(),
             "entries with visitors/wk popularity should carry heat above 1000"
+        );
+
+        // 审计评分（官网 MCP 页「Audit Score」排序口径）：>100 条 MCP 带 `summary.passed/total`，
+        // 所有条目 `passed <= total`，notion 与站点样本一致（1/2）。
+        assert!(
+            mcp_with_audit > 100,
+            "expected audit scores on more than 100 MCP entries"
+        );
+        assert!(
+            audit_values_valid,
+            "audit values should come in pairs and keep passed <= total"
+        );
+        let notion = mcp
+            .iter()
+            .find(|entry| entry.slug == "notion")
+            .expect("notion entry");
+        println!(
+            "notion audit={:?}/{:?}",
+            notion.audit_passed, notion.audit_total
+        );
+        assert_eq!(
+            (notion.audit_passed, notion.audit_total),
+            (Some(1), Some(2)),
+            "notion should carry the site's 1/2 audit score"
         );
         // 第二次目录请求应当直接吃缓存里的 chunk URL（不用再拉列表页）。
         assert!(cache.chunk_url().is_some());

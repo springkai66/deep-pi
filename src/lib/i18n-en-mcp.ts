@@ -159,6 +159,8 @@ export const EN_MCP: Record<string, string> = {
   "官方优先": "Official first",
   "最新更新": "Newest first",
   "名称（A–Z）": "Name (A–Z)",
+  "Rank（评级）": "Rank (quality)",
+  "审计评分": "Audit score",
   "展开或收起 {name} 的详情": "Show or hide details for {name}",
 
   /* ---------- MCP 市场（agenticskills.io） ---------- */
@@ -168,6 +170,7 @@ export const EN_MCP: Record<string, string> = {
   "分类：{category}": "Category: {category}",
   "传输：{transport}": "Transport: {transport}",
   "热度 {count}": "Popularity {count}",
+  "审计 {passed}/{total}": "Audit {passed}/{total}",
   "官方": "Official",
   "需要 API Key": "Requires API key",
   "信任等级：{level}": "Trust level: {level}",
