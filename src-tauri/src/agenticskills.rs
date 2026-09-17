@@ -992,11 +992,11 @@ pub(crate) fn js_literals_to_json(js: &str) -> String {
         if slice_starts_with(bytes, index, b"undefined")
             && index
                 .checked_sub(1)
-                .map_or(true, |prev| !is_js_ident(bytes[prev]))
+                .is_none_or(|prev| !is_js_ident(bytes[prev]))
             && bytes
                 .get(index + 9)
                 .copied()
-                .map_or(true, |next| !is_js_ident(next))
+                .is_none_or(|next| !is_js_ident(next))
         {
             out.extend_from_slice(b"null");
             index += 9;
@@ -2060,9 +2060,7 @@ fn kickoff_prompt_from_text(text: &str) -> Option<String> {
         let Some(rest) = rest.strip_prefix('"') else {
             continue;
         };
-        let Some(end) = rest.find('"') else {
-            return None;
-        };
+        let end = rest.find('"')?;
         let prompt = rest[..end].trim();
         if !prompt.is_empty() {
             return Some(prompt.to_owned());
@@ -3542,7 +3540,7 @@ mod tests {
     #[test]
     fn picks_first_parsable_config_snippet() {
         assert_eq!(
-            message_code(&config_from_snippets(&[]).expect_err("empty snippet list")).as_deref(),
+            message_code(&config_from_snippets(&[]).expect_err("empty snippet list")),
             Some("market.agentic_mcp_no_config")
         );
         let cli_only = vec![AgenticMcpSnippet {
@@ -3559,7 +3557,7 @@ mod tests {
             code: "Read the setup guide at https://example.com/setup".to_owned(),
         }];
         assert_eq!(
-            message_code(&config_from_snippets(&docs_only).expect_err("docs only")).as_deref(),
+            message_code(&config_from_snippets(&docs_only).expect_err("docs only")),
             Some("market.agentic_mcp_config_unparsed")
         );
         let mixed = vec![
@@ -3637,8 +3635,7 @@ mod tests {
         assert_eq!(validate_slug("taste-skill"), Ok("taste-skill"));
         assert_eq!(validate_slug("  github2  "), Ok("github2"));
         assert_eq!(
-            message_code(&validate_slug("TasteSkill").expect_err("uppercase is invalid"))
-                .as_deref(),
+            message_code(&validate_slug("TasteSkill").expect_err("uppercase is invalid")),
             Some("market.agenticskills_slug_invalid")
         );
         assert!(validate_slug("category/productivity").is_err());
@@ -3662,8 +3659,7 @@ mod tests {
         assert_eq!(
             message_code(
                 &mcp_server_name("github", Some("bad name")).expect_err("spaces rejected")
-            )
-            .as_deref(),
+            ),
             Some("agent_config.name_charset")
         );
     }
@@ -4413,7 +4409,7 @@ var t=[
         assert_eq!(failures[0].kind, "mcp");
         assert_eq!(failures[0].slug, "firecrawl");
         assert_eq!(
-            message_code(&failures[0].error).as_deref(),
+            message_code(&failures[0].error),
             Some("market.agentic_mcp_no_config")
         );
         let _ = fs::remove_dir_all(root);
@@ -4471,8 +4467,7 @@ var t=[
             message_code(
                 &read_installed_workflows(&paths, ConfigScope::Project, None)
                     .expect_err("missing project path")
-            )
-            .as_deref(),
+            ),
             Some("agent_config.project_path_required")
         );
         let _ = fs::remove_dir_all(root);

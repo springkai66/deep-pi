@@ -695,6 +695,8 @@ fn delete_dialog<'a>(
 }
 
 #[tauri::command]
+// 参数与 Tauri 命令签名一一对应，不再拆分。
+#[allow(clippy::too_many_arguments)]
 pub async fn delete_project_recovery(
     webview: tauri::Webview,
     store: State<'_, TaskStore>,

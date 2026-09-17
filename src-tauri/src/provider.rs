@@ -326,7 +326,7 @@ fn pi_schema_input_json(input: &Value) -> Value {
 ///   四键必须都是数字（实测删除缺失键会被 required 规则拒绝），保留用户
 ///   已填写的真实费率、只对未知值占位是更小的信息损失。
 /// - cost 不是对象 → `None`（Pi 的 `ModelCostSchema` 只接受对象）。
-/// 其余键（如 tiers）原样保留。
+///   其余键（如 tiers）原样保留。
 fn pi_schema_cost_json(cost: &Value) -> Option<Value> {
     let object = cost.as_object()?;
     const RATES: [&str; 4] = ["input", "output", "cacheRead", "cacheWrite"];

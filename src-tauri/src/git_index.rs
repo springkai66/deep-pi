@@ -209,10 +209,7 @@ impl IndexDialogs {
 }
 
 /// 按操作类型选取对应的确认文案分支。
-fn dialog_for<'a>(
-    dialogs: &'a IndexDialogs,
-    action: IndexAction,
-) -> &'a crate::dialog_text::ConfirmDialog {
+fn dialog_for(dialogs: &IndexDialogs, action: IndexAction) -> &crate::dialog_text::ConfirmDialog {
     match action {
         IndexAction::Stage => &dialogs.stage,
         IndexAction::Unstage => &dialogs.unstage,

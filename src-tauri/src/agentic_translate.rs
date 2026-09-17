@@ -442,7 +442,9 @@ mod tests {
         // 总长超限（每条都不超过单条上限）。
         let chunk = "b".repeat(3_500);
         let texts: Vec<&str> = (0..4).map(|_| chunk.as_str()).collect();
-        assert!(4 * 3_500 > MAX_TOTAL_CHARS);
+        const {
+            assert!(4 * 3_500 > MAX_TOTAL_CHARS);
+        }
         let error = translate_with(&paths, &request(&texts, "zh-CN"), &call)
             .expect_err("over total length should fail");
         assert_eq!(error, msg("market.translate_request_invalid"));

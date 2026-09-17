@@ -25,6 +25,8 @@ static BOARD_OPEN_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 /// 规则：x 贴主窗口右缘，y 顶对齐主窗口；看板宽高由调用方传入（用户当前值）。
 /// 右侧放不下时翻转贴主窗口左缘；仍越界时收进屏幕内。
 /// 返回 (x, y, width, height)。
+// 参数是主窗口 / 显示器 / 看板的坐标尺寸原语，与 OS 窗口 API 一一对应，不再拆分。
+#[allow(clippy::too_many_arguments)]
 fn board_dock_bounds(
     main_x: i32,
     main_y: i32,
@@ -78,10 +80,18 @@ fn board_dock_bounds(
 /// 之后的所有停靠调用（跟随主窗口移动/缩放、聚焦）只同步位置——x 贴主窗口
 /// 右缘、y 顶对齐并钳在屏幕内——宽高一律保留用户拖拽调整后的值。
 pub fn dock_board_to_main(app: &AppHandle, align_height: bool) {
-    let Some(main) = app.get_webview_window("main") else { return };
-    let Some(board) = app.get_webview_window(BOARD_LABEL) else { return };
-    let (Ok(position), Ok(main_size)) = (main.outer_position(), main.outer_size()) else { return };
-    let Ok(inner) = board.inner_size() else { return };
+    let Some(main) = app.get_webview_window("main") else {
+        return;
+    };
+    let Some(board) = app.get_webview_window(BOARD_LABEL) else {
+        return;
+    };
+    let (Ok(position), Ok(main_size)) = (main.outer_position(), main.outer_size()) else {
+        return;
+    };
+    let Ok(inner) = board.inner_size() else {
+        return;
+    };
     let monitor = main
         .current_monitor()
         .ok()
@@ -89,7 +99,11 @@ pub fn dock_board_to_main(app: &AppHandle, align_height: bool) {
         .map(|monitor| (*monitor.position(), *monitor.size()));
     let board_width = inner.width.max(1);
     // 首次打开：高度贴主窗口；此后只改位置，大小完全交给用户。
-    let board_height = if align_height { main_size.height.max(1) } else { inner.height.max(1) };
+    let board_height = if align_height {
+        main_size.height.max(1)
+    } else {
+        inner.height.max(1)
+    };
     let (fallback_x, fallback_y) = (position.x, position.y);
     let (x, y, _, _) = match monitor {
         Some((m_position, m_size)) => board_dock_bounds(
@@ -162,7 +176,9 @@ fn build_board_window(app: &AppHandle) -> Result<(), String> {
 
 /// 在 setup 阶段挂上主窗口的事件钩子：移动/缩放跟随、销毁时带走看板。
 pub fn install_main_window_hooks(app: &AppHandle) {
-    let Some(main) = app.get_webview_window("main") else { return };
+    let Some(main) = app.get_webview_window("main") else {
+        return;
+    };
     let generation = Arc::new(AtomicU64::new(0));
     let app_for_geometry = app.clone();
     let generation_for_geometry = generation.clone();

@@ -1240,8 +1240,7 @@ mod tests {
 
     #[test]
     fn remembers_project_model_preference_across_removal() {
-        let root =
-            std::env::temp_dir().join(format!("deeppi-model-pref-{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("deeppi-model-pref-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).expect("project directory should be created");
         let store = TaskStore::in_memory().expect("in-memory store should open");
         let project = store

@@ -29,7 +29,7 @@ fn list_system_fonts_inner() -> Result<Vec<String>, String> {
             fonts.extend(font_families_from_registry_entry(&value.0));
         }
     }
-    fonts.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+    fonts.sort_by_key(|a| a.to_lowercase());
     fonts.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
     Ok(fonts)
 }
