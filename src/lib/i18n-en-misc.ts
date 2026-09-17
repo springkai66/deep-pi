@@ -35,8 +35,6 @@ export const EN_MISC: Record<string, string> = {
   " · 正在切换模式": " · Switching modes",
   "切换到对话模式": "Switch to conversation mode",
 
-  // —— 应用菜单 AppMenu.svelte ——
-  "应用菜单": "Application menu",
 
   // —— 诊断面板 DiagnosticsPanel.svelte ——
   "Pi RPC 诊断": "Pi RPC diagnostics",
