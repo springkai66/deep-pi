@@ -42,6 +42,7 @@ export const EN_SETTINGS: Record<string, string> = {
   "输出价格（$/M）": "Output price ($/M)",
   "缓存读（$/M）": "Cache read ($/M)",
   "缓存写（$/M）": "Cache write ($/M)",
+  "单位：美元 / 百万 tokens；来自 models.dev 的价格为参考值": "Unit: USD per million tokens; prices from models.dev are reference values",
 
   /* ---------- 模型设置：Provider 详情与请求选项 ---------- */
   "Provider 预设": "Provider preset",

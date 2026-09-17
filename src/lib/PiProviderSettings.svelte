@@ -491,11 +491,53 @@
     }
   }
 
+  /// 目录候选排序：完全相等 → 补 provider 前缀后相等 → 末段相等 → 前缀命中；同一优先级
+  /// 取最短 id（最接近用户输入，避免落到 `-20250929` 这类长日期变体），长度相同按字典序，
+  /// 保证结果稳定且大小写不敏感。
+  function pickCatalogMatch(
+    candidates: PiModelSummary[],
+    modelId: string,
+    provider: string,
+  ): PiModelSummary | undefined {
+    const wanted = modelId.trim().toLowerCase();
+    if (wanted === "") return undefined;
+    const providerKey = provider.trim().toLowerCase();
+    const prefixed = providerKey === "" ? "" : `${providerKey}/${wanted}`;
+    const ranked: { priority: number; candidate: PiModelSummary }[] = [];
+    for (const candidate of candidates) {
+      const id = candidate.id.trim().toLowerCase();
+      const name = candidate.name.trim().toLowerCase();
+      const tail = id.slice(id.lastIndexOf("/") + 1);
+      let priority: number | null = null;
+      if (id === wanted) priority = 0;
+      else if (prefixed !== "" && id === prefixed) priority = 1;
+      else if (tail === wanted) priority = 2;
+      else if (id.startsWith(wanted) || name.startsWith(wanted)) priority = 3;
+      if (priority !== null) ranked.push({ priority, candidate });
+    }
+    ranked.sort(
+      (left, right) =>
+        left.priority - right.priority ||
+        left.candidate.id.length - right.candidate.id.length ||
+        left.candidate.id.toLowerCase().localeCompare(right.candidate.id.toLowerCase()),
+    );
+    return ranked[0]?.candidate;
+  }
+
+  /// 目录查询：先带 provider 过滤；models.dev 的 provider key 与预设/手填的 id 并不总是一致
+  /// （如 `kimi-coding` 实际是 `kimi-for-coding`，`moonshot` 实际是 `moonshotai`），过滤后命中
+  /// 不到就再不带 provider 过滤查一次回退，避免「自动填入」永远失败。
   async function officialSummaryFor(modelId: string): Promise<PiModelSummary | undefined> {
-    const results = await invoke<PiModelSummary[]>("search_pi_models", {
-      request: { query: modelId, provider: catalogProvider.trim() || null },
+    const provider = catalogProvider.trim();
+    const filtered = await invoke<PiModelSummary[]>("search_pi_models", {
+      request: { query: modelId, provider: provider || null },
     });
-    return results.find((candidate) => candidate.id === modelId);
+    const matched = pickCatalogMatch(filtered, modelId, provider);
+    if (matched || !provider) return matched;
+    const fallback = await invoke<PiModelSummary[]>("search_pi_models", {
+      request: { query: modelId, provider: null },
+    });
+    return pickCatalogMatch(fallback, modelId, provider);
   }
 
   function summaryToConfigured(summary: ProviderModelSummary): ConfiguredModel {
@@ -639,10 +681,12 @@
     return model.cost?.[field] ?? "";
   }
 
+  /// 价格允许留空（`null`）；空字符串写回 `null`，非法（非有限数/负数，与 Rust 端
+  /// `validate_cost` 一致）时忽略输入。`cost` 为 null 时按四项全空兜底建对象。
   function setCostField(model: ConfiguredModel, field: "input" | "output" | "cacheRead" | "cacheWrite", raw: string) {
     const trimmed = raw.trim();
     const value = trimmed === "" ? null : Number(trimmed);
-    if (value !== null && !Number.isFinite(value)) return;
+    if (value !== null && (!Number.isFinite(value) || value < 0)) return;
     const cost = model.cost ?? { input: null, output: null, cacheRead: null, cacheWrite: null };
     cost[field] = value;
     model.cost = cost;
@@ -871,18 +915,17 @@
               {/each}
             </div>
           {/if}
-          {#if editingModel.cost}
-            <div class="form-grid cost-grid">
-              <label>{t("输入价格（$/M）")}<input inputmode="decimal" value={costValue(editingModel, "input")}
-                oninput={(event) => setCostField(editingModel, "input", event.currentTarget.value)} /></label>
-              <label>{t("输出价格（$/M）")}<input inputmode="decimal" value={costValue(editingModel, "output")}
-                oninput={(event) => setCostField(editingModel, "output", event.currentTarget.value)} /></label>
-              <label>{t("缓存读（$/M）")}<input inputmode="decimal" value={costValue(editingModel, "cacheRead")}
-                oninput={(event) => setCostField(editingModel, "cacheRead", event.currentTarget.value)} /></label>
-              <label>{t("缓存写（$/M）")}<input inputmode="decimal" value={costValue(editingModel, "cacheWrite")}
-                oninput={(event) => setCostField(editingModel, "cacheWrite", event.currentTarget.value)} /></label>
-            </div>
-          {/if}
+          <div class="form-grid cost-grid">
+            <label>{t("输入价格（$/M）")}<input inputmode="decimal" value={costValue(editingModel, "input")}
+              oninput={(event) => setCostField(editingModel, "input", event.currentTarget.value)} /></label>
+            <label>{t("输出价格（$/M）")}<input inputmode="decimal" value={costValue(editingModel, "output")}
+              oninput={(event) => setCostField(editingModel, "output", event.currentTarget.value)} /></label>
+            <label>{t("缓存读（$/M）")}<input inputmode="decimal" value={costValue(editingModel, "cacheRead")}
+              oninput={(event) => setCostField(editingModel, "cacheRead", event.currentTarget.value)} /></label>
+            <label>{t("缓存写（$/M）")}<input inputmode="decimal" value={costValue(editingModel, "cacheWrite")}
+              oninput={(event) => setCostField(editingModel, "cacheWrite", event.currentTarget.value)} /></label>
+          </div>
+          <p class="cost-hint">{t("单位：美元 / 百万 tokens；来自 models.dev 的价格为参考值")}</p>
           {#if modelTest[editingModel.id]}
             <p class="status" class:ok={modelTest[editingModel.id].ok} role="status">{tm(modelTest[editingModel.id].text)}</p>
           {/if}
@@ -1017,6 +1060,7 @@
   .request-section + .editor-section { margin-top: 14px; }
   .empty { color: #778279; font-size: 11px; }
   .status { margin: 10px 0 0; color: #8fd6ad; font-size: 11px; overflow-wrap: anywhere; }
+  .cost-hint { margin: 6px 0 0; color: #778279; font-size: 10px; }
   .saved-note { color: #8fd6ad; font-size: 11px; white-space: nowrap; }
   .status:not(.ok) { color: #d88989; }
   .page-status { color: #8fd6ad; font-size: 12px; overflow-wrap: anywhere; }
