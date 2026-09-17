@@ -29,6 +29,9 @@
     onClose: (task: Task) => void;
     onAdd: () => void;
     onSplit: (task: Task, direction: "right" | "down") => void;
+    /** 当前是否分栏显示（双列/网格）；用于在菜单里提供「单栏显示」。 */
+    splitActive?: boolean;
+    onUnsplit?: () => void;
   }
 
   let {
@@ -44,6 +47,8 @@
     onClose,
     onAdd,
     onSplit,
+    splitActive = false,
+    onUnsplit = () => {},
   }: Props = $props();
   let contextMenu = $state<{ task: Task; x: number; y: number } | null>(null);
   let contextMenuElement = $state<HTMLDivElement>();
@@ -74,7 +79,7 @@
   }
 
   function chooseAction(
-    action: "archive" | "restore" | "rename" | "stop" | "restart" | "remove" | "splitRight" | "splitDown",
+    action: "archive" | "restore" | "rename" | "stop" | "restart" | "remove" | "splitRight" | "splitDown" | "unsplit",
   ) {
     const task = contextMenu?.task;
     contextMenu = null;
@@ -86,6 +91,7 @@
     else if (action === "restart") onRestart(task);
     else if (action === "splitRight") onSplit(task, "right");
     else if (action === "splitDown") onSplit(task, "down");
+    else if (action === "unsplit") onUnsplit();
     else onDelete(task);
   }
 
@@ -173,6 +179,11 @@
       <button type="button" role="menuitem" onclick={() => chooseAction("splitDown")}>
         <SplitSquareVertical size={14} />{t("向下分割窗口")}
       </button>
+      {#if splitActive}
+        <button type="button" role="menuitem" onclick={() => chooseAction("unsplit")}>
+          <Square size={14} />{t("单栏显示")}
+        </button>
+      {/if}
       <button type="button" role="menuitem" onclick={() => chooseAction("remove")}>
         <Trash2 size={14} />{t("移除 Session")}
       </button>

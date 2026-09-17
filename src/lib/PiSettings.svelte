@@ -40,11 +40,8 @@
     saving?: boolean;
     onDiagnosticsBusy: (busy: boolean) => void;
     confirmDiagnosticsClear: () => Promise<boolean>;
-    /** 工作区布局（单任务 / 双列 / 网格）；由 +page.svelte 持有状态。 */
-    layout?: "single" | "split" | "grid";
-    onChangeLayout?: (next: "single" | "split" | "grid") => void;
   }
-  let { category, onCategoryChange, onChangeSettings, onEditorSaved, onClose, models, extensions, mcp, skills, workflows, dsh, closeBlocked = false, saving = false, onDiagnosticsBusy, confirmDiagnosticsClear, layout = "single", onChangeLayout = () => {}, ...runtime }: Props = $props();
+  let { category, onCategoryChange, onChangeSettings, onEditorSaved, onClose, models, extensions, mcp, skills, workflows, dsh, closeBlocked = false, saving = false, onDiagnosticsBusy, confirmDiagnosticsClear, ...runtime }: Props = $props();
   const icons = { general: Monitor, appearance: Palette, models: Server, extensions: PackageOpen, mcp: Puzzle, skills: Sparkles, workflows: Workflow, dsh: Globe, runtime: Download, advanced: Wrench };
   let modelsVisited = $state(false);
   let extensionsVisited = $state(false);
@@ -235,17 +232,6 @@
         </section>
       </div>
       <div class="settings-panel" hidden={category !== "appearance"}>
-        <section class="settings-group" aria-labelledby="layout-heading">
-          <h3 id="layout-heading">{t("布局")}</h3>
-          <p class="muted">{t("工作区里任务的排布方式；顶栏不再保留布局按钮。")}</p>
-          <label class="setting-control"><strong>{t("任务布局")}</strong>
-            <select value={layout} aria-label={t("任务布局")} onchange={(event) => onChangeLayout(event.currentTarget.value as "single" | "split" | "grid")}>
-              <option value="single">{t("单任务")}</option>
-              <option value="split">{t("双列")}</option>
-              <option value="grid">{t("网格")}</option>
-            </select>
-          </label>
-        </section>
         <section class="settings-group" aria-labelledby="theme-heading">
           <div class="settings-group-header">
             <h3 id="theme-heading">{t("主题")}</h3>

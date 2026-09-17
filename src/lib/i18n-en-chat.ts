@@ -126,10 +126,6 @@ export const EN_CHAT: Record<string, string> = {
   "同时运行任务数必须为 1 到 16 的整数": "Concurrent tasks must be an integer from 1 to 16",
 
   // —— 设置页：外观 ——
-  "布局": "Layout",
-  "任务布局": "Task layout",
-  "工作区里任务的排布方式；顶栏不再保留布局按钮。":
-    "How tasks are arranged in the workspace; the top bar no longer keeps a layout button.",
   "主题": "Themes",
   // 内置主题的名称与说明（来自 theme.ts 的主题包数据，在渲染处翻译）
   "Command Flow（精密流式）": "Command Flow (Precision Stream)",

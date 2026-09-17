@@ -124,6 +124,11 @@
   let errorMessage = $state("");
   let layout = $state<LayoutMode>("single");
   let view = $state<"workspace" | "settings">("workspace");
+  /**
+   * 进入设置前的界面（工作区 + 当前智能体 + 看板态），退出设置时原样返回：
+   * 从 DSH 进设置就回 DSH，而不是一律回 Pi 工作区。
+   */
+  let settingsReturn = $state<{ agent: "pi" | "dsh"; boardView: boolean }>({ agent: "pi", boardView: false });
   let settingsCategory = $state<SettingsCategory>("general");
   let diagnosticsBusy = $state(false);
   let dshBusy = $state(false);
@@ -969,14 +974,21 @@
   }
 
   function openSettings() {
-    activeAgent = "pi";
-    void dshWebview?.hide();
+    // 记住进入设置前的界面与智能体，退出时原样恢复（不再一律回 Pi 工作区）。
+    settingsReturn = { agent: activeAgent, boardView };
     view = "settings";
   }
 
   function closeSettings() {
     if (!canLeaveSettings()) return;
+    // 恢复到进入设置前的界面：DSH 就回 DSH，Pi 看板/普通工作区也一并还原。
+    if (settingsReturn.agent === "dsh") {
+      void showDsh();
+      return;
+    }
+    boardView = settingsReturn.boardView;
     view = "workspace";
+    void dshWebview?.hide();
   }
 
   function canLeaveSettings() {
@@ -1311,8 +1323,6 @@
       </div>
     {:else if view === "settings"}
       <PiSettings
-        layout={layout}
-        onChangeLayout={(next) => changeLayout(next)}
         saving={settingsSaving}
         closeBlocked={settingsPackageBusy || diagnosticsBusy || dshBusy}
         onDiagnosticsBusy={(busy) => { diagnosticsBusy = busy; }}
@@ -1399,6 +1409,8 @@
         onClose={closeTask}
         onAdd={() => void startTask()}
         onSplit={splitTask}
+        splitActive={layout !== "single"}
+        onUnsplit={() => changeLayout("single")}
       />
     {/if}
       <div class="workspace-content" class:panel-hidden={boardView || activeAgent !== "pi" || view !== "workspace" || terminalTasks.length === 0 || !selectedProject}>

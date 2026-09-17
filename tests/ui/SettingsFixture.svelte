@@ -14,7 +14,6 @@
   let saves = $state(0);
   let changes = $state(0);
   let action = $state("");
-  let layout = $state<"single" | "split" | "grid">("single");
   let provider = $state<ProviderRecord | null>(null);
   const command: typeof invoke = async <T,>(name: string, args?: Parameters<typeof invoke>[1]): Promise<T> => {
     if (name === "list_pi_providers") return (provider ? [provider] : []) as T;
@@ -63,7 +62,7 @@
   {#if error}<span role="alert">{error}</span>{/if}
 </nav>
 <main class="workspace settings-view">
-  <PiSettings {category} {settings} {layout} onChangeLayout={(next) => { layout = next; action = `布局：${next}`; }} onCategoryChange={(next) => { category = next; }}
+  <PiSettings {category} {settings} onCategoryChange={(next) => { category = next; }}
     onDiagnosticsBusy={() => {}} confirmDiagnosticsClear={async () => false}
     onChangeSettings={(next) => { settings = next; changes++; }}
     onEditorSaved={() => {}} onClose={() => { action = "返回工作区"; }}

@@ -164,6 +164,7 @@ export const EN_SHELL: Record<string, string> = {
   "关闭 {title}": "Close {title}",
   "向右分割窗口": "Split right",
   "向下分割窗口": "Split down",
+  "单栏显示": "Single pane",
 
   /* ---------- 看板（TaskBoard） ---------- */
   "等待中": "Waiting",
