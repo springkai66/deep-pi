@@ -13,6 +13,7 @@
     X,
     Zap,
   } from "@lucide/svelte";
+  import { notifyModelsChanged } from "./model-config-sync";
   import { onMount } from "svelte";
   import type {
     ConfiguredModel,
@@ -337,10 +338,11 @@
     if (isLoading) return null;
     const submittedDraft = draft;
     const submittedSnapshot = draftSnapshot();
+    // 是否有真实变更：决定是否广播（无变更的保存不值得让所有对话重载）。
+    const hadChanges = savedSnapshot === null || submittedSnapshot !== savedSnapshot;
     const submitted = JSON.parse(submittedSnapshot) as {
       draft: ProviderRecord; apiKey: string; providerPreset: string;
     };
-    isLoading = true;
     if (showStatus) statusMessage = "";
     try {
       const saved = await invoke<ProviderRecord>("save_pi_provider", {
@@ -370,6 +372,8 @@
           statusMessage = t("Provider 已保存；模型变更将在重启任务后出现在对话窗口");
         }
       }
+      // 真实变更落盘后广播：空闲的对话面板会自动重载并读到新的模型/推理强度。
+      if (hadChanges) notifyModelsChanged();
       return saved;
     } catch (error) {
       onError(error);
@@ -398,6 +402,8 @@
       authType = "api_key";
       credentialConfigured = status.configured;
       if (showStatus) statusMessage = t("API Key 已保存到 Windows Credential Manager");
+      // 凭据变化会改变「已配置」的 provider 集合，同样值得让对话面板知道。
+      notifyModelsChanged();
     } catch (error) {
       onError(error);
     }
@@ -411,6 +417,7 @@
       credentialConfigured = nativeAuthConfigured;
       if (!nativeAuthConfigured) authType = null;
       statusMessage = t("API Key 已删除");
+      notifyModelsChanged();
     } catch (error) {
       onError(error);
     }

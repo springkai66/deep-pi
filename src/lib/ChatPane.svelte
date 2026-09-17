@@ -4,6 +4,7 @@
   import { onMount, tick, untrack } from "svelte";
   import type { DialogRequest, DialogValue } from "./dialog";
   import { applyRpcEvent, contentText, emptyConversation, loadHistory, readableRpcError, record, type RpcEvent } from "./rpc-state";
+  import { onModelsChanged } from "./model-config-sync";
   import { captureTranscriptAnchor, restoreTranscriptAnchor, messageWindowStart, transcriptPort } from "./transcript-scroll";
   import MessageDisclosure from "./MessageDisclosure.svelte";
   import { messageSource } from "./message-parts";
@@ -60,6 +61,7 @@
   /// 模型列表读取失败与「确实无模型」分开提示：失败时显示错误与重试/重载入口。
   let modelsLoadFailed = $state(false);
   let modelsLoadError = $state("");
+  let modelsStale = $state(false);
   let selectedModel = $state("");
   let changingModel = $state(false);
   let thinkingLevels = $state<string[]>([]);
@@ -488,6 +490,7 @@
     models = [];
     modelsLoadFailed = false;
     modelsLoadError = "";
+    modelsStale = false;
     modelName = "";
     selectedModel = "";
     conversation = emptyConversation();
@@ -751,6 +754,21 @@
     reloadRequested = true;
     onReloadSession();
   }
+
+  /// 设置页保存了 Provider/模型/凭据后的处理：空闲时自动重载（Pi 一次性读取
+  /// models.json，没有 reload 命令，重载是拿到新配置的唯一途径）；忙时提示用户手动重载。
+  function handleModelsChanged() {
+    if (reloadRequested) return; // 已经在重载中，新会话自然带上最新配置
+    const idle = connected && !initializing && !conversation.busy && !conversation.closed &&
+      !sending && !stopping && conversation.queue.length === 0;
+    if (idle) {
+      reloadSession();
+      return;
+    }
+    modelsStale = true;
+  }
+
+  $effect(() => onModelsChanged(() => { void handleModelsChanged(); }));
 
   /// 读取当前会话可用的模型列表；列表为空时由空状态提示兜底。
   async function refreshModels(alive?: () => boolean) {
@@ -1020,6 +1038,14 @@
         {#if onOpenModelSettings && !modelsLoadFailed}<button type="button" onclick={onOpenModelSettings}>{t("打开模型设置")}</button>{/if}
         <button type="button" onclick={() => void refreshModels()}>{t("重试")}</button>
         {#if onReloadSession}<button type="button" onclick={reloadSession}>{t("重载会话")}</button>{/if}
+      </span>
+    </p>
+  {/if}
+  {#if modelsStale && onReloadSession}
+    <p class="model-hint" role="status">
+      <span>{t("模型配置已在设置中更新，重载会话后生效")}</span>
+      <span class="model-hint-actions">
+        <button type="button" onclick={reloadSession}>{t("重载会话")}</button>
       </span>
     </p>
   {/if}

@@ -77,6 +77,7 @@ export const EN_CHAT: Record<string, string> = {
   "对话模型": "Conversation model",
   "无可用模型": "No models available",
   "推理强度": "Reasoning effort",
+  "模型配置已在设置中更新，重载会话后生效": "Model configuration changed in Settings; reload the session to apply.",
   "默认": "Default",
   "运行时消息处理方式": "Message handling while running",
   "排队跟进": "Queue follow-up",
