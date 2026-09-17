@@ -1215,7 +1215,9 @@
       <p role="status">{t("正在加载工作区…")}</p>
     {/if}
   </section>
-  <div style={`--sidebar-w:${sidebarWidth ?? 260}px; --files-w:${filesWidth ?? 260}px; --git-w:${gitWidth ?? 300}px${activeAgent === "dsh" ? `; grid-template-columns:${railCollapsed ? 8 : 140}px minmax(0, 1fr)` : ""}`} class:dsh-mode={activeAgent === "dsh"} class:sidebar-hidden={!showSidebar} class:files-hidden={!showFiles} class:files-visible={showFiles} class:git-visible={showGit} class="app-shell" inert={closingWindow || startupPending || !!startupFailure} aria-busy={closingWindow || startupPending}>
+{/if}
+
+  <div style={`--sidebar-w:${sidebarWidth ?? 260}px; --files-w:${filesWidth ?? 260}px; --git-w:${gitWidth ?? 300}px`} class:dsh-mode={activeAgent === "dsh"} class:rail-closed={railCollapsed} class:sidebar-hidden={!showSidebar} class:files-hidden={!showFiles} class:files-visible={showFiles} class:git-visible={showGit} class="app-shell" inert={closingWindow || startupPending || !!startupFailure} aria-busy={closingWindow || startupPending}>
   <nav class="command-rail" class:rail-collapsed={railCollapsed}
     aria-label={t("工作区导航")}
     onmouseenter={() => { railExpanded = true; }}
@@ -1226,14 +1228,14 @@
     <div class="rail-divider"></div>
     <button type="button" class="rail-item" class:selected={activeAgent === "pi" && view === "workspace"}
       aria-label={t("Pi 工作区")} aria-pressed={activeAgent === "pi" && view === "workspace"}
-      title={railTitle(t("Pi 工作区"), "pi")} onclick={showPi}><Bot size={18} /><span class="rail-label">{t("Pi 工作区")}</span></button>
+      title={railTitle(t("Pi 工作区"), "pi")} onclick={showPi}><Bot size={18} /></button>
     <button type="button" class="rail-item" class:selected={activeAgent === "dsh"}
       aria-label={t("DSH 工作区")} aria-pressed={activeAgent === "dsh"}
-      title={railTitle(t("DSH 工作区"), "dsh")} onclick={showDsh}><Globe size={18} /><span class="rail-label">{t("DSH 工作区")}</span></button>
+      title={railTitle(t("DSH 工作区"), "dsh")} onclick={showDsh}><Globe size={18} /></button>
     <div class="rail-spacer"></div>
     <button type="button" class="rail-item" class:selected={view !== "workspace"}
       aria-label={t("设置")} aria-pressed={view !== "workspace"} aria-keyshortcuts={shortcutAria("settings")}
-      title={`${t("设置")} (${shortcutLabel("settings")})`} onclick={openSettings}><Settings2 size={18} /><span class="rail-label">{t("设置")}</span></button>
+      title={`${t("设置")} (${shortcutLabel("settings")})`} onclick={openSettings}><Settings2 size={18} /></button>
   </nav>
   <header class="topbar">
     <div class="stage-crumbs">
@@ -1552,8 +1554,6 @@
 
   <AppDialog request={dialogRequest} onResolve={resolveDialog} />
   </div>
-  {/if}
-
 <style>
   .recovery-error { position: absolute; inset: 0; z-index: 15; padding: 16px; background: var(--page-bg); overflow: auto; }
   .recovery-error p { overflow-wrap: anywhere; }

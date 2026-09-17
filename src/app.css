@@ -135,11 +135,8 @@ select:focus-visible {
   grid-template-columns: var(--rail-w) minmax(0, 1fr);
 }
 
-/* DSH 控制柱展开/收起对应的列宽。用单项类名 `.rail-closed` / `.rail-open`（0,3,0）
-   压过各媒体查询里的 `.app-shell`（0,1,0），不依赖 `:has()` 的匹配时机。
-   窄屏媒体查询里另有同款覆盖，见文件末尾 @media (max-width: 620px)。 */
+/* DSH 控制柱收起态保持 8px；展开时回落到原始栏宽（.app-shell 默认的 --rail-w）。 */
 .app-shell.dsh-mode.rail-closed { grid-template-columns: 8px minmax(0, 1fr); }
-.app-shell.dsh-mode.rail-open { grid-template-columns: 140px minmax(0, 1fr); }
 
 .project-sidebar { display: flex; flex-direction: column; min-width: 0; min-height: 0; border-right: 1px solid var(--border); background: var(--surface-alt); }
 .sidebar-panel { flex: 1; min-height: 0; overflow: hidden; }
@@ -245,14 +242,13 @@ aside.project-sidebar, aside.file-panel, aside.git-sidebar { position: relative;
 
 /*
  * 控制柱（Command Rail）：
- *  - Pi 工作区：保持原设计（48px 宽、仅图标，悬停提示用 title）。
- *  - DSH 工作区：默认收起成窄条（把宽度让给原生 Webview），鼠标移上去/键盘聚焦时
- *    展开成「图标 + 文字」的宽栏，移走即收回。收起/展开会改变栅格列宽，原生 DSH
- *    Webview 由 ResizeObserver → syncDshBounds 同步让位，不会盖住展开后的控制柱。
+ *  - Pi 工作区：原设计（48px 宽、仅图标，悬停提示用 title）。
+ *  - DSH 工作区：默认收起成 8px 窄条（宽度让给原生 Webview），鼠标移上去/键盘聚焦时
+ *    展开回原始宽度（48px、仍是纯图标，只是内容重新可见），移走即收回。
+ *    展开不改变条目样式与栏宽语义，避免与原生 Webview 抢空间。
  */
-.rail-label { display: none; font-size: 13px; line-height: 1; }
 
-/* 控制柱条目基础样式（Pi 工作区与 DSH 展开态共用）：48px 栏宽下只有图标可见。 */
+/* 控制柱条目：栏宽 48px 时只有图标可见（文字说明走 title/aria-label）。 */
 .rail-item {
   position: relative;
   display: grid;
@@ -267,22 +263,8 @@ aside.project-sidebar, aside.file-panel, aside.git-sidebar { position: relative;
   background: transparent;
   cursor: pointer;
 }
-
-/* DSH 展开态：条目撑满栏宽并显示文字标签。 */
-.app-shell.dsh-mode .command-rail:not(.rail-collapsed) .rail-item {
-  display: flex;
-  align-items: center;
-  justify-content: flex-start;
-  gap: 10px;
-  width: 100%;
-  padding: 0 10px;
-}
-.app-shell.dsh-mode .command-rail:not(.rail-collapsed) .rail-label { display: inline; }
-/* 展开态下条目从左边缘开始，选中标记贴在栏的左沿。 */
-.app-shell.dsh-mode .command-rail:not(.rail-collapsed) .rail-item.selected::before { left: 0; }
-
-/* 收起态：留在栅格内（不脱离文档流），因此悬停命中区一定在原生 Webview 左侧、
-   不会被盖住；内容淡出，只留一条可悬停/可聚焦的窄条。 */
+/* DSH 收起态：窄条 + 内容淡出，只留可悬停/可聚焦的命中区域（留在栅格内，
+   命中区一定在原生 Webview 左侧，不会被盖住）。 */
 .command-rail.rail-collapsed {
   width: 8px;
   padding: 8px 0;
@@ -853,11 +835,10 @@ aside.project-sidebar, aside.file-panel, aside.git-sidebar { position: relative;
   .app-shell { --rail-w: 40px; grid-template-columns: var(--rail-w) minmax(150px, 38%) minmax(0, 1fr); }
   .app-shell.sidebar-hidden { grid-template-columns: var(--rail-w) minmax(0, 1fr); }
   .app-shell.dsh-mode { grid-template-columns: var(--rail-w) minmax(0, 1fr); }
-  /* 这条媒体查询里的 `--rail-w: 40px` 会盖掉 .app-shell 的内联值，
-     这里按 DSH 控制柱的收起/展开状态补回列宽，保证窄窗口下悬停展开同样生效。 */
-  /* 窄窗口下也用固定像素，避免 40vw 在极窄视口退化成 0。 */
+  /* 这条媒体查询里的 `--rail-w: 40px` 会盖掉 .app-shell 的内联值：
+     DSH 收起态在这里补回 8px，展开态回落到本媒体查询的原始栏宽（40px）。 */
   .app-shell.dsh-mode.rail-closed { grid-template-columns: 8px minmax(0, 1fr); }
-  .app-shell.dsh-mode.rail-open { grid-template-columns: 132px minmax(0, 1fr); }
+  .app-shell.dsh-mode.rail-open { grid-template-columns: var(--rail-w) minmax(0, 1fr); }
 }
   :root[data-color-scheme="light"] body,
 :root[data-color-scheme="light"] .app-shell {
