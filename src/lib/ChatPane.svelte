@@ -1060,7 +1060,8 @@
       }}></textarea>
     <div class="composer-actions">
       {#if models.length}
-        <select aria-label={t("对话模型")} value={selectedModel} disabled={switching || !connected || changingModel || conversation.busy}
+        <select aria-label={t("对话模型")} value={selectedModel} disabled={switching || !connected || changingModel}
+          title={conversation.busy ? t("当前回复生成中；改动对下一条消息生效") : undefined}
           onchange={(event) => {
             const select = event.currentTarget;
             void changeModel(select.value).then(() => { select.value = selectedModel; });
@@ -1082,7 +1083,8 @@
         </select>
       {/if}
       {#if reasoningLevels.length > 0}
-        <select aria-label={t("推理强度")} value={thinkingLevel} disabled={switching || !connected || changingThinking || conversation.busy}
+        <select aria-label={t("推理强度")} value={thinkingLevel} disabled={switching || !connected || changingThinking}
+          title={conversation.busy ? t("当前回复按发送时的档位生成；改动对下一条消息生效") : undefined}
           onchange={(event) => {
             const select = event.currentTarget;
             void changeThinkingLevel(select.value).then(() => { select.value = thinkingLevel; });
