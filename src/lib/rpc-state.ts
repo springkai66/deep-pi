@@ -96,6 +96,58 @@ function applyAssistantUpdate(messages: RpcMessage[], update: AssistantUpdate): 
   return [...messages.slice(0, -1), { ...last, content }];
 }
 
+
+/**
+ * 把 `429: {"message":"…","type":"rate_limit_error",…}` 这类原始错误收敛成可读文本：
+ * 提取 JSON 的 message 字段，附上错误类型；解析失败原样返回。
+ *
+ * provider（或 Pi）给错误响应的形态是「HTTP 状态码: 响应体」，直接展示会是一整段
+ * JSON；会话里至少出现 message/type/code 三个字段，只展示人能读懂的部分。
+ */
+export function readableRpcError(raw: string): string {
+  const text = (raw ?? "").trim();
+  if (!text) return text;
+  // 两种形态：`429: {json…}` 与纯 `{"message":…}`（后者不带状态码）。
+  const prefixed = /^(\d{3}):\s*(\{[\s\S]*\})$/.exec(text);
+  const json = prefixed ? prefixed[2] : prefixed === null ? (/^\{[\s\S]*\}$/.exec(text)?.[0] ?? "") : "";
+  const status = prefixed ? prefixed[1] : "";
+  if (!json) return text;
+  try {
+    const parsed = JSON.parse(json) as Record<string, unknown>;
+    const message = typeof parsed.message === "string" && parsed.message.trim() ? parsed.message.trim() : "";
+    if (!message) return text;
+    // 状态码与错误类型附在句尾，便于定位；正文才是人要读的部分。
+    const bits = [
+      typeof parsed.type === "string" && parsed.type ? parsed.type : "",
+      status ? `HTTP ${status}` : "",
+    ].filter(Boolean);
+    return bits.length ? `${message}（${bits.join(" · ")}）` : message;
+  } catch {
+    return text; // 不是合法 JSON，按原样展示
+  }
+}
+
+/** assistant 轮次是否没有任何可见内容（纯 text/thinking 且全空白）。 */
+function assistantMessageEmpty(message: RpcMessage): boolean {
+  if (message.role !== "assistant") return false;
+  if (typeof message.content === "string") return message.content.trim().length === 0;
+  if (!Array.isArray(message.content)) return false;
+  return message.content.every((value) => {
+    const part = record(value);
+    if (part.type === "text") return !(typeof part.text === "string" && part.text.trim().length > 0);
+    if (part.type === "thinking") return !(typeof part.thinking === "string" && part.thinking.trim().length > 0);
+    // image / toolCall / 未知片段都视为有内容，避免误删真实输出。
+    return false;
+  });
+}
+
+/** 从尾部移除连续的空白 assistant 轮次（失败请求的占位残留）。 */
+export function dropTrailingEmptyAssistant(messages: RpcMessage[]): RpcMessage[] {
+  let end = messages.length;
+  while (end > 0 && assistantMessageEmpty(messages[end - 1])) end -= 1;
+  return end === messages.length ? messages : messages.slice(0, end);
+}
+
 export function emptyConversation(): Conversation {
   return { sequence: 0, messages: [], tools: {}, busy: false, closed: false, error: "", queue: [] };
 }
@@ -119,7 +171,12 @@ export function applyRpcEvent(previous: Conversation, event: RpcEvent): Conversa
       [id, { ...tool, running: false, isError: tool.isError || tool.running }]));
   }
   else if (type === "rpc_error" || type === "extension_error") {
-    state.error = typeof payload.error === "string" ? payload.error : t("RPC 运行失败");
+    state.error = typeof payload.error === "string"
+      ? readableRpcError(payload.error)
+      : t("RPC 运行失败");
+    // 失败的请求只会留下一个没有任何内容的 assistant 占位轮次（Pi 在失败前已发
+    // message_start）；把它从会话尾部清掉，否则界面会出现一整块空白的"黑屏"轮次。
+    state.messages = dropTrailingEmptyAssistant(state.messages);
   } else if (type === "queue_update") {
     state.queue = [...(Array.isArray(payload.steering) ? payload.steering : []),
       ...(Array.isArray(payload.followUp) ? payload.followUp : [])].filter((item): item is string => typeof item === "string");
@@ -138,7 +195,7 @@ export function applyRpcEvent(previous: Conversation, event: RpcEvent): Conversa
       state.tools = { ...previous.tools };
       delete state.tools[message.toolCallId];
     }
-    if (message.errorMessage) state.error = message.errorMessage;
+    if (message.errorMessage) state.error = readableRpcError(message.errorMessage);
   } else if (type === "tool_execution_start" || type === "tool_execution_update" || type === "tool_execution_end") {
     const id = typeof payload.toolCallId === "string" ? payload.toolCallId : "";
     if (!id) return state;

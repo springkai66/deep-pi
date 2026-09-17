@@ -3,7 +3,7 @@
   import { ArrowDown, ArrowUp, Bot, ChevronDown, History, RefreshCw, Sparkles, Square, Terminal, UserRound } from "@lucide/svelte";
   import { onMount, tick, untrack } from "svelte";
   import type { DialogRequest, DialogValue } from "./dialog";
-  import { applyRpcEvent, contentText, emptyConversation, loadHistory, record, type RpcEvent } from "./rpc-state";
+  import { applyRpcEvent, contentText, emptyConversation, loadHistory, readableRpcError, record, type RpcEvent } from "./rpc-state";
   import { captureTranscriptAnchor, restoreTranscriptAnchor, messageWindowStart, transcriptPort } from "./transcript-scroll";
   import MessageDisclosure from "./MessageDisclosure.svelte";
   import { messageSource } from "./message-parts";
@@ -27,16 +27,6 @@
   function providerLabel(provider: string): string {
     return PROVIDER_LABELS[provider] ?? provider;
   }
-
-  const THINKING_LABELS: Record<string, string> = {
-    off: "关闭",
-    minimal: "最简",
-    low: "低",
-    medium: "中",
-    high: "高",
-    xhigh: "超高",
-    max: "最大",
-  };
 
   interface Props {
     taskId: string;
@@ -662,7 +652,8 @@
   }
 
   function commandError(cause: unknown) {
-    error = tm(String(cause));
+    // 先把 `429: {json}` 之类的原始错误收敛成可读文本，再过一遍消息码渲染。
+    error = tm(readableRpcError(String(cause)));
     if (error.includes("RPC_OUTCOME_UNKNOWN:")) connected = false;
   }
 
@@ -1071,10 +1062,10 @@
             void changeThinkingLevel(select.value).then(() => { select.value = thinkingLevel; });
           }}>
           {#if !thinkingLevels.includes(thinkingLevel)}
-            <option value={thinkingLevel} disabled>{t(THINKING_LABELS[thinkingLevel] ?? (thinkingLevel || "默认"))}</option>
+            <option value={thinkingLevel} disabled>{thinkingLevel || t("默认")}</option>
           {/if}
           {#each thinkingLevels as level (level)}
-            <option value={level}>{t(THINKING_LABELS[level] ?? level)}</option>
+            <option value={level}>{level}</option>
           {/each}
         </select>
       {/if}

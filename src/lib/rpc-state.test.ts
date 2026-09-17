@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyRpcEvent, emptyConversation, loadHistory } from "./rpc-state";
+import { applyRpcEvent, emptyConversation, loadHistory, readableRpcError } from "./rpc-state";
 
 describe("RPC conversation reducer", () => {
   it("replaces cumulative messages instead of appending duplicate tokens", () => {
@@ -109,5 +109,45 @@ describe("assistant message deltas (Pi 0.85+)", () => {
     state = applyRpcEvent(state, { sequence: 1, payload: { type: "message_start", message: { role: "assistant", timestamp: 1, content: [] } } });
     state = applyRpcEvent(state, { sequence: 2, payload: { type: "message_update", message: { role: "assistant", timestamp: 1, content: [{ type: "text", text: "legacy" }] } } });
     expect(state.messages[0].content).toEqual([{ type: "text", text: "legacy" }]);
+  });
+});
+
+describe("rpc error readability", () => {
+  it("extracts the provider message from a status-prefixed JSON error", () => {
+    const raw = '429: {"message":"You\'ve reached your weekly usage limit. Continue tomorrow.","type":"rate_limit_error","code":"RATE_LIMITED"}';
+    expect(readableRpcError(raw)).toBe(
+      "You've reached your weekly usage limit. Continue tomorrow.（rate_limit_error · HTTP 429）",
+    );
+  });
+
+  it("handles a bare JSON error and leaves plain text untouched", () => {
+    expect(readableRpcError('{"message":"quota exceeded","type":"quota_error"}')).toBe("quota exceeded（quota_error）");
+    expect(readableRpcError("connection refused")).toBe("connection refused");
+    expect(readableRpcError("")).toBe("");
+    // JSON 里没有 message 字段时原样返回，不丢信息。
+    expect(readableRpcError('429: {"code":"X"}')).toBe('429: {"code":"X"}');
+    // @msg: 消息码原样透传（由 tm 渲染）。
+    expect(readableRpcError("@msg:rpc.outcome_unknown?error=x")).toBe("@msg:rpc.outcome_unknown?error=x");
+  });
+});
+
+describe("failed prompt cleanup", () => {
+  it("drops the empty assistant turn left behind by a failed request", () => {
+    let state = emptyConversation();
+    state = applyRpcEvent(state, { sequence: 1, payload: { type: "message_start", message: { role: "user", timestamp: 1, content: [{ type: "text", text: "hello" }] } } });
+    state = applyRpcEvent(state, { sequence: 2, payload: { type: "message_start", message: { role: "assistant", timestamp: 2, content: [] } } });
+    expect(state.messages).toHaveLength(2);
+    state = applyRpcEvent(state, { sequence: 3, payload: { type: "rpc_error", error: '429: {"message":"limit reached","type":"rate_limit_error"}' } });
+    expect(state.messages).toHaveLength(1); // 空 assistant 轮次被清掉
+    expect(state.error).toBe("limit reached（rate_limit_error · HTTP 429）");
+  });
+
+  it("keeps assistant turns that already have content", () => {
+    let state = emptyConversation();
+    state = applyRpcEvent(state, { sequence: 1, payload: { type: "message_start", message: { role: "assistant", timestamp: 1, content: [{ type: "text", text: "partial" }] } } });
+    state = applyRpcEvent(state, { sequence: 2, payload: { type: "rpc_error", error: "boom" } });
+    expect(state.messages).toHaveLength(1);
+    expect(state.messages[0].content).toEqual([{ type: "text", text: "partial" }]);
+    expect(state.error).toBe("boom");
   });
 });

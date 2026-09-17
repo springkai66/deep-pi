@@ -162,21 +162,13 @@ describe("coverage reporting", () => {
 });
 
 describe("thinking level labels", () => {
-  // 推理强度沿用 Pi 自己的档位名，不能意译成 "Very high" 之类的描述词。
-  it("keeps Pi's own level ids for the xhigh tier", () => {
-    expect(translate("en", "超高")).toBe("xhigh");
-  });
-
-  it("translates the remaining tiers", () => {
-    expect(translate("en", "关闭")).toBe("Off");
-    expect(translate("en", "最简")).toBe("Minimal");
-    expect(translate("en", "低")).toBe("Low");
-    expect(translate("en", "中")).toBe("Medium");
-    expect(translate("en", "高")).toBe("High");
-    expect(translate("en", "最大")).toBe("Max");
-  });
-
-  it("translates the reasoning effort label", () => {
+  // 推理强度下拉直接显示 Pi 自己的档位名（off/low/high/…），不做中文意译。
+  it("no longer carries per-tier label overrides", () => {
+    for (const key of ["关闭", "最简", "低", "中", "高", "超高", "最大"]) {
+      expect(key in EN_MESSAGES && EN_MESSAGES[key] === "Off").toBe(false);
+    }
     expect(translate("en", "推理强度")).toBe("Reasoning effort");
+    // 关闭按钮走 shell 分片的 "Close"，而不是曾经被 chat 分片覆盖的 "Off"。
+    expect(translate("en", "关闭")).toBe("Close");
   });
 });
