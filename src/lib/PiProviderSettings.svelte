@@ -14,6 +14,7 @@
     Zap,
   } from "@lucide/svelte";
   import { notifyModelsChanged } from "./model-config-sync";
+  import PiAuthSettings from "./PiAuthSettings.svelte";
   import { onMount } from "svelte";
   import type {
     ConfiguredModel,
@@ -877,6 +878,7 @@
     </aside>
 
     <div class="detail-panel">
+      <PiAuthSettings onError={onError} />
       {#if detailMode === "model" && editingModel}
         <section class="editor-section model-detail-section">
           <div class="section-heading">

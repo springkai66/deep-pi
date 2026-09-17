@@ -30,6 +30,7 @@ pub mod message;
 mod native_pi;
 mod operation;
 mod package;
+mod pi_auth;
 mod process_runner;
 mod project_edit;
 mod project_files;
@@ -106,6 +107,7 @@ pub fn run() {
         .manage(git_operation::GitOperations::default())
         .manage(startup::StartupState::default())
         .manage(provider::ProviderConfigGate::default())
+        .manage(pi_auth::PiAuthManager::default())
         .setup(|app| {
             let handle = app.handle().clone();
             board::install_main_window_hooks(app.handle());
@@ -234,6 +236,12 @@ pub fn run() {
                 credentials::save_provider_credential,
                 credentials::test_provider_connection,
                 credentials::test_model_connection,
+                pi_auth::pi_auth_providers,
+                pi_auth::pi_auth_status,
+                pi_auth::pi_auth_start_login,
+                pi_auth::pi_auth_respond,
+                pi_auth::pi_auth_cancel,
+                pi_auth::pi_auth_logout,
                 agenticskills::agentic_mcp_detail,
                 agenticskills::agentic_skill_detail,
                 agenticskills::agentic_workflow_detail,

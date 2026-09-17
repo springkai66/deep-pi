@@ -14,7 +14,7 @@ Download the latest `DeepPi_<version>_x64-setup.exe` (NSIS) from [GitHub Release
 
 ## Getting started
 
-1. **Add model credentials** — open "Settings → Models & credentials" and enter your provider API key (keys are kept in Windows Credential Manager, never written to a config file).
+1. **Add model credentials or sign in with an official account** — open "Settings → Models & credentials" and either enter a provider API key (keys are kept in Windows Credential Manager, never written to a config file) or use "Official account login" to authorize subscription accounts such as Claude Pro/Max or ChatGPT Plus/Pro directly in DeepPi; the OAuth tokens are written to DeepPi's managed Pi directory only.
 2. **Open a project** — click "Add project directory" in the left rail and pick a code directory.
 3. **Start a task** — click "New Pi task" to create a terminal or chat task and start working with Pi.
 
@@ -27,7 +27,7 @@ The managed runtimes (Node, Pi, DSH) are installed on demand from official distr
 - **Files** — file tree, file-name and content search, read-only preview, built-in editor, diff comparison, and recovery copies.
 - **Git** — change classification, diff view, explicit stage/unstage, commit, push, and remote verification; never force-pushes by default.
 - **Pi extensions** — search, install, update, and uninstall Pi packages, confirming the source and version first.
-- **Model credentials** — protocol, base URL, headers, proxy, and connection test.
+- **Model credentials** — protocol, base URL, headers, proxy, and connection test; also supports official-account OAuth sign-in (Claude Pro/Max, ChatGPT Plus/Pro, OpenRouter, GitHub Copilot, Kimi, xAI) with visible status and expiry, sharing the same `auth.json` as pi's native `/login`.
 - **Runtimes & updates** — upgrade Node / Pi / DSH / dshmarket in-app, keeping the previous version for rollback.
 
 ## Known limitations (v1.0)
