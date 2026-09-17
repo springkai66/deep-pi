@@ -296,12 +296,28 @@
   $effect(() => onBusyChange(componentBusy));
 
   /** 已加载的全量目录按关键词 + 分类本地过滤，再按当前排序方式重排；输入时不打后端。 */
+  /**
+   * 已加载的全量目录按关键词 + 分类本地过滤，再按当前排序方式重排；输入时不打后端。
+   *
+   * 关键词会同时匹配站点原文与**本地化后的展示名**：界面显示的是中文分类
+   * （如「数据库与数据」），而站点数据是英文（`Databases & Data`），
+   * 只匹配原文会让中文关键字一条都搜不到。
+   */
   const filteredMcpEntries = $derived(
     sortMcpEntries(
       mcpEntries.filter(
         (entry) =>
           (mcpCategory === null || entry.category === mcpCategory) &&
-          matchesKeyword(mcpQuery, entry.name, entry.slug, entry.description, entry.author, entry.category),
+          matchesKeyword(
+            mcpQuery,
+            entry.name,
+            entry.slug,
+            entry.description,
+            entry.author,
+            entry.category,
+            agenticCategoryLabel(entry.category, getLocale()),
+            (entry.transport ?? []).map((value) => agenticTransportLabel(value, getLocale())).join(" "),
+          ),
       ),
       mcpSort,
     ),
@@ -311,9 +327,33 @@
       skillEntries.filter(
         (entry) =>
           (skillCategory === null || entry.category === skillCategory) &&
-          matchesKeyword(skillQuery, entry.name, entry.slug, entry.description, entry.author, entry.category),
+          matchesKeyword(
+            skillQuery,
+            entry.name,
+            entry.slug,
+            entry.description,
+            entry.author,
+            entry.category,
+            agenticCategoryLabel(entry.category, getLocale()),
+            (entry.platforms ?? []).map((value) => agenticPlatformLabel(value, getLocale())).join(" "),
+          ),
       ),
       skillSort,
+    ),
+  );
+
+  /** 工作流目录同样按关键词本地过滤；难度等展示名也纳入匹配范围。 */
+  const filteredWorkflowEntries = $derived(
+    workflowEntries.filter((entry) =>
+      matchesKeyword(
+        workflowQuery,
+        entry.name,
+        entry.slug,
+        entry.description,
+        entry.category,
+        agenticCategoryLabel(entry.category, getLocale()),
+        agenticLevelLabel(entry.level, getLocale()),
+      ),
     ),
   );
 
@@ -321,9 +361,6 @@
   const mcpCategoryOptions = $derived(categoryOptions(mcpEntries));
   const skillCategoryOptions = $derived(categoryOptions(skillEntries));
 
-  const filteredWorkflowEntries = $derived(
-    workflowEntries.filter((entry) => matchesKeyword(workflowQuery, entry.name, entry.description, entry.category)),
-  );
   /** 当前 scope 下已安装工作流的 slug 集合，用来给市场条目打「已安装」徽标。 */
   const installedWorkflowSlugs = $derived(new Set(installedWorkflows.map((entry) => entry.slug)));
 

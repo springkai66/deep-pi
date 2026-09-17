@@ -31,6 +31,8 @@ export const AGENTIC_CATEGORY_LABELS: Record<string, LocalizedTerm> = {
   "Web Search & Browsing": { "zh-CN": "网页搜索与浏览", "zh-TW": "網頁搜尋與瀏覽" },
   Security: { "zh-CN": "安全", "zh-TW": "安全性" },
   "Web Development": { "zh-CN": "Web 开发", "zh-TW": "Web 開發" },
+  "Development": { "zh-CN": "开发", "zh-TW": "開發" },
+  "DevOps & Security": { "zh-CN": "DevOps 与安全", "zh-TW": "DevOps 與安全" },
   "SEO & Growth": { "zh-CN": "SEO 与增长", "zh-TW": "SEO 與成長" },
   "Productivity & PM": { "zh-CN": "效率与项目管理", "zh-TW": "生產力與專案管理" },
   "Communication & Email": { "zh-CN": "通信与邮件", "zh-TW": "通訊與電子郵件" },
@@ -98,6 +100,45 @@ export const AGENTIC_PRICE_LABELS: Record<string, LocalizedTerm> = {
   "open-source": { "zh-CN": "开源", "zh-TW": "開源" },
   free: { "zh-CN": "免费", "zh-TW": "免費" },
 };
+
+/**
+ * 反向查找：把某个语言下的展示名还原成站点原文（英文键）。
+ *
+ * 用途是搜索——界面显示中文分类，但站点数据是英文，用户输入「数据库」时
+ * 必须能匹配到 `Databases & Data`。中英文都查：`AGENTIC_TERM_SEARCH_ALIASES`
+ * 会把原值与它在该语言下的展示名都收进来。
+ */
+export function agenticTermAliases(
+  table: Record<string, LocalizedTerm>,
+  value: string | null | undefined,
+  locale: Locale,
+): string[] {
+  if (value === null || value === undefined) return [];
+  const trimmed = value.trim();
+  const aliases = new Set<string>([value, trimmed]);
+  const match = table[trimmed];
+  if (match) {
+    // 原文与三种语言的展示名都作为可搜索别名。
+    aliases.add(match["zh-CN"]);
+    aliases.add(match["zh-TW"]);
+  }
+  if (locale !== "en") aliases.add(termLabel(table, value, locale));
+  return [...aliases].filter((alias) => alias.length > 0);
+}
+
+/** 把「中文展示名」反查回站点原文；命中返回原文，未命中返回 null。 */
+export function agenticTermOrigin(
+  table: Record<string, LocalizedTerm>,
+  value: string | null | undefined,
+): string | null {
+  if (value === null || value === undefined) return null;
+  const trimmed = value.trim();
+  if (table[trimmed]) return trimmed;
+  const found = Object.keys(table).find(
+    (key) => table[key]["zh-CN"] === trimmed || table[key]["zh-TW"] === trimmed,
+  );
+  return found ?? null;
+}
 
 /**
  * 查表：命中返回对应语言的中文，未命中或空值原样返回（英文直接返回原文）。
