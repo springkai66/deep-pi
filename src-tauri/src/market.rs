@@ -1429,8 +1429,10 @@ pub async fn pi_package_metadata(
 mod tests {
     use super::{
         filter_packages_by_types, parse_mcp_registry, parse_model_profile,
-        parse_npm_package_search, parse_pi_models, parse_pi_packages, validate_package_name,
+        parse_models_dev_catalog, parse_models_dev_profile, parse_npm_package_search,
+        parse_pi_models, parse_pi_packages, validate_package_name, MAX_MODEL_RESULTS,
     };
+    use serde_json::json;
     #[test]
     fn filters_packages_by_type_case_insensitively() {
         let packages = parse_pi_packages(
@@ -1551,8 +1553,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires network access to pi.dev"]
-    fn fetches_live_pi_model_catalog_and_profile() {
+    #[ignore = "requires network access to models.dev"]
+    fn fetches_live_models_dev_catalog_and_profile() {
         let models = super::fetch_pi_models("gpt-4", Some("openai"))
             .expect("Pi model catalog should be reachable");
         let model = models
@@ -1745,5 +1747,186 @@ mod tests {
                 package.name
             );
         }
+    }
+
+    // —— models.dev 目录/详情解析（离线边界用例） ——
+    /// models.dev `api.json` 小样本：两个供应商、三种边界（完整/缺字段/畸形）。
+    const MODELS_DEV_FIXTURE: &str = r#"{
+      "acme": {
+        "id": "acme", "name": "Acme", "models": {
+          "alpha-1": {
+            "id": "acme/alpha-1", "name": "Alpha 1", "reasoning": true,
+            "modalities": { "input": ["text", "image"], "output": ["text"] },
+            "limit": { "context": 200000, "output": 8192 },
+            "cost": { "input": 1.5, "output": 6, "cache_read": 0.15, "cache_write": 1.9 }
+          },
+          "bare": { "name": "Bare Model" },
+          "broken-cost": {
+            "id": "acme/broken-cost", "cost": { "input": "free", "output": null }
+          }
+        }
+      },
+      "beta-labs": {
+        "name": "Beta Labs", "models": {
+          "gamma": { "id": "beta-labs/gamma", "reasoning": false, "limit": { "context": 128000 } }
+        }
+      }
+    }"#;
+
+    #[test]
+    fn maps_models_dev_catalog_fields_and_optional_values() {
+        let models = parse_models_dev_catalog(MODELS_DEV_FIXTURE, "", None);
+        // provider → name 排序：acme 的三条在前（alpha-1 / bare / broken-cost 按 name 排）
+        assert_eq!(models.len(), 4);
+        let alpha = models
+            .iter()
+            .find(|model| model.id == "acme/alpha-1")
+            .unwrap();
+        assert_eq!(alpha.provider, "acme");
+        assert_eq!(alpha.name, "Alpha 1");
+        assert_eq!(alpha.path, "https://models.dev/acme/alpha-1");
+        assert_eq!(alpha.context_window, Some(200_000));
+        assert_eq!(alpha.input_cost, Some(1.5));
+        assert_eq!(alpha.output_cost, Some(6.0));
+        assert_eq!(alpha.cache_read_cost, Some(0.15));
+        assert_eq!(alpha.cache_write_cost, Some(1.9));
+
+        // 缺 id → 用 provider/model 拼；缺全部可选字段 → None / 回落
+        let bare = models
+            .iter()
+            .find(|model| model.name == "Bare Model")
+            .unwrap();
+        assert_eq!(bare.id, "acme/bare");
+        assert_eq!(bare.context_window, None);
+        assert_eq!(bare.input_cost, None);
+        assert_eq!(bare.cache_write_cost, None);
+
+        // cost 里出现非数字（字符串 / null）→ 对应字段 None，不 panic
+        let broken = models
+            .iter()
+            .find(|model| model.id == "acme/broken-cost")
+            .unwrap();
+        assert_eq!(broken.input_cost, None);
+        assert_eq!(broken.output_cost, None);
+
+        let gamma = models
+            .iter()
+            .find(|model| model.id == "beta-labs/gamma")
+            .unwrap();
+        assert_eq!(gamma.provider, "beta-labs");
+        assert_eq!(gamma.context_window, Some(128_000));
+    }
+
+    #[test]
+    fn filters_models_dev_catalog_by_query_and_provider() {
+        let all = parse_models_dev_catalog(MODELS_DEV_FIXTURE, "", None);
+        assert_eq!(all.len(), 4);
+
+        // query 命中 name / id / provider 三类，大小写不敏感
+        assert_eq!(
+            parse_models_dev_catalog(MODELS_DEV_FIXTURE, "alpha", None).len(),
+            1
+        );
+        assert_eq!(
+            parse_models_dev_catalog(MODELS_DEV_FIXTURE, "BETA-LABS", None).len(),
+            1
+        );
+        assert_eq!(
+            parse_models_dev_catalog(MODELS_DEV_FIXTURE, "acme/", None).len(),
+            3
+        );
+        assert!(parse_models_dev_catalog(MODELS_DEV_FIXTURE, "missing", None).is_empty());
+
+        // provider_filter 精确匹配（大小写不敏感），空串等同未指定
+        assert_eq!(
+            parse_models_dev_catalog(MODELS_DEV_FIXTURE, "", Some("ACME")).len(),
+            3
+        );
+        assert_eq!(
+            parse_models_dev_catalog(MODELS_DEV_FIXTURE, "", Some("beta-labs")).len(),
+            1
+        );
+        assert_eq!(
+            parse_models_dev_catalog(MODELS_DEV_FIXTURE, "", Some("  ")).len(),
+            4
+        );
+        assert!(parse_models_dev_catalog(MODELS_DEV_FIXTURE, "", Some("nope")).is_empty());
+    }
+
+    #[test]
+    fn accepts_models_dev_array_shape_and_caps_results() {
+        // 顶层是数组时用元素 id 作 provider key
+        let array = json!([
+            { "id": "solo", "name": "Solo", "models": { "one": { "id": "solo/one" } } }
+        ])
+        .to_string();
+        let models = parse_models_dev_catalog(&array, "", None);
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].provider, "solo");
+        assert_eq!(models[0].id, "solo/one");
+
+        // 超过 MAX_MODEL_RESULTS 时截断
+        let mut big = serde_json::Map::new();
+        let mut provider_models = serde_json::Map::new();
+        for index in 0..(MAX_MODEL_RESULTS + 25) {
+            provider_models.insert(
+                format!("model-{index:04}"),
+                json!({ "id": format!("big/model-{index:04}") }),
+            );
+        }
+        big.insert(
+            "big".to_owned(),
+            json!({ "id": "big", "models": provider_models }),
+        );
+        let body = serde_json::Value::Object(big).to_string();
+        assert_eq!(
+            parse_models_dev_catalog(&body, "", None).len(),
+            MAX_MODEL_RESULTS
+        );
+    }
+
+    #[test]
+    fn tolerates_malformed_models_dev_catalog() {
+        // 非法 JSON / 空对象 / models 非对象 / 供应商值非对象 → 空结果且不 panic
+        assert!(parse_models_dev_catalog("not json", "", None).is_empty());
+        assert!(parse_models_dev_catalog("{}", "", None).is_empty());
+        assert!(parse_models_dev_catalog(r#"{"p":{"models":"nope"}}"#, "", None).is_empty());
+        assert!(parse_models_dev_catalog(r#"{"p":"nope"}"#, "", None).is_empty());
+        assert!(parse_models_dev_catalog("[]", "", None).is_empty());
+    }
+
+    #[test]
+    fn reads_models_dev_profile_with_reasoning_and_modalities() {
+        let profile = parse_models_dev_profile(MODELS_DEV_FIXTURE, "acme", "acme/alpha-1")
+            .expect("profile should resolve by id");
+        assert_eq!(profile.name, "Alpha 1");
+        assert!(profile.reasoning);
+        assert_eq!(profile.context_window, Some(200_000));
+        assert_eq!(profile.max_tokens, Some(8192));
+        assert_eq!(profile.input, vec!["text".to_owned(), "image".to_owned()]);
+        // reasoning = true → 按前端既有约定给五档
+        assert_eq!(profile.thinking_levels.len(), 5);
+        let cost = profile.cost.expect("cost should be present");
+        assert_eq!(cost.input, Some(1.5));
+        assert_eq!(cost.cache_write, Some(1.9));
+
+        // 也能用 model key（而非完整 id）解析；provider 大小写不敏感
+        let by_key = parse_models_dev_profile(MODELS_DEV_FIXTURE, "ACME", "alpha-1")
+            .expect("profile should resolve by model key");
+        assert_eq!(by_key.id, "alpha-1");
+
+        // reasoning = false → 空 thinking levels
+        let gamma = parse_models_dev_profile(MODELS_DEV_FIXTURE, "beta-labs", "gamma")
+            .expect("gamma should resolve");
+        assert!(!gamma.reasoning);
+        assert!(gamma.thinking_levels.is_empty());
+        assert_eq!(gamma.cost.is_none(), true);
+    }
+
+    #[test]
+    fn rejects_unknown_or_broken_models_dev_profile_requests() {
+        assert!(parse_models_dev_profile(MODELS_DEV_FIXTURE, "nope", "alpha-1").is_err());
+        assert!(parse_models_dev_profile(MODELS_DEV_FIXTURE, "acme", "missing").is_err());
+        assert!(parse_models_dev_profile("not json", "acme", "alpha-1").is_err());
     }
 }
