@@ -1543,78 +1543,78 @@
   .mcp-skills-page { display: grid; gap: 16px; }
   .page-controls { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
   .scope-switch { display: inline-flex; gap: 2px; justify-self: start; padding: 2px; border: 1px solid var(--border-strong); border-radius: 5px; background: var(--page-bg); }
-  .scope-switch button { min-width: 64px; padding: 4px 10px; border: 0; border-radius: 3px; color: var(--text-muted); background: transparent; font-size: 12px; cursor: pointer; }
+  .scope-switch button { min-width: 68px; padding: 6px 12px; border: 0; border-radius: 3px; color: var(--text-muted); background: transparent; font-size: 13px; cursor: pointer; }
   .scope-switch button.active { color: var(--accent-ink); background: var(--accent); font-weight: 700; }
   .scope-switch button:disabled { opacity: .4; cursor: default; }
   .group-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-  h3 { margin: 0; font-size: 13px; font-weight: 650; color: var(--text-strong); }
-  .icon-action, .danger-action { display: grid; place-items: center; width: 28px; height: 28px; border: 1px solid transparent; border-radius: 4px; background: transparent; color: var(--text-muted); cursor: pointer; }
+  h3 { margin: 0; font-size: 14px; font-weight: 650; color: var(--text-strong); }
+  .icon-action, .danger-action { display: grid; place-items: center; width: 32px; height: 32px; border: 1px solid transparent; border-radius: 4px; background: transparent; color: var(--text-muted); cursor: pointer; }
   .icon-action:hover:not(:disabled) { border-color: var(--border-strong); color: var(--text); background: var(--surface-hover); }
   .danger-action { color: #d88989; }
   .danger-action:hover:not(:disabled) { border-color: #74423e; color: #ffd2ce; background: #3b201e; }
   .entry-list { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 6px; }
-  .entry-list li { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); }
+  .entry-list li { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); }
   .entry-main { flex: 1; min-width: 0; display: grid; gap: 2px; }
-  .entry-main strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--text-strong); }
-  .entry-main small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--text-muted); }
-  .downloads { flex-shrink: 0; color: var(--text-muted); font-size: 10px; }
+  .entry-main strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; color: var(--text-strong); }
+  .entry-main small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--text-muted); }
+  .downloads { flex-shrink: 0; color: var(--text-muted); font-size: 12px; }
   .add-form { display: grid; gap: 8px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
   .add-form label { display: grid; gap: 4px; font-size: 11px; color: var(--text-muted); }
   .add-form input, .add-form textarea { min-width: 0; padding: 6px 8px; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--surface); color: var(--text); font: inherit; }
   .add-form textarea { font-family: var(--code-font); font-size: 12px; resize: vertical; }
   .primary-action { display: inline-flex; align-items: center; justify-content: center; gap: 5px; justify-self: start; min-height: 30px; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--surface-hover); color: var(--text); cursor: pointer; }
   .primary-action:hover:not(:disabled) { border-color: var(--accent); color: var(--text-strong); }
-  .primary-action.compact { min-height: 26px; padding: 0 10px; font-size: 11px; flex-shrink: 0; }
+  .primary-action.compact { min-height: 32px; padding: 0 12px; font-size: 12px; flex-shrink: 0; }
   .market-search { display: flex; align-items: center; gap: 8px; margin-top: 10px; padding: 2px 4px 2px 10px; border: 1px solid var(--border-strong); border-radius: 5px; background: var(--surface); color: var(--text-muted); }
-  .market-search input { flex: 1; min-width: 0; height: 32px; border: 0; outline: 0; background: transparent; color: var(--text); font: inherit; font-size: 12px; }
+  .market-search input { flex: 1; min-width: 0; height: 34px; border: 0; outline: 0; background: transparent; color: var(--text); font: inherit; font-size: 13px; }
   .market-search .primary-action { justify-self: auto; }
   .market-toolbar { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
   .market-toolbar .market-search { flex: 1; min-width: 0; margin-top: 0; }
-  .market-sort { flex-shrink: 0; height: 26px; max-width: 140px; padding: 0 4px; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--surface); color: var(--text); font: inherit; font-size: 11px; cursor: pointer; }
+  .market-sort { flex-shrink: 0; height: 32px; max-width: 180px; padding: 0 6px; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--surface); color: var(--text); font: inherit; font-size: 12px; cursor: pointer; }
   .market-sort:hover { border-color: var(--accent); color: var(--text-strong); }
-  .status { margin: 0; font-size: 12px; color: var(--accent); }
+  .status { margin: 0; font-size: 13px; color: var(--accent); }
   .spin { display: inline-grid; animation: mcp-spin 0.8s linear infinite; }
   @keyframes mcp-spin { to { transform: rotate(360deg); } }
   button:disabled { opacity: .45; cursor: default; }
   /* ---------- 市场列表（agenticskills.io） ---------- */
   .market-list li { flex-wrap: wrap; }
   /* 整行可点击：展开/收起详情；行内安装按钮与展开区链接各自 stopPropagation。 */
-  .market-row { flex: 1 1 100%; min-width: 0; display: flex; align-items: center; gap: 8px; cursor: pointer; }
+  .market-row { flex: 1 1 100%; min-width: 0; display: flex; align-items: center; gap: 10px; cursor: pointer; }
   .market-row:hover { background: var(--surface-hover); }
   .market-row:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
   .market-list li.expanded { border-color: var(--accent); }
-  .market-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 10px; color: var(--text-muted); }
-  .market-flag { flex-shrink: 0; padding: 1px 5px; border: 1px solid var(--border-strong); border-radius: 3px; color: var(--text); font-size: 10px; }
-  .category-chip { flex-shrink: 0; display: inline-flex; align-items: center; padding: 1px 5px; border: 1px solid var(--border-strong); border-radius: 3px; color: var(--text-muted); font-family: var(--code-font); font-size: 10px; letter-spacing: .04em; text-transform: uppercase; }
+  .market-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; color: var(--text-muted); }
+  .market-flag { flex-shrink: 0; padding: 3px 7px; border: 1px solid var(--border-strong); border-radius: 4px; color: var(--text); font-size: 12px; }
+  .category-chip { flex-shrink: 0; display: inline-flex; align-items: center; padding: 3px 8px; border: 1px solid var(--border-strong); border-radius: 4px; color: var(--text-muted); font-family: var(--code-font); font-size: 12px; }
   button.category-chip { background: transparent; cursor: pointer; }
   button.category-chip:hover { border-color: var(--accent); color: var(--text-strong); }
   .category-chip[aria-pressed="true"] { border-color: var(--accent); background: var(--accent); color: var(--accent-ink); font-weight: 700; }
-  .category-filter { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; min-width: 0; max-width: 100%; overflow-x: auto; }
-  .market-source { flex-shrink: 0; padding: 1px 5px; border: 1px solid var(--border); border-radius: 3px; color: var(--text-muted); font-size: 10px; }
+  .category-filter { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; min-width: 0; max-width: 100%; overflow-x: auto; }
+  .market-source { flex-shrink: 0; padding: 3px 7px; border: 1px solid var(--border); border-radius: 4px; color: var(--text-muted); font-size: 12px; }
   .tag { padding: 1px 5px; border-radius: 3px; background: var(--surface-hover); color: var(--text-muted); font-size: 10px; }
-  .secondary-action { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; min-height: 26px; padding: 0 10px; border: 1px solid var(--border); border-radius: 4px; background: transparent; color: var(--text-muted); font-size: 11px; cursor: pointer; }
+  .secondary-action { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; min-height: 32px; padding: 0 12px; border: 1px solid var(--border); border-radius: 4px; background: transparent; color: var(--text-muted); font-size: 12px; cursor: pointer; }
   .secondary-action:hover:not(:disabled) { border-color: var(--border-strong); color: var(--text); background: var(--surface-hover); }
   .market-detail { flex: 1 1 100%; min-width: 0; display: grid; gap: 6px; margin-top: 4px; padding-top: 8px; border-top: 1px solid var(--border); }
-  .detail-text { margin: 0; font-size: 11px; line-height: 1.5; color: var(--text-muted); white-space: pre-wrap; }
-  .translate-note { font-size: 10px; color: var(--text-muted); }
-  .translate-error { font-size: 10px; color: var(--status-failed); }
-  .detail-row { display: flex; flex-wrap: wrap; gap: 10px; font-size: 11px; color: var(--text-muted); }
+  .detail-text { margin: 0; font-size: 13px; line-height: 1.55; color: var(--text-muted); white-space: pre-wrap; }
+  .translate-note { font-size: 12px; color: var(--text-muted); }
+  .translate-error { font-size: 12px; color: var(--status-failed); }
+  .detail-row { display: flex; flex-wrap: wrap; gap: 12px; font-size: 12px; color: var(--text-muted); }
   .detail-actions { display: flex; flex-wrap: wrap; gap: 10px; }
-  .link-action { padding: 0; border: 0; background: transparent; color: var(--accent); font: inherit; font-size: 11px; text-decoration: underline; cursor: pointer; }
-  .detail-pre { max-height: 220px; margin: 0; padding: 8px 10px; overflow: auto; border: 1px solid var(--border); border-radius: 4px; background: var(--page-bg); color: var(--text); font-family: var(--code-font); font-size: 11px; white-space: pre-wrap; word-break: break-word; }
+  .link-action { padding: 0; border: 0; background: transparent; color: var(--accent); font: inherit; font-size: 12px; text-decoration: underline; cursor: pointer; }
+  .detail-pre { max-height: 220px; margin: 0; padding: 8px 10px; overflow: auto; border: 1px solid var(--border); border-radius: 4px; background: var(--page-bg); color: var(--text); font-family: var(--code-font); font-size: 12px; white-space: pre-wrap; word-break: break-word; }
   /* ---------- 工作流市场（agenticskills.io） ---------- */
-  .detail-label { font-size: 10px; color: var(--text-muted); }
+  .detail-label { font-size: 12px; color: var(--text-muted); }
   .component-groups { display: grid; gap: 8px; }
   .component-list, .step-list, .failure-list { list-style: none; margin: 4px 0 0; padding: 0; display: grid; gap: 4px; }
-  .component-list li, .step-list li, .failure-list li { padding: 0; border: 0; border-radius: 0; background: transparent; color: var(--text); font-size: 11px; }
+  .component-list li, .step-list li, .failure-list li { padding: 0; border: 0; border-radius: 0; background: transparent; color: var(--text); font-size: 12px; }
   .component-list li { display: flex; align-items: baseline; gap: 8px; }
-  .component-list code, .failure-list code { color: var(--text-muted); font-family: var(--code-font); font-size: 10px; }
+  .component-list code, .failure-list code { color: var(--text-muted); font-family: var(--code-font); font-size: 11px; }
   .failure-list li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; }
   .failure-list span { color: var(--status-failed); overflow-wrap: anywhere; }
   .step-list li { display: block; }
-  .step-list strong { font-size: 11px; color: var(--text-strong); }
+  .step-list strong { font-size: 12px; color: var(--text-strong); }
   .step-list p { margin: 2px 0 0; color: var(--text-muted); white-space: pre-wrap; }
   .prompt-block { display: grid; gap: 6px; justify-items: start; }
   .install-summary { border-top-color: var(--accent); }
-  .install-summary strong { font-size: 12px; color: var(--text-strong); }
+  .install-summary strong { font-size: 13px; color: var(--text-strong); }
 </style>
