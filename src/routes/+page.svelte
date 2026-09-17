@@ -40,7 +40,6 @@
   import { createTaskModeSwitcher, type InteractionMode } from "$lib/task-mode";
   import { SplitSquareHorizontal, SplitSquareVertical } from "@lucide/svelte";
   import AppDialog from "$lib/AppDialog.svelte";
-  import AppMenu from "$lib/AppMenu.svelte";
   import { checkAppUpdate, installAppUpdate, type AppUpdateState, type Update } from "$lib/app-update";
   import type { DialogRequest, DialogValue } from "$lib/dialog";
   import type { Project } from "$lib/project";
@@ -161,8 +160,6 @@
   let filesVisible = $state(true);
   /** 是否用「任务看板」替代流式对话视图（仅 Pi 工作区）。 */
   let boardView = $state(false);
-  /** 应用菜单展开态：展开时暂停全局快捷键，并让原生 DSH Webview 让位（否则会盖住菜单弹层）。 */
-  let menuOpen = $state(false);
   const showFiles = $derived(activeAgent === "pi" && view === "workspace" && filesVisible);
   let fileSidebarVisited = $state(false);
   $effect(() => {
@@ -241,7 +238,7 @@
   // Serialize visibility requests because native child Webviews cover HTML menus.
   $effect(() => {
     const child = dshWebview;
-    const visible = activeAgent === "dsh" && !dialogRequest && !closingWindow && !recoveryProject && !menuOpen;
+    const visible = activeAgent === "dsh" && !dialogRequest && !closingWindow && !recoveryProject;
     dshVisibility = dshVisibility.then(async () => {
       if (child) {
         if (visible) await child.show();
@@ -366,7 +363,7 @@
 
   function handleShortcut(event: KeyboardEvent) {
     if (startupPending || startupFailure) return;
-    const decision = hostShortcutDecision(event, shortcutContext(), menuOpen);
+    const decision = hostShortcutDecision(event, shortcutContext());
     if (decision.consume) { event.preventDefault(); event.stopPropagation(); }
     if (decision.command) runHostCommand(decision.command);
   }
@@ -857,14 +854,6 @@
     );
   }
 
-  /** 应用菜单：布局切换入口（顶栏不再保留「切换布局」按钮）。当前布局项禁用，兼作选中标记。 */
-  const menus = $derived.by(() => [
-    { label: t("视图"), items: [
-      { label: t("单任务"), disabled: layout === "single", action: () => changeLayout("single") },
-      { label: t("双列"), disabled: layout === "split", action: () => changeLayout("split") },
-      { label: t("网格"), disabled: layout === "grid", action: () => changeLayout("grid") },
-    ] },
-  ]);
 
   function removeTerminal(taskId: string) {
     terminalTaskIds = terminalTaskIds.filter((id) => id !== taskId);
@@ -1236,7 +1225,6 @@
       {/if}
     </div>
 
-    <AppMenu {menus} onOpenChange={(open) => { menuOpen = open; }} />
 
     <div class="toolbar">
       {#if activeAgent === "pi"}
@@ -1323,6 +1311,8 @@
       </div>
     {:else if view === "settings"}
       <PiSettings
+        layout={layout}
+        onChangeLayout={(next) => changeLayout(next)}
         saving={settingsSaving}
         closeBlocked={settingsPackageBusy || diagnosticsBusy || dshBusy}
         onDiagnosticsBusy={(busy) => { diagnosticsBusy = busy; }}
@@ -1543,6 +1533,4 @@
 <style>
   .recovery-error { position: absolute; inset: 0; z-index: 15; padding: 16px; background: var(--page-bg); overflow: auto; }
   .recovery-error p { overflow-wrap: anywhere; }
-  /* 顶栏三列：面包屑 / 应用菜单 / 工具按钮（app.css 的 .topbar 只声明了两列）。 */
-  .topbar { grid-template-columns: auto auto minmax(0, 1fr); }
 </style>
