@@ -176,10 +176,10 @@
   const saveReady = $derived(!isLoading && (savedSnapshot === null || draftDirty));
 
   function draftSnapshot(): string {
-    syncDraftHeaders();
+    // Traverse nested model proxies without writing state from a derived.
     return JSON.stringify({
-      draft,
-      apiKey: apiKey.trim().length > 0,
+      draft: { ...draft, headers: draftHeaders() },
+      apiKey,
       providerPreset,
     });
   }
@@ -196,6 +196,7 @@
         ...model,
         input: [...model.input],
         thinkingLevels: [...model.thinkingLevels],
+        cost: model.cost ? { ...model.cost } : null,
       })),
     };
   }
@@ -204,12 +205,16 @@
     headerEntries = Object.entries(headers).map(([name, value]) => ({ name, value }));
   }
 
-  function syncDraftHeaders() {
-    draft.headers = Object.fromEntries(
+  function draftHeaders() {
+    return Object.fromEntries(
       headerEntries
         .map(({ name, value }) => [name.trim(), value] as const)
         .filter(([name]) => name.length > 0),
     );
+  }
+
+  function syncDraftHeaders() {
+    draft.headers = draftHeaders();
   }
 
   function addHeader() {
@@ -248,7 +253,7 @@
     credentialConfigured = false;
     statusMessage = "";
     connectionMessage = "";
-    savedSnapshot = null;
+    savedSnapshot = draftSnapshot();
     void refreshCredentialStatus();
   }
 
@@ -329,27 +334,42 @@
   }
 
   async function saveProvider(showStatus = true): Promise<ProviderRecord | null> {
+    if (isLoading) return null;
+    const submittedDraft = draft;
+    const submittedSnapshot = draftSnapshot();
+    const submitted = JSON.parse(submittedSnapshot) as {
+      draft: ProviderRecord; apiKey: string; providerPreset: string;
+    };
     isLoading = true;
     if (showStatus) statusMessage = "";
-    syncDraftHeaders();
     try {
       const saved = await invoke<ProviderRecord>("save_pi_provider", {
         request: {
-          ...draft,
-          baseUrl: draft.baseUrl?.trim() || null,
-          proxy: draft.proxy?.trim() || null,
+          ...submitted.draft,
+          baseUrl: submitted.draft.baseUrl?.trim() || null,
+          proxy: submitted.draft.proxy?.trim() || null,
         },
       });
-      providers = [saved, ...providers.filter((provider) => provider.id !== saved.id)];
-      draft = cloneProvider(saved);
-      setHeaderEntries(saved.headers);
-      if (apiKey.trim()) {
-        await saveCredential(false);
-      } else {
-        await refreshCredentialStatus();
+      if (submitted.apiKey.trim()) {
+        // Let credential failures reach the same failure path; keep the draft retryable.
+        await invoke<ProviderCredentialStatus>("save_provider_credential", {
+          request: { providerId: saved.id, apiKey: submitted.apiKey },
+        });
       }
-      if (showStatus) statusMessage = t("Provider 已保存；模型变更将在重启任务后出现在对话窗口");
-      savedSnapshot = draftSnapshot();
+      providers = [saved, ...providers.filter((provider) => provider.id !== saved.id)];
+      if (draft === submittedDraft) {
+        const unchanged = draftSnapshot() === submittedSnapshot;
+        if (unchanged) {
+          draft = cloneProvider(saved);
+          setHeaderEntries(saved.headers);
+        }
+        if (apiKey === submitted.apiKey) apiKey = "";
+        savedSnapshot = JSON.stringify({ draft: saved, apiKey: "", providerPreset: submitted.providerPreset });
+        await refreshCredentialStatus();
+        if (showStatus && draft === (unchanged ? draft : submittedDraft)) {
+          statusMessage = t("Provider 已保存；模型变更将在重启任务后出现在对话窗口");
+        }
+      }
       return saved;
     } catch (error) {
       onError(error);

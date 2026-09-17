@@ -53,8 +53,9 @@
     onActivity: (busy: boolean) => void;
     onAutoRename: (title: string) => void;
     onOpenModelSettings?: () => void;
+    onReloadSession?: () => void;
   }
-  let { taskId, runId, title, visible, active, switching, focusToken, autoName, onUseTerminal, onDialog, onCancelDialogs, onActivity, onAutoRename, onOpenModelSettings }: Props = $props();
+  let { taskId, runId, title, visible, active, switching, focusToken, autoName, onUseTerminal, onDialog, onCancelDialogs, onActivity, onAutoRename, onOpenModelSettings, onReloadSession }: Props = $props();
   let conversation = $state(emptyConversation());
   let draft = $state("");
   let restoredDraft = $state("");
@@ -66,6 +67,9 @@
   let notice = $state("");
   let modelName = $state("");
   let models = $state<{ id: string; provider: string; name: string }[]>([]);
+  /// 模型列表读取失败与「确实无模型」分开提示：失败时显示错误与重试/重载入口。
+  let modelsLoadFailed = $state(false);
+  let modelsLoadError = $state("");
   let selectedModel = $state("");
   let changingModel = $state(false);
   let thinkingLevels = $state<string[]>([]);
@@ -122,6 +126,8 @@
   let reconnect = $state(0);
   let generation = 0;
   let composing = false;
+  /// 用户点过「重载会话」后，下一次模型列表加载成功时提示一次（非响应式标记）。
+  let reloadRequested = false;
   const messageStart = $derived(messageWindowStart(conversation.messages.length, historyLimit, pinnedMessageStart));
   const visibleMessages = $derived(conversation.messages.slice(messageStart));
   const toolResults = $derived(new Set(conversation.messages.map((message) => message.toolCallId).filter(Boolean)));
@@ -490,6 +496,8 @@
     autoNamed = false;
     sessionStats = null;
     models = [];
+    modelsLoadFailed = false;
+    modelsLoadError = "";
     modelName = "";
     selectedModel = "";
     conversation = emptyConversation();
@@ -746,6 +754,13 @@
     }
   }
 
+  /// 空状态下重载会话：交给父组件重启 RPC 任务（保留会话与历史），新会话初始化时会重新读取模型列表。
+  function reloadSession() {
+    if (!onReloadSession) return;
+    reloadRequested = true;
+    onReloadSession();
+  }
+
   /// 读取当前会话可用的模型列表；列表为空时由空状态提示兜底。
   async function refreshModels(alive?: () => boolean) {
     const current = generation;
@@ -757,8 +772,15 @@
         .map(record)
         .filter((model) => typeof model.id === "string" && typeof model.provider === "string")
         .map((model) => ({ id: String(model.id), provider: String(model.provider), name: String(model.name ?? model.id) }));
-    } catch {
-      // 静默失败：列表缺失时显示空状态提示，不打断会话。
+      modelsLoadFailed = false;
+      modelsLoadError = "";
+      if (models.length && reloadRequested) { reloadRequested = false; notice = t("已重载，请检查上方模型选择器"); }
+    } catch (cause) {
+      // 读取失败不再完全静默：打上标记，空状态据此显示错误，与「确实无模型」的提示区分开。
+      if (alive && !alive()) return;
+      if (current !== generation) return;
+      modelsLoadFailed = true;
+      modelsLoadError = tm(String(cause));
     }
   }
 
@@ -998,10 +1020,15 @@
   {/if}
   {#if connected && !initializing && !conversation.closed && models.length === 0}
     <p class="model-hint" role="status">
-      <span>{t("未检测到可用模型：请在 设置 → 模型设置 中添加并保存模型，重启本任务后生效。")}</span>
+      {#if modelsLoadFailed}
+        <span>{t("模型列表读取失败：{error}", { error: modelsLoadError })}</span>
+      {:else}
+        <span>{t("未检测到可用模型：请在 设置 → 模型设置 中添加并保存模型，重启本任务后生效。")}</span>
+      {/if}
       <span class="model-hint-actions">
-        {#if onOpenModelSettings}<button type="button" onclick={onOpenModelSettings}>{t("打开模型设置")}</button>{/if}
+        {#if onOpenModelSettings && !modelsLoadFailed}<button type="button" onclick={onOpenModelSettings}>{t("打开模型设置")}</button>{/if}
         <button type="button" onclick={() => void refreshModels()}>{t("重试")}</button>
+        {#if onReloadSession}<button type="button" onclick={reloadSession}>{t("重载会话")}</button>{/if}
       </span>
     </p>
   {/if}

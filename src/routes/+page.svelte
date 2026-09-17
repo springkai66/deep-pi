@@ -1452,6 +1452,7 @@
                   if (["running", "waiting"].includes(task.status)) task.status = busy ? "running" : "waiting";
                 }}
               onOpenModelSettings={() => openSettingsCategory("models")}
+              onReloadSession={() => void restartTask(task, "rpc")}
               />
             {:else}
             {#if terminalModule}

@@ -269,6 +269,133 @@ fn validate_provider(request: &SaveProviderRequest) -> Result<(), String> {
     }
     Ok(())
 }
+// Pi 运行时对 models.json 模型对象的两条硬约束（`.deeppi-runtime` 下
+// pi 的 `dist/core/model-config.js`，`ModelDefinitionSchema`，TypeBox 严格校验）：
+//
+// 1. `input` 数组每项只能是字面量 `"text"` 或 `"image"`；DeepPi 从 provider 的
+//    /models 响应透传 `input_modalities`/`modalities` 时可能带出 `"pdf"` 等值。
+// 2. `cost` 对象一旦存在，`input`/`output`/`cacheRead`/`cacheWrite` 四个键
+//    必须都是数字；DeepPi 的 `Option<f64>` 会序列化成 `null`。
+//
+// 任一违反都会让**整个文件**校验失败、运行时把 providers 置空。因此只在
+// 写出/读入边界做收敛（validate 不放松），内部数据结构保持不变。
+const PI_INPUT_TYPES: [&str; 2] = ["text", "image"];
+
+/// 把 input 类型收敛为 Pi 允许的 `"text"`/`"image"`：大小写不敏感匹配、
+/// 按首见顺序去重、写出规范小写；没有合法项时回退 `["text"]`。
+fn pi_schema_input_types(values: impl Iterator<Item = String>) -> Vec<String> {
+    let mut converged: Vec<String> = Vec::new();
+    for value in values {
+        let canonical = PI_INPUT_TYPES
+            .iter()
+            .copied()
+            .find(|allowed| value.eq_ignore_ascii_case(allowed));
+        let Some(canonical) = canonical else {
+            continue;
+        };
+        if !converged.iter().any(|existing| existing == canonical) {
+            converged.push(canonical.to_owned());
+        }
+    }
+    if converged.is_empty() {
+        converged.push(PI_INPUT_TYPES[0].to_owned());
+    }
+    converged
+}
+
+/// 序列化边界上的 input 收敛（JSON 数组 → JSON 数组）。
+fn pi_schema_input_json(input: &Value) -> Value {
+    let values = input
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_owned);
+    Value::Array(
+        pi_schema_input_types(values)
+            .into_iter()
+            .map(Value::String)
+            .collect(),
+    )
+}
+
+/// 收敛序列化后的 cost 对象：
+/// - 四个费率全为 null（或缺失）→ 返回 `None`，调用方整键省略 cost：
+///   全 null 的 cost 对 Pi 没有意义，而补 0 会谎报“免费”。
+/// - 至少一个费率是数字 → 仍为 null 的键以 `0.0` 占位。Pi 要求 cost 存在时
+///   四键必须都是数字（实测删除缺失键会被 required 规则拒绝），保留用户
+///   已填写的真实费率、只对未知值占位是更小的信息损失。
+/// - cost 不是对象 → `None`（Pi 的 `ModelCostSchema` 只接受对象）。
+/// 其余键（如 tiers）原样保留。
+fn pi_schema_cost_json(cost: &Value) -> Option<Value> {
+    let object = cost.as_object()?;
+    const RATES: [&str; 4] = ["input", "output", "cacheRead", "cacheWrite"];
+    let has_number = RATES
+        .iter()
+        .any(|key| object.get(*key).and_then(Value::as_f64).is_some());
+    if !has_number {
+        return None;
+    }
+    let mut converged = object.clone();
+    for key in RATES {
+        let number = object.get(key).and_then(Value::as_f64).unwrap_or(0.0);
+        converged.insert(key.to_owned(), json!(number));
+    }
+    Some(Value::Object(converged))
+}
+
+/// 收敛单个模型对象；其余字段（thinkingLevelMap/reasoning/contextWindow/
+/// maxTokens/api 等）原样保留。
+fn pi_schema_converged_model(model: &Value) -> Value {
+    if !model.is_object() {
+        return model.clone();
+    }
+    let mut converged = model.clone();
+    let object = converged
+        .as_object_mut()
+        .expect("model was checked as object");
+    if let Some(input) = object.get("input") {
+        let input = pi_schema_input_json(input);
+        object.insert("input".into(), input);
+    }
+    if let Some(cost) = object.get("cost").cloned() {
+        match pi_schema_cost_json(&cost) {
+            Some(cost) => {
+                object.insert("cost".into(), cost);
+            }
+            None => {
+                object.remove("cost");
+            }
+        }
+    }
+    converged
+}
+
+/// 写盘前对整个 models.json 收敛（覆盖所有 provider 的 models 数组，
+/// 含未被本次保存触碰的旧条目），保证 DeepPi 写出的文件始终能被 Pi 加载。
+/// 只触碰 `providers.*.models[*]`，apiKey/headers/未知键一律不动。
+fn pi_schema_converged_root(root: &Value) -> Value {
+    let mut converged = root.clone();
+    let Some(providers) = converged
+        .get_mut("providers")
+        .and_then(Value::as_object_mut)
+    else {
+        return converged;
+    };
+    for provider in providers.values_mut() {
+        let Some(models) = provider
+            .as_object_mut()
+            .and_then(|provider| provider.get_mut("models"))
+            .and_then(Value::as_array_mut)
+        else {
+            continue;
+        };
+        for model in models.iter_mut() {
+            *model = pi_schema_converged_model(model);
+        }
+    }
+    converged
+}
 
 fn model_to_json(model: &ConfiguredModel) -> Value {
     let thinking_level_map: Map<String, Value> = model
@@ -323,6 +450,8 @@ fn model_from_json(value: &Value) -> Result<ConfiguredModel, String> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    // 读入边界同样收敛：旧文件里可能已被写入 null cost 或 "pdf" input，
+    // 读回时折叠/过滤，保证 读→改→写 往返不会再把非法值写回盘上。
     let cost = object
         .get("cost")
         .and_then(Value::as_object)
@@ -331,6 +460,13 @@ fn model_from_json(value: &Value) -> Result<ConfiguredModel, String> {
             output: cost.get("output").and_then(Value::as_f64),
             cache_read: cost.get("cacheRead").and_then(Value::as_f64),
             cache_write: cost.get("cacheWrite").and_then(Value::as_f64),
+        })
+        // 全 null 的 cost 折叠成 None：读回后再次写出时整键省略。
+        .filter(|cost| {
+            !(cost.input.is_none()
+                && cost.output.is_none()
+                && cost.cache_read.is_none()
+                && cost.cache_write.is_none())
         });
     let id = object
         .get("id")
@@ -350,16 +486,15 @@ fn model_from_json(value: &Value) -> Result<ConfiguredModel, String> {
             .to_owned(),
         id,
         reasoning,
-        input: object
-            .get("input")
-            .and_then(Value::as_array)
-            .map(|values| {
-                values
-                    .iter()
-                    .filter_map(|value| value.as_str().map(str::to_owned))
-                    .collect()
-            })
-            .unwrap_or_else(|| vec!["text".to_owned()]),
+        input: pi_schema_input_types(
+            object
+                .get("input")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_owned),
+        ),
         context_window: object
             .get("contextWindow")
             .and_then(Value::as_u64)
@@ -445,9 +580,11 @@ fn read_models_file(path: &Path) -> Result<Value, String> {
     }
     Ok(value)
 }
-
 fn write_models_file(path: &Path, value: &Value) -> Result<(), String> {
-    let content = serde_json::to_vec_pretty(value)
+    // 唯一的写盘出口（save/delete 都经过这里）：写盘前整体收敛，
+    // 连带把旧文件里未触碰的脏条目一并清理，保证 Pi 能加载。
+    let value = pi_schema_converged_root(value);
+    let content = serde_json::to_vec_pretty(&value)
         .map_err(|error| format!("failed to serialize Pi models.json: {error}"))?;
     let mut file = AtomicWriteFile::open(path)
         .map_err(|error| format!("failed to open Pi models.json: {error}"))?;
@@ -1019,8 +1156,9 @@ pub async fn delete_pi_provider(
 #[cfg(test)]
 mod tests {
     use super::{
-        credential_command, list_provider_file, parse_provider_models, provider_models_url,
-        save_provider_file, validate_headers, validate_proxy, ConfiguredModel, SaveProviderRequest,
+        credential_command, list_provider_file, parse_provider_models, pi_schema_input_types,
+        provider_models_url, save_provider_file, validate_headers, validate_proxy,
+        write_models_file, ConfiguredModel, ModelCostConfig, SaveProviderRequest,
     };
     use serde_json::json;
 
@@ -1156,6 +1294,195 @@ mod tests {
                 .len(),
             1
         );
+
+        std::fs::remove_dir_all(root).expect("test directory should be removed");
+    }
+    fn temp_models_dir(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let root =
+            std::env::temp_dir().join(format!("deeppi-pi-compat-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("test directory should exist");
+        let path = root.join("models.json");
+        (root, path)
+    }
+
+    #[test]
+    fn pi_schema_input_types_filter_dedupe_and_fallback() {
+        assert_eq!(
+            pi_schema_input_types(
+                ["text", "pdf", "PDF", "image", "text", "audio"]
+                    .into_iter()
+                    .map(String::from),
+            ),
+            vec!["text".to_owned(), "image".to_owned()]
+        );
+        assert_eq!(
+            pi_schema_input_types(std::iter::empty::<String>()),
+            vec!["text"]
+        );
+    }
+
+    #[test]
+    fn save_converges_pi_schema_violations() {
+        let (root, path) = temp_models_dir("dirty");
+        let mut command_go = model();
+        command_go.id = "command-go".into();
+        command_go.input = vec!["text".into(), "pdf".into(), "IMAGE".into(), "text".into()];
+        command_go.cost = Some(ModelCostConfig {
+            input: None,
+            output: None,
+            cache_read: None,
+            cache_write: None,
+        });
+        let mut partial = model();
+        partial.id = "partial-cost".into();
+        partial.reasoning = false;
+        partial.thinking_levels = Vec::new();
+        partial.input = vec!["pdf".into()];
+        partial.cost = Some(ModelCostConfig {
+            input: Some(0.5),
+            output: None,
+            cache_read: None,
+            cache_write: None,
+        });
+        let request = SaveProviderRequest {
+            id: "command-go".into(),
+            name: "Command Go".into(),
+            api: "openai-completions".into(),
+            base_url: Some("https://api.command-go.example/v1".into()),
+            headers: std::collections::BTreeMap::new(),
+            proxy: None,
+            models: vec![command_go, partial],
+        };
+        save_provider_file(&path, &request).expect("provider should save");
+
+        let raw = std::fs::read_to_string(&path).expect("file should read");
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("file should parse");
+        let models = value["providers"]["command-go"]["models"]
+            .as_array()
+            .expect("models array")
+            .clone();
+        assert_eq!(models[0]["input"], json!(["text", "image"]));
+        assert_eq!(models[1]["input"], json!(["text"]));
+        assert!(!raw.contains("\"pdf\""), "pdf input must not be written");
+        assert!(
+            models[0].get("cost").is_none(),
+            "all-null cost must be omitted"
+        );
+        assert_eq!(
+            models[1]["cost"],
+            json!({"input": 0.5, "output": 0.0, "cacheRead": 0.0, "cacheWrite": 0.0})
+        );
+        assert_eq!(models[0]["thinkingLevelMap"]["low"], "low");
+        assert_eq!(models[0]["contextWindow"], 200_000);
+        assert_eq!(models[0]["maxTokens"], 32_000);
+        assert_eq!(models[0]["reasoning"], true);
+
+        let records = list_provider_file(&path).expect("provider should list");
+        assert_eq!(
+            records[0].models[0].input,
+            vec!["text".to_owned(), "image".to_owned()]
+        );
+        assert_eq!(records[0].models[0].cost, None);
+        // 盘上已是规范的 4 数字 cost：0 占位值读回就是 Some(0.0)，
+        // 再写出时不变（往返幂等）。
+        assert_eq!(
+            records[0].models[1].cost,
+            Some(ModelCostConfig {
+                input: Some(0.5),
+                output: Some(0.0),
+                cache_read: Some(0.0),
+                cache_write: Some(0.0),
+            })
+        );
+
+        save_provider_file(&path, &request).expect("provider should save again");
+        let again = std::fs::read_to_string(&path).expect("file should read again");
+        assert_eq!(raw, again, "re-saving the same request must be a no-op");
+
+        std::fs::remove_dir_all(root).expect("test directory should be removed");
+    }
+
+    #[test]
+    fn save_keeps_clean_pi_compatible_model_unchanged() {
+        let (root, path) = temp_models_dir("clean");
+        let mut clean = model();
+        clean.input = vec!["text".into(), "image".into()];
+        clean.cost = Some(ModelCostConfig {
+            input: Some(1.25),
+            output: Some(2.5),
+            cache_read: Some(0.125),
+            cache_write: Some(0.25),
+        });
+        save_provider_file(
+            &path,
+            &SaveProviderRequest {
+                id: "openai".into(),
+                name: "OpenAI".into(),
+                api: "openai-responses".into(),
+                base_url: Some("https://api.openai.com/v1".into()),
+                headers: std::collections::BTreeMap::new(),
+                proxy: None,
+                models: vec![clean],
+            },
+        )
+        .expect("provider should save");
+
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("file should read"))
+                .expect("file should parse");
+        let saved = &value["providers"]["openai"]["models"][0];
+        assert_eq!(saved["input"], json!(["text", "image"]));
+        assert_eq!(
+            saved["cost"],
+            json!({"input": 1.25, "output": 2.5, "cacheRead": 0.125, "cacheWrite": 0.25})
+        );
+
+        std::fs::remove_dir_all(root).expect("test directory should be removed");
+    }
+
+    #[test]
+    fn rewrite_converges_legacy_dirty_models_file() {
+        let (root, path) = temp_models_dir("legacy");
+        write_models_file(
+            &path,
+            &json!({
+                "providers": {
+                    "legacy": {
+                        "name": "Legacy",
+                        "api": "openai-completions",
+                        "models": [{
+                            "id": "legacy-1",
+                            "name": "Legacy 1",
+                            "reasoning": true,
+                            "input": ["text", "pdf", "image"],
+                            "contextWindow": 8192,
+                            "maxTokens": 4096,
+                            "thinkingLevelMap": {"off": null, "low": "low"},
+                            "cost": {"input": null, "output": null, "cacheRead": null, "cacheWrite": null},
+                        }],
+                    },
+                },
+            }),
+        )
+        .expect("dirty file should rewrite");
+
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("file should read"))
+                .expect("file should parse");
+        let saved = &value["providers"]["legacy"]["models"][0];
+        assert_eq!(saved["input"], json!(["text", "image"]));
+        assert!(saved.get("cost").is_none());
+        assert_eq!(saved["thinkingLevelMap"]["low"], "low");
+        assert_eq!(saved["contextWindow"], 8192);
+
+        let records = list_provider_file(&path).expect("provider should list");
+        assert_eq!(records[0].models[0].name, "Legacy 1");
+        assert_eq!(
+            records[0].models[0].input,
+            vec!["text".to_owned(), "image".to_owned()]
+        );
+        assert_eq!(records[0].models[0].cost, None);
 
         std::fs::remove_dir_all(root).expect("test directory should be removed");
     }
