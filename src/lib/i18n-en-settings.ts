@@ -1,6 +1,6 @@
-/** 英文目录（模型与凭据、DSH 服务、运行时与更新、外部编辑器）。键 = 简体中文原文。 */
+/** 英文目录（模型设置、DSH 服务、运行时与更新、外部编辑器）。键 = 简体中文原文。 */
 export const EN_SETTINGS: Record<string, string> = {
-  /* ---------- 模型与凭据：Provider 列表与工具栏 ---------- */
+  /* ---------- 模型设置：Provider 列表与工具栏 ---------- */
   "Pi Provider 和模型配置": "Pi provider and model configuration",
   "返回工作区": "Back to workspace",
   "返回": "Back",
@@ -26,7 +26,7 @@ export const EN_SETTINGS: Record<string, string> = {
   "取消选择": "Deselect",
   "选择模型": "Select model",
 
-  /* ---------- 模型与凭据：模型详情 ---------- */
+  /* ---------- 模型设置：模型详情 ---------- */
   "模型 · {id}": "Model · {id}",
   "自动填入": "Auto-fill",
   "测试连通": "Test connectivity",
@@ -43,7 +43,7 @@ export const EN_SETTINGS: Record<string, string> = {
   "缓存读（$/M）": "Cache read ($/M)",
   "缓存写（$/M）": "Cache write ($/M)",
 
-  /* ---------- 模型与凭据：Provider 详情与请求选项 ---------- */
+  /* ---------- 模型设置：Provider 详情与请求选项 ---------- */
   "Provider 预设": "Provider preset",
   "Custom 自定义": "Custom",
   "标识": "ID",
@@ -60,7 +60,7 @@ export const EN_SETTINGS: Record<string, string> = {
   "移除 Header {index}": "Remove header {index}",
   "移除 Header": "Remove header",
 
-  /* ---------- 模型与凭据：凭据与连接测试 ---------- */
+  /* ---------- 模型设置：凭据与连接测试 ---------- */
   "未配置": "Not configured",
   "Pi 登录 + API Key": "Pi login + API Key",
   "输入新 Key 以替换": "Enter a new key to replace the current one",
@@ -81,7 +81,7 @@ export const EN_SETTINGS: Record<string, string> = {
   "不可达 · HTTP {status}（检查 Base URL 与 API Key）": "Unreachable · HTTP {status} (check the Base URL and API Key)",
   "连接失败": "Connection failed",
 
-  /* ---------- 模型与凭据：状态提示 ---------- */
+  /* ---------- 模型设置：状态提示 ---------- */
   "推理": "reasoning",
   "请先选择 Provider 或填写 Base URL": "Select a provider or fill in the Base URL first",
   "已拉取 {count} 个模型": "Fetched {count} models",

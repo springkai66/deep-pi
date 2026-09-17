@@ -97,7 +97,7 @@ DeepPi 的首个发布版本：在同一个 Windows 桌面应用中使用 Pi Cod
 
 不需要预先安装 Node、Pi 或 DSH——运行时由应用自己管理，不与电脑上已装的环境互相影响。
 
-1. **配置模型凭据**：打开「设置 → 模型与凭据」填入 Provider 的 API Key（密钥存入 Windows Credential Manager，不写入配置文件）。
+1. **配置模型凭据**：打开「设置 → 模型设置」填入 Provider 的 API Key（密钥存入 Windows Credential Manager，不写入配置文件）。
 2. **打开项目**：在左栏点「添加项目目录」选择代码目录。
 3. **新建任务**：点「新建任务」创建终端或对话任务；两种模式可随时互相切换且共享同一会话。
 

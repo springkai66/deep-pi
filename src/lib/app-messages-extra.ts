@@ -16,14 +16,14 @@ export const APP_MESSAGES_EXTRA: Record<string, import("./app-messages").AppMess
     en: "The prompt exceeds {max} characters. Shorten it and try again.",
   },
   "prompt_enhance.provider_unconfigured": {
-    "zh-CN": "还没有可用的模型，请先到「设置 → 模型与凭据」里配置",
-    "zh-TW": "還沒有可用的模型，請先到「設定 → 模型與憑證」裡設定",
-    en: "No model is available yet. Configure one under Settings → Models & Credentials.",
+    "zh-CN": "还没有可用的模型，请先到「设置 → 模型设置」里配置",
+    "zh-TW": "還沒有可用的模型，請先到「設定 → 模型設定」裡設定",
+    en: "No model is available yet. Configure one under Settings → Model settings.",
   },
   "prompt_enhance.base_url_missing": {
-    "zh-CN": "所选模型缺少 API 地址，请到「设置 → 模型与凭据」里补全",
-    "zh-TW": "所選模型缺少 API 位址，請到「設定 → 模型與憑證」裡補齊",
-    en: "The selected model has no API base URL. Fill it in under Settings → Models & Credentials.",
+    "zh-CN": "所选模型缺少 API 地址，请到「设置 → 模型设置」里补全",
+    "zh-TW": "所選模型缺少 API 位址，請到「設定 → 模型設定」裡補齊",
+    en: "The selected model has no API base URL. Fill it in under Settings → Model settings.",
   },
   "prompt_enhance.request_failed": {
     "zh-CN": "请求模型失败：{error}",

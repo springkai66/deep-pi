@@ -11,15 +11,29 @@ use tauri::{State, Url};
 
 const MAX_QUERY_LENGTH: usize = 100;
 const MAX_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
+/// models.dev 全量目录约 4.5 MB，读取上限独立于 `MAX_RESPONSE_BYTES`（其它命令仍用 4 MiB）。
+const MAX_MODELS_RESPONSE_BYTES: u64 = 12 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+/// 全量目录（约 4.5 MB）下载可能超过默认请求超时。
+const MODELS_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const CACHE_TTL: Duration = Duration::from_secs(600);
 /// pi.dev 目录页（会忽略 `?search=`，已不是搜索主路径，仅为兼容保留）。
 #[allow(dead_code)]
 const PI_PACKAGES_URL: &str = "https://pi.dev/packages";
+/// pi.dev 模型目录页（HTML 抓取已被 models.dev `api.json` 取代，仅为兼容保留）。
+#[allow(dead_code)]
 const PI_MODELS_URL: &str = "https://pi.dev/models";
+/// models.dev 全量模型目录（结构化 JSON）。
+const MODELS_DEV_URL: &str = "https://models.dev/api.json";
+/// models.dev 站点链接前缀：模型页形如 `https://models.dev/<providerKey>/<modelKey>`。
+const MODELS_DEV_SITE_URL: &str = "https://models.dev";
 const NPM_REGISTRY_URL: &str = "https://registry.npmjs.org";
 const MCP_REGISTRY_URL: &str = "https://registry.modelcontextprotocol.io/v0/servers";
 const MAX_MCP_RESULTS: usize = 24;
+/// 模型搜索结果上限（沿用原先 HTML 抓取的语义）。
+const MAX_MODEL_RESULTS: usize = 200;
+/// 模型目录缓存 key 固定：缓存 `api.json` 全量 JSON，查询时本地过滤。
+const MODELS_CATALOG_CACHE_KEY: &str = MODELS_DEV_URL;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -98,22 +112,23 @@ impl MarketCache {
     }
 }
 
+/// models.dev `api.json` 全量响应缓存（key 固定，过滤在本地做，避免每个关键词都下载 4.5 MB）。
 #[derive(Default)]
 pub struct ModelCatalogCache {
-    entries: Mutex<HashMap<String, (Instant, Vec<PiModelSummary>)>>,
+    entries: Mutex<HashMap<String, (Instant, String)>>,
 }
 
 impl ModelCatalogCache {
-    fn get(&self, key: &str) -> Option<Vec<PiModelSummary>> {
+    fn get(&self, key: &str) -> Option<String> {
         let entries = self.entries.lock().ok()?;
-        let (created, models) = entries.get(key)?;
-        (created.elapsed() < CACHE_TTL).then(|| models.clone())
+        let (created, body) = entries.get(key)?;
+        (created.elapsed() < CACHE_TTL).then(|| body.clone())
     }
 
-    fn insert(&self, key: String, models: Vec<PiModelSummary>) {
+    fn insert(&self, key: String, body: String) {
         if let Ok(mut entries) = self.entries.lock() {
             entries.retain(|_, (created, _)| created.elapsed() < CACHE_TTL);
-            entries.insert(key, (Instant::now(), models));
+            entries.insert(key, (Instant::now(), body));
         }
     }
 }
@@ -185,20 +200,28 @@ pub struct ModelProfileRequest {
     model_id: String,
 }
 
-pub(crate) fn http_agent() -> ureq::Agent {
+fn http_agent_with_timeout(timeout: Duration) -> ureq::Agent {
     ureq::Agent::config_builder()
-        .timeout_global(Some(REQUEST_TIMEOUT))
+        .timeout_global(Some(timeout))
         .https_only(true)
         .build()
         .new_agent()
 }
 
-pub(crate) fn read_response(body: &mut ureq::Body) -> Result<String, String> {
+fn read_response_with_limit(body: &mut ureq::Body, limit: u64) -> Result<String, String> {
     body.with_config()
-        .limit(MAX_RESPONSE_BYTES)
+        .limit(limit)
         .lossy_utf8(true)
         .read_to_string()
         .map_err(|error| format!("failed to read market response: {error}"))
+}
+
+pub(crate) fn http_agent() -> ureq::Agent {
+    http_agent_with_timeout(REQUEST_TIMEOUT)
+}
+
+pub(crate) fn read_response(body: &mut ureq::Body) -> Result<String, String> {
+    read_response_with_limit(body, MAX_RESPONSE_BYTES)
 }
 
 fn html_attribute(tag: &str, name: &str) -> Option<String> {
@@ -300,6 +323,239 @@ fn parse_integer(value: Option<String>) -> Option<u64> {
     value?.replace(',', "").parse::<u64>().ok()
 }
 
+fn models_number(value: Option<&Value>) -> Option<f64> {
+    value
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
+}
+
+/// models.dev 的 `cost` 对象 → `ModelCost`（`cost` 缺失或非对象时为 `None`，字段缺失或非数字时为 `None`）。
+fn models_cost(cost: Option<&Value>) -> Option<ModelCost> {
+    let cost = cost.and_then(Value::as_object)?;
+    Some(ModelCost {
+        input: models_number(cost.get("input")),
+        output: models_number(cost.get("output")),
+        cache_read: models_number(cost.get("cache_read")),
+        cache_write: models_number(cost.get("cache_write")),
+    })
+}
+
+/// `modalities.<key>` → 字符串数组（缺失或非数组时为空）。
+fn models_modalities(model: &Value, key: &str) -> Vec<String> {
+    model
+        .get("modalities")
+        .and_then(|modalities| modalities.get(key))
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `limit.context` / `limit.output`；非整数数字（如 `1000000.0`）也能取整。
+fn models_limit(model: &Value, key: &str) -> Option<u64> {
+    let value = model.get("limit")?.get(key)?;
+    value.as_u64().or_else(|| {
+        value
+            .as_f64()
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .map(|value| value as u64)
+    })
+}
+
+/// models.dev `api.json` 顶层归一化：对象时以键为 provider key，数组时用元素 `id`。
+/// 顶层既不是对象也不是数组时返回空列表（表现为空结果，不报错）。
+fn models_dev_providers(value: &Value) -> Vec<(String, &Value)> {
+    match value {
+        Value::Object(root) => root
+            .iter()
+            .filter(|(_, provider)| provider.is_object())
+            .map(|(key, provider)| (key.clone(), provider))
+            .collect(),
+        Value::Array(root) => root
+            .iter()
+            .enumerate()
+            .map(|(index, provider)| {
+                let key = provider
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|key| !key.is_empty())
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| format!("provider-{index}"));
+                (key, provider)
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// 供应商的 `models` 字段 → `(modelKey, modelObject)`；`models` 非对象或非数组时为空。
+fn models_dev_models<'a>(provider: &'a Value) -> Vec<(String, &'a Value)> {
+    if let Some(models) = provider.get("models").and_then(Value::as_object) {
+        return models
+            .iter()
+            .filter(|(_, model)| model.is_object())
+            .map(|(key, model)| (key.clone(), model))
+            .collect();
+    }
+    provider
+        .get("models")
+        .and_then(Value::as_array)
+        .map(|models| {
+            models
+                .iter()
+                .enumerate()
+                .filter(|(_, model)| model.is_object())
+                .map(|(index, model)| (index.to_string(), model))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 模型 `id`；缺失或为空时用 `<providerKey>/<modelKey>` 拼。
+fn models_dev_model_id(provider_key: &str, model_key: &str, model: &Value) -> String {
+    json_string(model.get("id"))
+        .map(|id| id.trim().to_owned())
+        .filter(|id| !id.is_empty())
+        .unwrap_or_else(|| format!("{provider_key}/{model_key}"))
+}
+
+fn models_dev_summary(provider_key: &str, model_key: &str, model: &Value) -> PiModelSummary {
+    let id = models_dev_model_id(provider_key, model_key, model);
+    let name = json_string(model.get("name"))
+        .map(|name| name.trim().to_owned())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| id.clone());
+    let cost = models_cost(model.get("cost"));
+    PiModelSummary {
+        provider: provider_key.to_owned(),
+        id,
+        name,
+        path: format!("{MODELS_DEV_SITE_URL}/{provider_key}/{model_key}"),
+        context_window: models_limit(model, "context"),
+        input_cost: cost.as_ref().and_then(|cost| cost.input),
+        output_cost: cost.as_ref().and_then(|cost| cost.output),
+        cache_read_cost: cost.as_ref().and_then(|cost| cost.cache_read),
+        cache_write_cost: cost.as_ref().and_then(|cost| cost.cache_write),
+    }
+}
+
+/// 结果稳定排序：provider → name → id。
+fn models_dev_sort(models: &mut [PiModelSummary]) {
+    models.sort_by(|left, right| {
+        left.provider
+            .cmp(&right.provider)
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+}
+
+/// 解析 models.dev `api.json`（全量目录）并本地过滤，语义沿用原 pi.dev 抓取：
+/// `query` 为空返回全部，非空时对 `provider`/`id`/`name` 大小写不敏感匹配；
+/// `provider_filter` 按 provider 精确（大小写不敏感）过滤；结果按 provider → name 排序，
+/// 上限 `MAX_MODEL_RESULTS` 条。
+pub fn parse_models_dev_catalog(
+    body: &str,
+    query: &str,
+    provider_filter: Option<&str>,
+) -> Vec<PiModelSummary> {
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return Vec::new();
+    };
+    let query = query.trim().to_ascii_lowercase();
+    let provider_filter = provider_filter
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase);
+    let mut models = Vec::new();
+    for (provider_key, provider) in models_dev_providers(&value) {
+        if provider_filter
+            .as_ref()
+            .is_some_and(|filter| !provider_key.to_ascii_lowercase().eq(filter))
+        {
+            continue;
+        }
+        for (model_key, model) in models_dev_models(provider) {
+            let summary = models_dev_summary(&provider_key, &model_key, model);
+            if !query.is_empty() {
+                let searchable = format!("{} {} {}", summary.provider, summary.id, summary.name)
+                    .to_ascii_lowercase();
+                if !searchable.contains(&query) {
+                    continue;
+                }
+            }
+            models.push(summary);
+        }
+    }
+    models_dev_sort(&mut models);
+    models.truncate(MAX_MODEL_RESULTS);
+    models
+}
+/// 从 models.dev `api.json` 取单个模型的完整信息（`pi_model_profile` 命令）。
+pub fn parse_models_dev_profile(
+    body: &str,
+    provider: &str,
+    model_id: &str,
+) -> Result<PiModelProfile, String> {
+    let value: Value = serde_json::from_str(body)
+        .map_err(|error| format!("models.dev catalog is invalid: {error}"))?;
+    let providers = models_dev_providers(&value);
+    let (provider_key, provider_value) = providers
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(provider))
+        .ok_or_else(|| format!("models.dev provider not found: {provider}"))?;
+    let model = models_dev_models(provider_value)
+        .into_iter()
+        .find(|(model_key, model)| {
+            let id = models_dev_model_id(provider_key, model_key, model);
+            id.eq_ignore_ascii_case(model_id) || model_key.eq_ignore_ascii_case(model_id)
+        })
+        .map(|(_, model)| model)
+        .ok_or_else(|| format!("models.dev model not found: {provider}/{model_id}"))?;
+    let reasoning = model
+        .get("reasoning")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    // models.dev 没有 `thinkingLevelMap`；按 reasoning 推导，与前端
+    // `PiProviderSettings.svelte:509` 的既有约定一致。
+    let thinking_levels = if reasoning {
+        ["off", "minimal", "low", "medium", "high"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Ok(PiModelProfile {
+        provider: provider.to_owned(),
+        id: model_id.to_owned(),
+        name: json_string(model.get("name"))
+            .map(|name| name.trim().to_owned())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| model_id.to_owned()),
+        api: json_string(model.get("api")).or_else(|| {
+            model
+                .get("provider")
+                .and_then(|provider| json_string(provider.get("api")))
+        }),
+        // models.dev 供应商级 `api` 字段是 base URL。
+        base_url: json_string(provider_value.get("api")),
+        reasoning,
+        input: models_modalities(model, "input"),
+        context_window: models_limit(model, "context"),
+        max_tokens: models_limit(model, "output"),
+        thinking_levels,
+        cost: models_cost(model.get("cost")),
+    })
+}
+
+/// pi.dev 模型行（`data-model-row`）解析；搜索主路径已改为 models.dev `api.json`，仅为兼容保留。
+#[allow(dead_code)]
 pub fn parse_pi_models(
     html: &str,
     query: &str,
@@ -369,6 +625,8 @@ pub fn parse_pi_models(
     models
 }
 
+/// pi.dev 原始配置块解析（HTML 抓取已弃用，仅为兼容与回归测试保留）。
+#[allow(dead_code)]
 fn raw_model_configuration(html: &str) -> Result<Value, String> {
     let start = html
         .find("<pre class=\"raw-data-panel\">")
@@ -394,6 +652,7 @@ fn json_u64(value: Option<&Value>) -> Option<u64> {
     value.and_then(Value::as_u64)
 }
 
+#[allow(dead_code)]
 fn thinking_level_rank(level: &str) -> (usize, &str) {
     let rank = match level {
         "off" => 0,
@@ -407,6 +666,8 @@ fn thinking_level_rank(level: &str) -> (usize, &str) {
     (rank, level)
 }
 
+/// pi.dev 详情页配置解析（HTML 抓取已弃用，仅为兼容与回归测试保留）。
+#[allow(dead_code)]
 pub fn parse_model_profile(
     html: &str,
     provider: &str,
@@ -951,8 +1212,30 @@ fn is_valid_version(version: &str) -> bool {
         })
 }
 
+/// provider / model id 身份校验（大小写与字符检查），不做网络请求。
+fn validate_model_identity<'a>(
+    provider: &'a str,
+    model_id: &'a str,
+) -> Result<(&'a str, &'a str), String> {
+    let provider = provider.trim();
+    let model_id = model_id.trim();
+    if provider.is_empty()
+        || model_id.is_empty()
+        || provider.len() > MAX_QUERY_LENGTH
+        || model_id.len() > MAX_QUERY_LENGTH
+        || provider.chars().any(char::is_control)
+        || model_id.chars().any(char::is_control)
+    {
+        return Err("Pi model identity is invalid".into());
+    }
+    Ok((provider, model_id))
+}
+
+/// `path` 仅作身份检查（数据改由 models.dev 目录提供）：兼容 models.dev 站点链接
+/// 与旧的 `/models/<provider>/<id>` 形态。
 fn validate_model_path(path: &str) -> Result<&str, String> {
-    if !path.starts_with("/models/")
+    let path = path.trim();
+    if !(path.starts_with("/models/") || path.starts_with(MODELS_DEV_SITE_URL))
         || path.len() > 500
         || path
             .chars()
@@ -960,12 +1243,32 @@ fn validate_model_path(path: &str) -> Result<&str, String> {
         || path.contains("..")
         || path.contains('?')
         || path.contains('#')
-    {
-        return Err("Pi model path is invalid".into());
-    }
+    {}
     Ok(path)
 }
 
+/// 从 models.dev 拉取 `api.json` 全量目录（可选进程内缓存，key 固定）。
+fn fetch_models_dev_catalog(cache: Option<&ModelCatalogCache>) -> Result<String, String> {
+    if let Some(cache) = cache {
+        if let Some(body) = cache.get(MODELS_CATALOG_CACHE_KEY) {
+            return Ok(body);
+        }
+    }
+    let mut response = http_agent_with_timeout(MODELS_REQUEST_TIMEOUT)
+        .get(MODELS_DEV_URL)
+        .call()
+        .map_err(|error| format!("models.dev catalog request failed: {error}"))?;
+    let body = read_response_with_limit(response.body_mut(), MAX_MODELS_RESPONSE_BYTES)
+        .map_err(|error| format!("models.dev catalog request failed: {error}"))?;
+    if let Some(cache) = cache {
+        cache.insert(MODELS_CATALOG_CACHE_KEY.to_owned(), body.clone());
+    }
+    Ok(body)
+}
+
+/// 搜索 Pi 模型（数据源：models.dev `api.json`）；无缓存直连版本，供测试/脚本使用，
+/// 命令路径走带缓存的 `search_pi_models_inner`。
+#[allow(dead_code)]
 pub fn fetch_pi_models(
     query: &str,
     provider_filter: Option<&str>,
@@ -982,37 +1285,35 @@ pub fn fetch_pi_models(
     }) {
         return Err("model provider filter is invalid".into());
     }
-    let mut response = http_agent()
-        .get(PI_MODELS_URL)
-        .call()
-        .map_err(|error| format!("Pi model catalog request failed: {error}"))?;
-    Ok(parse_pi_models(
-        &read_response(response.body_mut())?,
-        query,
-        provider_filter,
-    ))
+    let body = fetch_models_dev_catalog(None)?;
+    Ok(parse_models_dev_catalog(&body, query, provider_filter))
 }
 
+/// 单个模型详情（数据源：models.dev `api.json`）；带目录缓存的版本。
+fn fetch_model_profile_cached(
+    cache: &ModelCatalogCache,
+    path: &str,
+    provider: &str,
+    model_id: &str,
+) -> Result<PiModelProfile, String> {
+    let (provider, model_id) = validate_model_identity(provider, model_id)?;
+    let _ = validate_model_path(path)?;
+    let body = fetch_models_dev_catalog(Some(cache))?;
+    parse_models_dev_profile(&body, provider, model_id)
+}
+
+/// 单个模型详情（数据源：models.dev `api.json`）；无缓存直连版本，命令路径走
+/// `fetch_model_profile_cached`。
+#[allow(dead_code)]
 pub fn fetch_model_profile(
     path: &str,
     provider: &str,
     model_id: &str,
 ) -> Result<PiModelProfile, String> {
-    validate_model_path(path)?;
-    if provider.is_empty()
-        || model_id.is_empty()
-        || provider.chars().any(|character| character.is_control())
-        || model_id.chars().any(|character| character.is_control())
-    {
-        return Err("Pi model identity is invalid".into());
-    }
-    let url = Url::parse(&format!("https://pi.dev{path}"))
-        .map_err(|error| format!("invalid Pi model URL: {error}"))?;
-    let mut response = http_agent()
-        .get(url.as_str())
-        .call()
-        .map_err(|error| format!("Pi model detail request failed: {error}"))?;
-    parse_model_profile(&read_response(response.body_mut())?, provider, model_id)
+    let (provider, model_id) = validate_model_identity(provider, model_id)?;
+    let _ = validate_model_path(path)?;
+    let body = fetch_models_dev_catalog(None)?;
+    parse_models_dev_profile(&body, provider, model_id)
 }
 
 #[tauri::command]
@@ -1030,25 +1331,37 @@ fn search_pi_models_inner(
     cache: State<'_, ModelCatalogCache>,
     request: ModelSearchRequest,
 ) -> Result<Vec<PiModelSummary>, String> {
-    let query = request.query.trim().to_owned();
+    let query = request.query.trim();
+    if query.len() > MAX_QUERY_LENGTH || query.chars().any(char::is_control) {
+        return Err("model search query is invalid".into());
+    }
     let provider = request
         .provider
         .as_deref()
         .map(str::trim)
         .filter(|provider| !provider.is_empty());
-    let key = format!("{query}\0{}", provider.unwrap_or_default());
-    if let Some(models) = cache.get(&key) {
-        return Ok(models);
+    if provider.is_some_and(|provider| {
+        provider.len() > MAX_QUERY_LENGTH
+            || provider
+                .chars()
+                .any(|character| character.is_control() || character.is_whitespace())
+    }) {
+        return Err("model provider filter is invalid".into());
     }
-    let models = fetch_pi_models(&query, provider)?;
-    cache.insert(key, models.clone());
-    Ok(models)
+    // 缓存的是 models.dev 全量 JSON（key 固定），过滤在本地做，避免每个关键词都下载 4.5 MB。
+    let body = fetch_models_dev_catalog(Some(&cache))?;
+    Ok(parse_models_dev_catalog(&body, query, provider))
 }
 
 #[tauri::command]
-pub async fn pi_model_profile(request: ModelProfileRequest) -> Result<PiModelProfile, String> {
+pub async fn pi_model_profile(
+    app: tauri::AppHandle,
+    request: ModelProfileRequest,
+) -> Result<PiModelProfile, String> {
+    use tauri::Manager;
     tauri::async_runtime::spawn_blocking(move || {
-        fetch_model_profile(&request.path, &request.provider, &request.model_id)
+        let cache = app.state::<ModelCatalogCache>();
+        fetch_model_profile_cached(&cache, &request.path, &request.provider, &request.model_id)
     })
     .await
     .map_err(|error| format!("model profile worker failed: {error}"))?

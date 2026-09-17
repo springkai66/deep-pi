@@ -14,7 +14,7 @@ Windows 桌面宿主，把 Pi Coding Agent 和 DeepSeek Harness (DSH) 集成到�
 
 ## 首次使用
 
-1. **配置模型凭据**：打开「设置 → 模型与凭据」，填入 Provider 的 API Key（密钥保存在 Windows Credential Manager，不写入配置文件）。
+1. **配置模型凭据**：打开「设置 → 模型设置」，填入 Provider 的 API Key（密钥保存在 Windows Credential Manager，不写入配置文件）。
 2. **打开项目**：在左栏点「添加项目目录」选择代码目录。
 3. **新建任务**：点「新建 Pi 任务」创建 Terminal 或对话任务，即可与 Pi 协作。
 

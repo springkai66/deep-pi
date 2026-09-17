@@ -998,7 +998,7 @@
   {/if}
   {#if connected && !initializing && !conversation.closed && models.length === 0}
     <p class="model-hint" role="status">
-      <span>{t("未检测到可用模型：请在 设置 → 模型与凭据 中添加并保存模型，重启本任务后生效。")}</span>
+      <span>{t("未检测到可用模型：请在 设置 → 模型设置 中添加并保存模型，重启本任务后生效。")}</span>
       <span class="model-hint-actions">
         {#if onOpenModelSettings}<button type="button" onclick={onOpenModelSettings}>{t("打开模型设置")}</button>{/if}
         <button type="button" onclick={() => void refreshModels()}>{t("重试")}</button>
