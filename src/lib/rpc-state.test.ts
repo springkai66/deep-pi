@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyRpcEvent, emptyConversation, loadHistory, readableRpcError } from "./rpc-state";
+import { applyRpcEvent, assistantMessageEmpty, emptyConversation, loadHistory, messageRenderable, readableRpcError } from "./rpc-state";
 
 describe("RPC conversation reducer", () => {
   it("replaces cumulative messages instead of appending duplicate tokens", () => {
@@ -149,5 +149,43 @@ describe("failed prompt cleanup", () => {
     expect(state.messages).toHaveLength(1);
     expect(state.messages[0].content).toEqual([{ type: "text", text: "partial" }]);
     expect(state.error).toBe("boom");
+  });
+});
+
+describe("empty assistant turns", () => {
+  it("treats placeholder turns with no visible content as empty", () => {
+    expect(assistantMessageEmpty({ role: "assistant", content: [] })).toBe(true);
+    expect(assistantMessageEmpty({ role: "assistant", content: "" })).toBe(true);
+    expect(assistantMessageEmpty({ role: "assistant", content: null })).toBe(true);
+    expect(assistantMessageEmpty({ role: "assistant", content: [{ type: "text", text: "  " }] })).toBe(true);
+    expect(assistantMessageEmpty({ role: "assistant", content: [{ type: "thinking", thinking: "" }] })).toBe(true);
+    expect(assistantMessageEmpty({ role: "assistant", content: [{ type: "text", text: "hi" }] })).toBe(false);
+    expect(assistantMessageEmpty({ role: "assistant", content: [{ type: "image", source: "data:image/png;base64,x" }] })).toBe(false);
+    expect(assistantMessageEmpty({ role: "assistant", content: [{ type: "toolCall", name: "read" }] })).toBe(false);
+    expect(assistantMessageEmpty({ role: "user", content: "" })).toBe(false);
+  });
+
+  it("render filter keeps every non-assistant message and filled assistant turns", () => {
+    expect(messageRenderable({ role: "user", content: "" })).toBe(true);
+    expect(messageRenderable({ role: "toolResult", content: "" })).toBe(true);
+    expect(messageRenderable({ role: "assistant", content: [{ type: "text", text: "answer" }] })).toBe(true);
+    expect(messageRenderable({ role: "assistant", content: [] })).toBe(false);
+  });
+
+  it("hides empty assistant turns left in the session history by failed prompts", () => {
+    // 重试失败会在会话文件里留下多个空 assistant 占位；重连后按历史加载，
+    // 渲染层过滤把它们全部隐藏（错误文本由横幅展示，不依赖这些空轮次）。
+    const state = loadHistory(emptyConversation(), [
+      { role: "user", content: [{ type: "text", text: "hello" }], timestamp: 1 },
+      { role: "assistant", content: [], timestamp: 2 },
+      { role: "assistant", content: [{ type: "text", text: "  " }], timestamp: 3 },
+      { role: "user", content: [{ type: "text", text: "hello" }], timestamp: 4 },
+      { role: "assistant", content: null, timestamp: 5 },
+      { role: "assistant", content: [{ type: "text", text: "answer" }], timestamp: 6 },
+    ], 10);
+    const visible = state.messages.filter(messageRenderable);
+    expect(state.messages).toHaveLength(6);
+    expect(visible).toHaveLength(3);
+    expect(visible.map((message) => message.role)).toEqual(["user", "user", "assistant"]);
   });
 });

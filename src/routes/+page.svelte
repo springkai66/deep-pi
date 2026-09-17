@@ -56,15 +56,12 @@
   import { SNOOZE_DURATION_MS } from "$lib/runtime";
   import {
     DEFAULT_APP_SETTINGS,
-    cssAppFontFamily,
-    cssSessionFontFamily,
-    cssCodeFontFamily,
-    isLightColorMode,
     type AppSettings,
     type CloseBehavior,
   } from "$lib/settings";
-  import { resolveTheme, themeCssVariables } from "$lib/theme";
-  import { setLocale, t, tm } from "$lib/i18n.svelte";
+  import { applyAppearance } from "$lib/appearance";
+  import { t, tm } from "$lib/i18n.svelte";
+  import { BOARD_ACTION_EVENT, type BoardActionRequest } from "$lib/board-actions";
   import TaskBoard from "$lib/TaskBoard.svelte";
   import type { Task, TaskStatus } from "$lib/task";
   import {
@@ -404,29 +401,6 @@
       selectedProjectId !== null,
   );
 
-  function applyAppearance(next: AppSettings) {
-    if (typeof document === "undefined") return;
-    const root = document.documentElement;
-    const scheme = isLightColorMode(next.colorMode) ? "light" : "dark";
-    root.dataset.colorMode = next.colorMode;
-    root.dataset.colorScheme = scheme;
-    root.dataset.theme = next.theme;
-    setLocale(next.language);
-    // 同步 <html lang>：影响无障碍朗读、字体选择与 :lang() 选择器。
-    root.lang = next.language;
-    // 主题包 → 颜色令牌；字体在主题默认值之上叠加用户自定义（用户设置优先）。
-    const theme = resolveTheme(next.theme, next.customThemes ?? []);
-    for (const [name, value] of Object.entries(themeCssVariables(theme, scheme))) {
-      root.style.setProperty(name, value);
-    }
-    const appFont = cssAppFontFamily(next.appFontName, theme.typography?.appFont);
-    root.style.setProperty("--app-font", appFont);
-    root.style.setProperty("--text-font", appFont);
-    root.style.setProperty("--session-font", cssSessionFontFamily(next.sessionFontName, theme.typography?.sessionFont));
-    root.style.setProperty("--code-font", cssCodeFontFamily(next.codeFont, theme.typography?.codeFont));
-    root.style.setProperty("--app-font-size", `${next.appFontSize}px`);
-    root.style.setProperty("--session-font-size", `${next.sessionFontSize}px`);
-  }
 
   $effect(() => {
     applyAppearance(settings);
@@ -669,6 +643,9 @@
         dialogs.cancelScope(`rpc:${task.id}:${task.runId}`);
       }
     });
+    const boardActionListener = listen<BoardActionRequest>(BOARD_ACTION_EVENT, ({ payload }) => {
+      void handleBoardAction(payload);
+    });
     const runtimeProgressListener = listen<{ operationId: string; phase: string; percent: number | null }>(
       "runtime-progress",
       ({ payload }) => {
@@ -692,6 +669,7 @@
       void dshStatusListener.then((unlisten) => unlisten());
       void statusListener.then((unlisten) => unlisten());
       void rpcExitListener.then((unlisten) => unlisten());
+      void boardActionListener.then((unlisten) => unlisten());
       void runtimeProgressListener.then((unlisten) => unlisten());
       dialogs.dispose();
       void dshWebview?.close();
@@ -1067,6 +1045,64 @@
     }
   }
 
+  /// 任务看板浮窗：独立 OS 窗口，停靠在主窗口右侧（Rust 端负责定位与跟随）。
+  async function openBoardWindow() {
+    if (!canLeaveSettings()) return;
+    try {
+      await invoke("open_board_window");
+    } catch (cause) {
+      // 浮窗创建失败（如平台限制）时退回应用内看板，功能不缺失。
+      showError(t("任务看板窗口打开失败：{error}", { error: tm(String(cause)) }));
+      view = "workspace";
+      activeAgent = "pi";
+      boardView = true;
+    }
+  }
+
+  /// 看板浮窗没有终端窗格与模式切换器：卡片动作全部委托回主窗口执行。
+  async function handleBoardAction(request: BoardActionRequest) {
+    const task = request.taskId ? tasks.find((candidate) => candidate.id === request.taskId) : undefined;
+    try {
+      switch (request.action) {
+        case "open":
+          if (!task) return;
+          // 打开任务要在主窗口里进行：先把主窗口带回前台，并确保 Pi 工作区可见
+          //（可能停在 DSH 视图、应用内看板或设置页）。
+          if (await getCurrentWindow().isMinimized()) await getCurrentWindow().unminimize();
+          await getCurrentWindow().show();
+          await getCurrentWindow().setFocus();
+          view = "workspace";
+          activeAgent = "pi";
+          boardView = false;
+          openTask(task);
+          break;
+        case "stop":
+          if (task) await stopTask(task);
+          break;
+        case "restart":
+          if (task) await restartTask(task);
+          break;
+        case "archive":
+          if (task) await archiveTask(task);
+          break;
+        case "restore":
+          if (task) await restoreTask(task);
+          break;
+        case "delete":
+          if (task) await deleteTask(task);
+          break;
+        case "new-task":
+          view = "workspace";
+          activeAgent = "pi";
+          boardView = false;
+          void startTask(request.projectId ?? undefined);
+          break;
+      }
+    } catch (error) {
+      showError(error);
+    }
+  }
+
   function markExited(task: Task, exitCode: number | null, error: string | null) {
     if (task.status !== "cancelled") {
       task.status = error || exitCode !== 0 ? "failed" : "completed";
@@ -1256,9 +1292,9 @@
         <button type="button" aria-label={t("切换 Git 变更栏")} title={showGit ? t("隐藏 Git 变更栏") : t("显示 Git 变更栏")}
           aria-pressed={showGit} onclick={() => { if (!canLeaveSettings()) return; gitVisible = !gitVisible; }}><GitBranch size={16} /></button>
       {/if}
-      <button type="button" aria-label={t("任务看板")} aria-pressed={boardView && view === "workspace"}
+      <button type="button" aria-label={t("任务看板")}
         title={t("任务看板：总览所有任务状态")}
-        onclick={() => { if (!canLeaveSettings()) return; view = "workspace"; activeAgent = "pi"; boardView = !boardView; }}><Kanban size={16} /></button>
+        onclick={() => void openBoardWindow()}><Kanban size={16} /></button>
     </div>
   </header>
   <aside class="project-sidebar" class:panel-hidden={!showSidebar} aria-label={t("项目侧栏")}>

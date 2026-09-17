@@ -9,6 +9,8 @@ export const EN_SHELL: Record<string, string> = {
   "DSH 工作区": "DSH workspace",
   "任务看板": "Task board",
   "任务看板：总览所有任务状态": "Task board: overview of all task statuses",
+  "关闭任务看板": "Close task board",
+  "任务看板窗口打开失败：{error}": "Failed to open the task board window: {error}",
   "设置": "Settings",
   "正在加载工作区…": "Loading workspace…",
   "重新加载": "Reload",

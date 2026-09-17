@@ -112,10 +112,12 @@
         role="presentation"
         oncontextmenu={(event) => showContextMenu(event, task)}
       >
-        {#if activeStatuses.includes(task.status)}
-          <RefreshCw class="session-status running" size={13} aria-hidden="true" />
+        {#if task.status === "running"}
+          <!-- 只有真正在执行的会话转圈；waiting（响应已结束/已停止，等待输入）用黄点，
+               completed 绿点、failed 红点、cancelled 灰点，避免停止后的标签一直旋转。 -->
+          <RefreshCw class="session-status running" size={10} aria-hidden="true" />
         {:else}
-          <span class:failed={task.status === "failed"} class:cancelled={task.status === "cancelled"} class="session-status" aria-hidden="true"></span>
+          <span class:failed={task.status === "failed"} class:waiting={task.status === "waiting"} class:cancelled={task.status === "cancelled"} class="session-status" aria-hidden="true"></span>
         {/if}
         <button
           type="button"

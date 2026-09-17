@@ -280,7 +280,7 @@
               {#each activeTasks as task (task.id)}
                 <div class="task-row" role="presentation" oncontextmenu={(event) => showSessionMenu(event, task)}>
                   {#if task.status === "running"}
-                    <RefreshCw class="session-status running" size={13} aria-hidden="true" />
+                    <RefreshCw class="session-status running" size={10} aria-hidden="true" />
                   {:else}
                     <span class:failed={task.status === "failed"} class:waiting={task.status === "waiting"} class:cancelled={task.status === "cancelled"} class="session-status" aria-hidden="true"></span>
                   {/if}
@@ -297,7 +297,7 @@
               {#each completedTasks as task (task.id)}
                 <div class="task-row" role="presentation" oncontextmenu={(event) => showSessionMenu(event, task)}>
                   {#if task.status === "running"}
-                    <RefreshCw class="session-status running" size={13} aria-hidden="true" />
+                    <RefreshCw class="session-status running" size={10} aria-hidden="true" />
                   {:else}
                     <span class:failed={task.status === "failed"} class:waiting={task.status === "waiting"} class:cancelled={task.status === "cancelled"} class="session-status" aria-hidden="true"></span>
                   {/if}
@@ -319,7 +319,7 @@
     {#each archivedTasks as task (task.id)}
       <div class="task-row" role="presentation" oncontextmenu={(event) => showSessionMenu(event, task)}>
         {#if task.status === "running"}
-          <RefreshCw class="session-status running" size={13} aria-hidden="true" />
+          <RefreshCw class="session-status running" size={10} aria-hidden="true" />
         {:else}
           <span class:failed={task.status === "failed"} class:waiting={task.status === "waiting"} class:cancelled={task.status === "cancelled"} class="session-status" aria-hidden="true"></span>
         {/if}

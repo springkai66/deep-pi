@@ -604,8 +604,8 @@ aside.project-sidebar, aside.file-panel, aside.git-sidebar { position: relative;
 }
 
 .session-status.running {
-  width: 13px;
-  height: 13px;
+  width: 10px;
+  height: 10px;
   color: #71c99a;
   animation: session-spin 0.8s linear infinite;
 }

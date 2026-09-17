@@ -128,9 +128,10 @@ export function readableRpcError(raw: string): string {
 }
 
 /** assistant 轮次是否没有任何可见内容（纯 text/thinking 且全空白）。 */
-function assistantMessageEmpty(message: RpcMessage): boolean {
+export function assistantMessageEmpty(message: RpcMessage): boolean {
   if (message.role !== "assistant") return false;
   if (typeof message.content === "string") return message.content.trim().length === 0;
+  if (message.content == null) return true;
   if (!Array.isArray(message.content)) return false;
   return message.content.every((value) => {
     const part = record(value);
@@ -139,6 +140,14 @@ function assistantMessageEmpty(message: RpcMessage): boolean {
     // image / toolCall / 未知片段都视为有内容，避免误删真实输出。
     return false;
   });
+}
+
+/**
+ * 渲染层判断：没有任何可见内容的 assistant 占位轮次（失败请求在会话历史里的残留）不渲染。
+ * 错误文本已由会话横幅统一展示，空轮次只会留下「Pi」标签和一对没有意义的复制按钮。
+ */
+export function messageRenderable(message: RpcMessage): boolean {
+  return message.role !== "assistant" || !assistantMessageEmpty(message);
 }
 
 /** 从尾部移除连续的空白 assistant 轮次（失败请求的占位残留）。 */
