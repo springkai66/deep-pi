@@ -297,26 +297,26 @@
 
   /** 已加载的全量目录按关键词 + 分类本地过滤，再按当前排序方式重排；输入时不打后端。 */
   /**
-   * 已加载的全量目录按关键词 + 分类本地过滤，再按当前排序方式重排；输入时不打后端。
+   * 三个市场的关键词过滤：**按关键字的语言选择匹配目标**。
    *
-   * 关键词会同时匹配站点原文与**本地化后的展示名**：界面显示的是中文分类
-   * （如「数据库与数据」），而站点数据是英文（`Databases & Data`），
-   * 只匹配原文会让中文关键字一条都搜不到。
+   * - 含中文的关键字 → 只匹配中文（本地化后的分类/传输/平台/难度）
+   * - 纯英文的关键字 → 只匹配站点英文原文（名称/slug/描述/作者/分类）
+   *
+   * 这样中文界面下「数据库」命中中文分类名，英文界面下「database」命中英文原文，
+   * 两种语言各自匹配各自的展示文案，不会出现跨语言误命中。
    */
   const filteredMcpEntries = $derived(
     sortMcpEntries(
       mcpEntries.filter(
         (entry) =>
           (mcpCategory === null || entry.category === mcpCategory) &&
-          matchesKeyword(
+          matchesMarketKeyword(
             mcpQuery,
-            entry.name,
-            entry.slug,
-            entry.description,
-            entry.author,
-            entry.category,
-            agenticCategoryLabel(entry.category, getLocale()),
-            (entry.transport ?? []).map((value) => agenticTransportLabel(value, getLocale())).join(" "),
+            [entry.name, entry.slug, entry.description, entry.author, entry.category],
+            [
+              agenticCategoryLabel(entry.category, getLocale()),
+              (entry.transport ?? []).map((value) => agenticTransportLabel(value, getLocale())).join(" "),
+            ],
           ),
       ),
       mcpSort,
@@ -327,15 +327,13 @@
       skillEntries.filter(
         (entry) =>
           (skillCategory === null || entry.category === skillCategory) &&
-          matchesKeyword(
+          matchesMarketKeyword(
             skillQuery,
-            entry.name,
-            entry.slug,
-            entry.description,
-            entry.author,
-            entry.category,
-            agenticCategoryLabel(entry.category, getLocale()),
-            (entry.platforms ?? []).map((value) => agenticPlatformLabel(value, getLocale())).join(" "),
+            [entry.name, entry.slug, entry.description, entry.author, entry.category],
+            [
+              agenticCategoryLabel(entry.category, getLocale()),
+              (entry.platforms ?? []).map((value) => agenticPlatformLabel(value, getLocale())).join(" "),
+            ],
           ),
       ),
       skillSort,
@@ -345,14 +343,10 @@
   /** 工作流目录同样按关键词本地过滤；难度等展示名也纳入匹配范围。 */
   const filteredWorkflowEntries = $derived(
     workflowEntries.filter((entry) =>
-      matchesKeyword(
+      matchesMarketKeyword(
         workflowQuery,
-        entry.name,
-        entry.slug,
-        entry.description,
-        entry.category,
-        agenticCategoryLabel(entry.category, getLocale()),
-        agenticLevelLabel(entry.level, getLocale()),
+        [entry.name, entry.slug, entry.description, entry.category],
+        [agenticCategoryLabel(entry.category, getLocale()), agenticLevelLabel(entry.level, getLocale())],
       ),
     ),
   );
@@ -540,11 +534,25 @@
   /** 站点根地址：详情里缺少 sourceUrl/websiteUrl 时用它兜底，不引入额外依赖。 */
   const AGENTIC_SKILLS_SITE = "https://agenticskills.io";
 
-  /** 关键词本地过滤：命中 名称 / slug / 描述 / 作者（大小写不敏感），空关键词不过滤。 */
-  function matchesKeyword(keyword: string, ...values: (string | null | undefined)[]): boolean {
+  /** 中文字符（含扩展 A 与兼容区）：用来判断搜索关键字该匹配中文还是英文文案。 */
+  const CJK_PATTERN = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/;
+
+  /**
+   * 按关键字语言选择匹配目标（中文匹配中文、英文匹配英文）。
+   *
+   * `english` 是站点原文（名称/slug/描述/作者/分类原文），`localized` 是本地化后的
+   * 展示文案（分类/传输/平台/难度的当前语言文本）。关键字含中文时只比中文，否则只比
+   * 英文——避免中文界面下输入英文、或英文界面下输入中文时出现跨语言误命中。
+   */
+  function matchesMarketKeyword(
+    keyword: string,
+    english: (string | null | undefined)[],
+    localized: (string | null | undefined)[],
+  ): boolean {
     const needle = keyword.trim().toLowerCase();
     if (!needle) return true;
-    return values.some((value) => (value ?? "").toLowerCase().includes(needle));
+    const targets = CJK_PATTERN.test(needle) ? localized : english;
+    return targets.some((value) => (value ?? "").toLowerCase().includes(needle));
   }
 
   /** 分类筛选选项：当前已加载条目里出现过的分类，按条目数从多到少排序，同数量按名称排序。 */

@@ -13,6 +13,8 @@ const MAX_QUERY_LENGTH: usize = 100;
 const MAX_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const CACHE_TTL: Duration = Duration::from_secs(600);
+/// pi.dev 目录页（会忽略 `?search=`，已不是搜索主路径，仅为兼容保留）。
+#[allow(dead_code)]
 const PI_PACKAGES_URL: &str = "https://pi.dev/packages";
 const PI_MODELS_URL: &str = "https://pi.dev/models";
 const NPM_REGISTRY_URL: &str = "https://registry.npmjs.org";
@@ -483,6 +485,10 @@ pub fn parse_model_profile(
     })
 }
 
+/// 解析 pi.dev 的 `data-package-card` 卡片。注：pi.dev 会忽略 `?search=` 参数，
+/// 搜索主路径已改为 npm registry 搜索接口（见 `fetch_npm_pi_packages`），
+/// 此函数与该 HTML 解析仅作兼容保留。
+#[allow(dead_code)]
 pub fn parse_pi_packages(html: &str) -> Vec<PiPackage> {
     let mut packages = Vec::new();
     let mut cursor = 0;
@@ -566,21 +572,233 @@ pub fn validate_package_name(name: &str) -> Result<&str, String> {
     Ok(name)
 }
 
-pub fn fetch_pi_packages(query: &str) -> Result<Vec<PiPackage>, String> {
+/// Pi 生态包普遍带 `pi-package` 等关键词；搜索为空时用它覆盖整个生态。
+const PI_PACKAGE_SEARCH_TERM: &str = "pi-package";
+const NPM_SEARCH_SIZE: usize = 25;
+/// 命中任一关键词即视为 Pi 相关包。
+const PI_PACKAGE_KEYWORDS: [&str; 6] = [
+    "pi-package",
+    "pi-extension",
+    "pi-skill",
+    "pi-model",
+    "pi-provider",
+    "pi-theme",
+];
+
+/// npm 搜索结果的 `package.name` 是否像 Pi 包（`pi`、`pi-*`、`@scope/pi-*`）。
+fn is_pi_package_name(name: &str) -> bool {
+    if name == "pi" {
+        return true;
+    }
+    if let Some(rest) = name.strip_prefix('@') {
+        return rest
+            .split_once('/')
+            .is_some_and(|(_, package)| package == "pi" || package.starts_with("pi-"));
+    }
+    name.starts_with("pi-")
+}
+
+/// 从 npm 关键词推断 Pi 目录类型；保持小写，与 `filter_packages_by_types` 约定一致。
+fn package_types_from_keywords(keywords: &[String]) -> Vec<String> {
+    let mut types: Vec<String> = Vec::new();
+    for keyword in keywords {
+        let keyword = keyword.trim().to_ascii_lowercase();
+        let inferred: &[&str] = match keyword.as_str() {
+            "pi-extension" | "pi" => &["extension"],
+            "pi-skill" | "skill" => &["skill"],
+            "pi-model" | "model" => &["model"],
+            "pi-provider" => &["provider"],
+            "pi-theme" => &["theme"],
+            _ => continue,
+        };
+        for kind in inferred {
+            if !types.iter().any(|existing| existing == kind) {
+                types.push((*kind).to_owned());
+            }
+        }
+    }
+    types
+}
+
+fn package_is_pi_related(name: &str, keywords: &[String]) -> bool {
+    keywords.iter().any(|keyword| {
+        let keyword = keyword.trim().to_ascii_lowercase();
+        PI_PACKAGE_KEYWORDS.contains(&keyword.as_str())
+    }) || is_pi_package_name(name)
+}
+
+/// `2026-06-12T10:27:21.886Z` → Unix 秒；非法输入返回 `None`。
+fn parse_rfc3339_seconds(value: &str) -> Option<i64> {
+    let value = value.trim();
+    let (date, time) = value.split_once(['T', ' '])?;
+    let mut date_parts = date.split('-');
+    let year: i64 = date_parts.next()?.parse().ok()?;
+    let month: i64 = date_parts.next()?.parse().ok()?;
+    let day: i64 = date_parts.next()?.parse().ok()?;
+    if date_parts.next().is_some()
+        || !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || year <= 0
+    {
+        return None;
+    }
+    let (clock, offset) = split_timezone_seconds(time)?;
+    let mut clock_parts = clock.split(':');
+    let hour: i64 = clock_parts.next()?.parse().ok()?;
+    let minute: i64 = clock_parts.next()?.parse().ok()?;
+    let second: i64 = clock_parts
+        .next()
+        .unwrap_or("0")
+        .split(['.', ','])
+        .next()
+        .unwrap_or_default()
+        .parse()
+        .ok()?;
+    if !(0..=23).contains(&hour) || !(0..=59).contains(&minute) || !(0..=60).contains(&second) {
+        return None;
+    }
+    let days = days_from_civil(year, month, day)?;
+    Some(days * 86_400 + hour * 3_600 + minute * 60 + second - offset)
+}
+
+/// 拆出时钟部分与时区 UTC 偏移秒数（`Z` / `+08:00` / `-0530`）。
+fn split_timezone_seconds(time: &str) -> Option<(&str, i64)> {
+    if let Some(clock) = time.strip_suffix(['Z', 'z']) {
+        return Some((clock, 0));
+    }
+    let index = time.find(['+', '-'])?;
+    let (clock, zone) = time.split_at(index);
+    let (sign, digits) = zone.split_at(1);
+    let digits = digits.trim();
+    let (hours, minutes) = match digits.split_once(':') {
+        Some((hours, minutes)) => (hours.parse::<i64>().ok()?, minutes.parse::<i64>().ok()?),
+        None => match digits.len() {
+            2 => (digits.parse::<i64>().ok()?, 0),
+            4 => (
+                digits[..2].parse::<i64>().ok()?,
+                digits[2..].parse::<i64>().ok()?,
+            ),
+            _ => return None,
+        },
+    };
+    let sign = if sign == "-" { -1 } else { 1 };
+    if !(0..=23).contains(&hours) || !(0..=59).contains(&minutes) {
+        return None;
+    }
+    Some((clock, sign * (hours * 3_600 + minutes * 60)))
+}
+
+/// 公历日期 → 1970-01-01 起的天数（Howard Hinnant 的 days_from_civil）。
+fn days_from_civil(year: i64, month: i64, day: i64) -> Option<i64> {
+    if !(1..=9999).contains(&year) {
+        return None;
+    }
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let year_of_era = year - era * 400;
+    let shifted_month = month + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * shifted_month + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    Some(era * 146_097 + day_of_era - 719_468)
+}
+
+fn npm_search_downloads(object: &Value) -> u64 {
+    object
+        .get("downloads")
+        .and_then(|downloads| {
+            json_u64(downloads.get("monthly")).or_else(|| json_u64(downloads.get("weekly")))
+        })
+        .unwrap_or_default()
+}
+
+fn npm_search_path(package: &Value, name: &str) -> String {
+    registry_string(package.get("links").unwrap_or(&Value::Null), "npm")
+        .unwrap_or_else(|| format!("https://www.npmjs.com/package/{name}"))
+}
+
+/// 解析 npm registry 搜索响应（`/-/v1/search`），并优先保留 Pi 相关包。
+/// 过滤后为空时回退到未过滤的原始结果，避免关键词偏门时出现"搜不到"。
+pub fn parse_npm_package_search(body: &str) -> Result<Vec<PiPackage>, String> {
+    let value: Value = serde_json::from_str(body)
+        .map_err(|error| format!("npm package search response is invalid: {error}"))?;
+    let objects = value
+        .get("objects")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut all = Vec::new();
+    for object in &objects {
+        let Some(package) = object.get("package") else {
+            continue;
+        };
+        let Some(name) = registry_string(package, "name") else {
+            continue;
+        };
+        if validate_package_name(&name).is_err() {
+            continue;
+        }
+        let keywords: Vec<String> = package
+            .get("keywords")
+            .and_then(Value::as_array)
+            .map(|keywords| {
+                keywords
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let description = registry_string(package, "description").unwrap_or_else(|| name.clone());
+        let downloads = npm_search_downloads(object);
+        let published_at = registry_string(package, "date")
+            .and_then(|date| parse_rfc3339_seconds(&date))
+            .unwrap_or_default();
+        let path = npm_search_path(package, &name);
+        let types = package_types_from_keywords(&keywords);
+        all.push((
+            package_is_pi_related(&name, &keywords),
+            PiPackage {
+                name,
+                description,
+                types,
+                downloads,
+                published_at,
+                path,
+            },
+        ));
+    }
+    let relevant: Vec<PiPackage> = all
+        .iter()
+        .filter(|(related, _)| *related)
+        .map(|(_, package)| package.clone())
+        .collect();
+    if relevant.is_empty() {
+        return Ok(all.into_iter().map(|(_, package)| package).collect());
+    }
+    Ok(relevant)
+}
+
+/// 通过 npm registry 搜索接口检索 Pi 包；query 为空时用 `pi-package` 覆盖整个生态。
+pub fn fetch_npm_pi_packages(query: &str) -> Result<Vec<PiPackage>, String> {
     let query = query.trim();
     if query.len() > MAX_QUERY_LENGTH || query.chars().any(char::is_control) {
         return Err("package search query is invalid".into());
     }
-    let mut url =
-        Url::parse(PI_PACKAGES_URL).map_err(|error| format!("invalid catalog URL: {error}"))?;
-    if !query.is_empty() {
-        url.query_pairs_mut().append_pair("search", query);
-    }
+    let text = if query.is_empty() {
+        PI_PACKAGE_SEARCH_TERM
+    } else {
+        query
+    };
+    let mut url = Url::parse(&format!("{NPM_REGISTRY_URL}/-/v1/search"))
+        .map_err(|error| format!("invalid npm search URL: {error}"))?;
+    url.query_pairs_mut()
+        .append_pair("text", text)
+        .append_pair("size", &NPM_SEARCH_SIZE.to_string());
     let mut response = http_agent()
         .get(url.as_str())
         .call()
         .map_err(|error| format!("Pi package catalog request failed: {error}"))?;
-    Ok(parse_pi_packages(&read_response(response.body_mut())?))
+    parse_npm_package_search(&read_response(response.body_mut())?)
 }
 
 fn registry_string(object: &Value, key: &str) -> Option<String> {
@@ -880,7 +1098,7 @@ fn search_pi_packages_inner(
     if let Some(packages) = cache.get(&key) {
         return Ok(packages);
     }
-    let packages = filter_packages_by_types(fetch_pi_packages(&query)?, &request.types);
+    let packages = filter_packages_by_types(fetch_npm_pi_packages(&query)?, &request.types);
     cache.insert(key, packages.clone());
     Ok(packages)
 }
@@ -897,8 +1115,8 @@ pub async fn pi_package_metadata(
 #[cfg(test)]
 mod tests {
     use super::{
-        filter_packages_by_types, parse_mcp_registry, parse_model_profile, parse_pi_models,
-        parse_pi_packages, validate_package_name,
+        filter_packages_by_types, parse_mcp_registry, parse_model_profile,
+        parse_npm_package_search, parse_pi_models, parse_pi_packages, validate_package_name,
     };
     #[test]
     fn filters_packages_by_type_case_insensitively() {
@@ -1040,5 +1258,179 @@ mod tests {
         assert!(validate_package_name("@scope/pi-tools").is_ok());
         assert!(validate_package_name("pi-tools && whoami").is_err());
         assert!(validate_package_name("https://example.com").is_err());
+    }
+
+    const NPM_SEARCH_FIXTURE: &str = r#"{
+      "total": 20602,
+      "objects": [
+        {
+          "package": {
+            "name": "pi-advisor",
+            "version": "0.3.0",
+            "description": "Pi extension package that adds a Claude-style advisor tool",
+            "keywords": ["pi-package", "pi-extension", "advisor", "coding-agent"],
+            "date": "2026-06-12T10:27:21.886Z",
+            "publisher": {"username": "linioi"},
+            "links": {
+              "npm": "https://www.npmjs.com/package/pi-advisor",
+              "repository": "https://github.com/linioi/pi-advisor"
+            }
+          },
+          "downloads": {"monthly": 334, "weekly": 62},
+          "score": {"final": 0.9},
+          "searchScore": 1.2
+        },
+        {
+          "package": {
+            "name": "@hk_net/pi-advisor",
+            "version": "1.0.0",
+            "description": "Scoped Pi advisor",
+            "keywords": ["pi-package", "pi", "extension", "advisor"],
+            "date": "2026-08-29T15:02:19.998Z",
+            "links": {"npm": "https://www.npmjs.com/package/@hk_net/pi-advisor"}
+          },
+          "downloads": {"monthly": 960, "weekly": 39}
+        },
+        {
+          "package": {
+            "name": "@scope/pi-tools",
+            "description": "Skill bundle",
+            "keywords": ["pi-skill"],
+            "date": "2026-01-05T00:00:00.000Z",
+            "links": {}
+          },
+          "downloads": {"weekly": 42}
+        },
+        {
+          "package": {
+            "name": "pi-plain",
+            "description": "Name-only match",
+            "keywords": [],
+            "date": "2030-01-01T00:00:00.000Z"
+          }
+        },
+        {
+          "package": {
+            "name": "express",
+            "description": "Fast web framework",
+            "keywords": ["express", "http", "framework"],
+            "date": "2026-01-05T00:00:00.000Z",
+            "links": {"npm": "https://www.npmjs.com/package/express"}
+          },
+          "downloads": {"monthly": 50000000}
+        }
+      ]
+    }"#;
+
+    #[test]
+    fn parses_npm_search_results_and_drops_unrelated_packages() {
+        let packages =
+            parse_npm_package_search(NPM_SEARCH_FIXTURE).expect("npm fixture should parse");
+
+        let names: Vec<&str> = packages
+            .iter()
+            .map(|package| package.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "pi-advisor",
+                "@hk_net/pi-advisor",
+                "@scope/pi-tools",
+                "pi-plain"
+            ]
+        );
+
+        let advisor = &packages[0];
+        assert_eq!(
+            advisor.description,
+            "Pi extension package that adds a Claude-style advisor tool"
+        );
+        assert_eq!(advisor.types, vec!["extension"]);
+        assert_eq!(advisor.downloads, 334);
+        assert_eq!(advisor.published_at, 1_781_260_041);
+        assert_eq!(advisor.path, "https://www.npmjs.com/package/pi-advisor");
+
+        assert_eq!(packages[1].types, vec!["extension"]);
+        assert_eq!(packages[1].downloads, 960);
+        assert_eq!(packages[1].published_at, 1_788_015_739);
+
+        assert_eq!(packages[2].types, vec!["skill"]);
+        assert_eq!(packages[2].downloads, 42);
+        assert_eq!(
+            packages[2].path,
+            "https://www.npmjs.com/package/@scope/pi-tools"
+        );
+
+        assert!(packages[3].types.is_empty());
+        assert_eq!(packages[3].downloads, 0);
+    }
+
+    #[test]
+    fn npm_search_defaults_for_missing_or_invalid_fields() {
+        let body = r#"{
+          "objects": [
+            {
+              "package": {
+                "name": "pi-mystery",
+                "keywords": [7, "unknown"],
+                "date": "not-a-date",
+                "links": null
+              }
+            }
+          ]
+        }"#;
+
+        let packages = parse_npm_package_search(body).expect("payload should parse");
+
+        assert_eq!(packages.len(), 1);
+        assert!(packages[0].types.is_empty());
+        assert_eq!(packages[0].downloads, 0);
+        assert_eq!(packages[0].published_at, 0);
+        assert_eq!(packages[0].path, "https://www.npmjs.com/package/pi-mystery");
+        assert!(parse_npm_package_search("not json").is_err());
+        assert!(parse_npm_package_search(r#"{"total": 1}"#)
+            .expect("missing objects should parse")
+            .is_empty());
+    }
+
+    #[test]
+    fn npm_search_falls_back_to_unfiltered_results() {
+        let body = r#"{
+          "objects": [
+            {"package": {"name": "express", "keywords": ["http"]}},
+            {"package": {"name": "loadshed", "keywords": ["reload"]}}
+          ]
+        }"#;
+
+        let packages = parse_npm_package_search(body).expect("payload should parse");
+
+        assert_eq!(packages.len(), 2);
+        assert_eq!(packages[0].name, "express");
+        assert_eq!(packages[1].name, "loadshed");
+    }
+
+    #[test]
+    #[ignore = "requires network access to the npm registry"]
+    fn fetches_live_npm_search_for_pi_advisor() {
+        let packages =
+            super::fetch_npm_pi_packages("pi-advisor").expect("npm search should be reachable");
+        for package in packages.iter().take(5) {
+            println!("npm search hit: {} ({})", package.name, package.path);
+        }
+        assert!(
+            packages.iter().any(|package| package.name == "pi-advisor"),
+            "pi-advisor should survive filtering: {packages:?}"
+        );
+        for package in &packages {
+            assert!(
+                !package.types.is_empty()
+                    || package.name == "pi"
+                    || package.name.starts_with("pi-")
+                    || package.name.contains("/pi-"),
+                "unrelated package slipped through: {}",
+                package.name
+            );
+        }
     }
 }
