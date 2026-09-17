@@ -240,6 +240,16 @@ jobs:
           path: src-tauri/target/release/bundle/
           if-no-files-found: error
 
+      - name: Refuse to overwrite an existing tagged release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view "${{ github.ref_name }}" --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            throw "Release ${{ github.ref_name }} already exists. Versioned releases are immutable: delete the old release deliberately, then re-tag."
+          }
       - name: Publish tagged release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2

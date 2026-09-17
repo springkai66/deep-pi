@@ -3,8 +3,9 @@
   import { ArrowDown, ArrowUp, Bot, ChevronDown, History, RefreshCw, Sparkles, Square, Terminal, UserRound } from "@lucide/svelte";
   import { onMount, tick, untrack } from "svelte";
   import type { DialogRequest, DialogValue } from "./dialog";
-  import { applyRpcEvent, contentText, emptyConversation, loadHistory, readableRpcError, record, type RpcEvent } from "./rpc-state";
+  import { applyRpcEvent, contentText, emptyConversation, loadHistory, messageRenderable, readableRpcError, record, type RpcEvent } from "./rpc-state";
   import { onModelsChanged } from "./model-config-sync";
+  import { findSavedModel, parseModelKey, shouldApplySavedChoice, validSavedThinkingLevel, type SavedModelChoice } from "./model-memory";
   import { captureTranscriptAnchor, restoreTranscriptAnchor, messageWindowStart, transcriptPort } from "./transcript-scroll";
   import MessageDisclosure from "./MessageDisclosure.svelte";
   import { messageSource } from "./message-parts";
@@ -122,6 +123,13 @@
   let reloadRequested = false;
   const messageStart = $derived(messageWindowStart(conversation.messages.length, historyLimit, pinnedMessageStart));
   const visibleMessages = $derived(conversation.messages.slice(messageStart));
+  /// 空白 assistant 占位轮次（失败请求在会话历史里的残留）不渲染：错误已由横幅展示，
+  /// 空轮次只剩「Pi」标签和一对复制按钮；带上原始下标，data-message-index 保持正确。
+  const visibleEntries = $derived(
+    visibleMessages
+      .map((message, offset) => ({ message, index: messageStart + offset }))
+      .filter((entry) => messageRenderable(entry.message)),
+  );
   const toolResults = $derived(new Set(conversation.messages.map((message) => message.toolCallId).filter(Boolean)));
   const liveTools = $derived(Object.values(conversation.tools).filter((tool) => !toolResults.has(tool.id)));
 
@@ -545,11 +553,7 @@
         thinkingLevel = typeof state.thinkingLevel === "string" ? state.thinkingLevel : "";
         onActivity(next.busy);
         refreshStats();
-        void call<{ levels: unknown[] }>({ type: "get_available_thinking_levels" }).then((result) => {
-          if (!alive) return;
-          thinkingLevels = result.levels.map((level) => String(level)).filter(Boolean);
-        }).catch(() => {});
-        void refreshModels(() => alive);
+        void applySavedModelChoice(history.messages.length, next.busy, () => alive);
       } catch (cause) {
         if (alive) error = tm(String(cause));
       } finally {
@@ -740,7 +744,12 @@
         if (current !== generation) return;
         thinkingLevels = result.levels.map((level) => String(level)).filter(Boolean);
         if (!thinkingLevels.includes(thinkingLevel)) thinkingLevel = thinkingLevels[0] ?? "";
-      }).catch(() => {});
+        // 记住手动选择：档位按新模型可用列表调整后一并落库，随项目沿用。
+        persistModelChoice(model.provider, model.id);
+      }).catch(() => {
+        // 档位列表读取失败也记住模型（档位维持会话当前值）。
+        persistModelChoice(model.provider, model.id);
+      });
     } catch (cause) {
       if (current === generation) commandError(cause);
     } finally {
@@ -770,13 +779,14 @@
 
   $effect(() => onModelsChanged(() => { void handleModelsChanged(); }));
 
-  /// 读取当前会话可用的模型列表；列表为空时由空状态提示兜底。
-  async function refreshModels(alive?: () => boolean) {
+  /// 读取当前会话可用的模型列表；列表为空时由空状态提示兜底。返回解析后的列表
+  /// （失败时返回读取前的值，通常为空数组），供新会话应用上次模型选择时使用。
+  async function refreshModels(alive?: () => boolean): Promise<typeof models> {
     const current = generation;
     try {
       const result = await call<{ models: unknown[] }>({ type: "get_available_models" });
-      if (alive && !alive()) return;
-      if (current !== generation) return;
+      if (alive && !alive()) return models;
+      if (current !== generation) return models;
       models = result.models
         .map(record)
         .filter((model) => typeof model.id === "string" && typeof model.provider === "string")
@@ -784,13 +794,80 @@
       modelsLoadFailed = false;
       modelsLoadError = "";
       if (models.length && reloadRequested) { reloadRequested = false; notice = t("已重载，请检查上方模型选择器"); }
+      return models;
     } catch (cause) {
       // 读取失败不再完全静默：打上标记，空状态据此显示错误，与「确实无模型」的提示区分开。
-      if (alive && !alive()) return;
-      if (current !== generation) return;
+      if (alive && !alive()) return models;
+      if (current !== generation) return models;
       modelsLoadFailed = true;
       modelsLoadError = tm(String(cause));
+      return models;
     }
+  }
+
+  /// 读取该项目上次手动选择的模型/推理强度；没有记录或读取失败（如旧版本数据库）时按无记录处理。
+  async function readSavedModelChoice(): Promise<SavedModelChoice | null> {
+    try {
+      const data = record(await invoke<unknown>("get_last_model_choice", { taskId }));
+      const provider = typeof data.provider === "string" ? data.provider : "";
+      const modelId = typeof data.modelId === "string" ? data.modelId : "";
+      if (!provider || !modelId) return null;
+      const thinkingLevel = typeof data.thinkingLevel === "string" && data.thinkingLevel ? data.thinkingLevel : null;
+      return { provider, modelId, thinkingLevel };
+    } catch {
+      return null;
+    }
+  }
+
+  /// 把当前（模型, 推理强度）记到任务数据库，随项目沿用；失败静默，不影响会话本身。
+  function persistModelChoice(provider: string, modelId: string): void {
+    void invoke("save_last_model_choice", {
+      taskId,
+      provider,
+      modelId,
+      thinkingLevel: thinkingLevel || null,
+    }).catch(() => {});
+  }
+
+  /// 连接完成后应用项目上次手动选择的模型与推理强度：仅对没有任何历史消息且空闲的新
+  /// 会话生效；模型已不在可用列表或档位已失效时静默跳过，恢复的会话一律不覆盖。
+  async function applySavedModelChoice(historyCount: number, busy: boolean, alive: () => boolean): Promise<void> {
+    const current = generation;
+    const saved = shouldApplySavedChoice(historyCount, busy) ? await readSavedModelChoice() : null;
+    if (!alive() || current !== generation) return;
+    if (!saved) {
+      // 恢复的会话或该项目从未选择过：保持原初始化，只拉取档位与模型列表供选择器展示。
+      void call<{ levels: unknown[] }>({ type: "get_available_thinking_levels" }).then((result) => {
+        if (!alive()) return;
+        thinkingLevels = result.levels.map((level) => String(level)).filter(Boolean);
+      }).catch(() => {});
+      void refreshModels(alive);
+      return;
+    }
+    const available = await refreshModels(alive);
+    if (!alive() || current !== generation) return;
+    const model = findSavedModel(saved, available);
+    if (model) {
+      try {
+        await call({ type: "set_model", provider: model.provider, modelId: model.id });
+      } catch {
+        return; // 应用失败不提示：新会话保持 Pi 默认行为即可。
+      }
+      if (!alive() || current !== generation) return;
+      selectedModel = `${model.provider}/${model.id}`;
+      modelName = model.name;
+    }
+    const levels = await call<{ levels: unknown[] }>({ type: "get_available_thinking_levels" }).catch(() => null);
+    if (!alive() || current !== generation || !levels) return;
+    thinkingLevels = levels.levels.map((level) => String(level)).filter(Boolean);
+    const level = validSavedThinkingLevel(saved.thinkingLevel, thinkingLevels);
+    if (!level) return;
+    try {
+      await call({ type: "set_thinking_level", level });
+    } catch {
+      return;
+    }
+    if (alive() && current === generation) thinkingLevel = level;
   }
 
   async function changeThinkingLevel(level: string) {
@@ -799,7 +876,13 @@
     changingThinking = true;
     try {
       await call({ type: "set_thinking_level", level });
-      if (current === generation) { thinkingLevel = level; error = ""; }
+      if (current === generation) {
+        thinkingLevel = level;
+        error = "";
+        // 记住手动选择：档位与当前模型一并落库，随项目沿用。
+        const key = parseModelKey(selectedModel);
+        if (key) persistModelChoice(key.provider, key.modelId);
+      }
     } catch (cause) {
       if (current === generation) commandError(cause);
     } finally {
@@ -953,8 +1036,9 @@
     {#if messageStart > 0 || historyOffset > 0}
       <button type="button" class="more-history" disabled={showingEarlier} onclick={showEarlier}>{t("显示更早的消息")}</button>
     {/if}
-    {#each visibleMessages as message, index (historyOffset + conversation.messages.length - visibleMessages.length + index)}
-      {@const messageIndex = historyOffset + conversation.messages.length - visibleMessages.length + index}
+    {#each visibleEntries as entry (historyOffset + entry.index)}
+      {@const message = entry.message}
+      {@const messageIndex = historyOffset + entry.index}
       <article data-message-index={messageIndex} class:user-message={message.role === "user"} class:tool-message={message.role === "toolResult"} class:jump-flash={flashTurnIndex === messageIndex}>
         <div class="message-label">
           {#if message.role === "user"}<UserRound size={14} />{t("你")}
@@ -993,7 +1077,7 @@
       </details>
     {/each}
     {#if initializing}<p role="status">{t("正在连接 Pi 会话…")}</p>{/if}
-    {#if !initializing && !conversation.messages.length && !error}
+    {#if !initializing && !visibleEntries.length && !error}
       <div class="empty-conversation"><Bot size={28} /><h2>{title}</h2></div>
     {/if}
     </div>
@@ -1006,15 +1090,6 @@
           aria-current={turn.number === activeTurn ? "true" : undefined}
           onclick={() => void jumpToTurn(turn.index)}></button>
       {/each}
-    </div>
-  {/if}
-  {#if !followScroll && conversation.messages.length}
-    <div class="scroll-actions">
-      <button type="button" title={t("回到最新消息")} aria-label={t("回到最新消息")} onclick={() => {
-        followScroll = true;
-        pinnedMessageStart = null;
-        if (transcript) transcript.scrollTop = transcript.scrollHeight;
-      }}><ArrowDown size={16} /></button>
     </div>
   {/if}
   {#if error || conversation.error}
@@ -1049,6 +1124,16 @@
       </span>
     </p>
   {/if}
+  {#if !followScroll && conversation.messages.length}
+    <div class="scroll-actions">
+      <button type="button" title={t("回到最新消息")} aria-label={t("回到最新消息")} onclick={() => {
+        followScroll = true;
+        pinnedMessageStart = null;
+        if (transcript) transcript.scrollTop = transcript.scrollHeight;
+      }}><ArrowDown size={16} /></button>
+    </div>
+  {/if}
+
   <form class="composer" onsubmit={(event) => { event.preventDefault(); void send(); }}>
     <textarea bind:this={input} bind:value={draft} rows="3" maxlength="131072" aria-keyshortcuts={shortcutAria("composer")}
       aria-label={t("发送给 Pi")} placeholder={conversation.closed ? t("会话已停止") : t("发送消息")}
@@ -1158,13 +1243,13 @@
   .stats-panel dd { margin: 0; text-align: right; font-family: var(--code-font); color: var(--text); }
   button { cursor: pointer; }
   header button, .chat-error button { display: grid; place-items: center; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--text-muted); flex-shrink: 0; }
-  .transcript { flex: 1 1 0; min-height: 0; overflow: auto; padding: 16px 24px 156px; overflow-anchor: none; }
+  .transcript { flex: 1 1 0; min-height: 0; overflow: auto; padding: 16px 24px 8px; overflow-anchor: none; }
   article { max-width: 900px; margin: 0 auto 24px; outline: 2px solid transparent; outline-offset: 3px; transition: outline-color .3s ease; }
   .message-label { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; font-size: 12px; color: var(--text-muted); }
   .message-content { min-width: 0; overflow-wrap: anywhere; line-height: 1.7; color: var(--text); font-family: var(--session-font, var(--text-font)); font-size: var(--session-font-size, 13px); }
   .plain-message { white-space: pre-wrap; }
   .scroll-actions { height: 0; position: relative; display: flex; justify-content: center; z-index: 1; }
-  .scroll-actions button { position: absolute; bottom: 150px; width: 30px; height: 30px; display: grid; place-items: center; padding: 0; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--surface); color: var(--text); }
+  .scroll-actions button { position: absolute; bottom: 10px; width: 30px; height: 30px; display: grid; place-items: center; padding: 0; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--surface); color: var(--text); }
   .user-message .message-content { padding: 12px; border-left: 2px solid var(--accent); background: var(--surface); }
   .tool-call { border: 1px solid var(--border); border-radius: 4px; padding: 8px 12px; margin-bottom: 8px; font-size: 12px; }
   summary { cursor: pointer; overflow-wrap: anywhere; }
@@ -1173,22 +1258,16 @@
   pre { overflow: auto; max-height: 280px; font: 12px/1.5 var(--code-font); tab-size: 4; }
   .empty-conversation { display: grid; place-content: center; justify-items: center; min-height: 180px; color: var(--text-muted); }
   h2 { font-size: 16px; font-weight: 500; overflow-wrap: anywhere; }
-  /* 悬浮指令坞：磨砂胶囊，浮在会话内容之上，不挤压阅读区。 */
+  /* 指令坞：常规流式布局的磨砂胶囊——会话内容始终结束于输入框上方，错误与提示条排在输入框上方，不会被遮挡。 */
   .composer {
-    position: absolute;
-    left: 0;
-    right: 0;
-    bottom: 16px;
-    z-index: 6;
+    flex-shrink: 0;
     width: min(760px, calc(100% - 32px));
-    margin: 0 auto;
+    margin: 0 auto 16px;
     padding: 8px 10px 6px;
     border: 1px solid var(--border-strong);
     border-radius: 16px;
-    background: color-mix(in srgb, var(--surface) 84%, transparent);
-    backdrop-filter: blur(20px) saturate(180%);
-    -webkit-backdrop-filter: blur(20px) saturate(180%);
-    box-shadow: 0 16px 40px #0009;
+    background: color-mix(in srgb, var(--surface) 88%, transparent);
+    box-shadow: 0 10px 30px #0006;
   }
   .composer-actions { display: flex; align-items: center; gap: 8px; margin-top: 4px; padding: 6px 2px 2px; border-top: 1px solid color-mix(in srgb, var(--text) 8%, transparent); }
   textarea { display: block; width: 100%; min-height: 56px; max-height: 240px; resize: vertical; padding: 8px 6px; border: 0; background: transparent; color: var(--text); font: 13px/1.5 var(--session-font, var(--text-font)); }
@@ -1230,8 +1309,8 @@
   .turn-time { color: var(--text-muted); font-size: 10px; white-space: nowrap; }
   .turn-rail { position: absolute; top: 50%; right: 6px; transform: translateY(-50%); z-index: 3; display: flex; flex-direction: column; align-items: center; gap: 6px; max-height: calc(100% - 24px); overflow-y: auto; padding: 4px 2px; }
   .turn-dot { width: 8px; height: 8px; flex-shrink: 0; padding: 0; border: 0; border-radius: 999px; background: var(--border-strong); opacity: .75; transition: background .15s ease, height .15s ease, opacity .15s ease; }
+  @media (max-width: 620px) { .transcript { padding: 12px; } .composer { margin: 8px auto 8px; width: calc(100% - 16px); } }
   .turn-dot:hover { background: var(--accent); opacity: 1; }
   .turn-dot.active { height: 18px; background: var(--accent); opacity: 1; }
   article.jump-flash { outline-color: var(--accent); }
-  @media (max-width: 620px) { .transcript { padding: 12px; } .composer { margin: 0 8px 8px; } }
 </style>

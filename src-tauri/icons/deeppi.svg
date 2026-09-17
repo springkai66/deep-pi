@@ -1,6 +1,20 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-label="DeepPi">
-  <rect width="1024" height="1024" rx="192" fill="#111412"/>
-  <path d="M232 330 386 484 232 638" fill="none" stroke="#74c7c4" stroke-linecap="round" stroke-linejoin="round" stroke-width="68"/>
-  <path d="M462 330v308M462 330h250M586 330v308M462 638h250" fill="none" stroke="#8fd6ad" stroke-linecap="round" stroke-linejoin="round" stroke-width="64"/>
-  <path d="M238 748h548" fill="none" stroke="#e4c875" stroke-linecap="round" stroke-width="24"/>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1024" y2="1024" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#8A5CFF"/>
+      <stop offset=".55" stop-color="#6A5CFF"/>
+      <stop offset="1" stop-color="#4D6BFE"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(310 250) scale(780)">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity=".2"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="232" fill="url(#bg)"/>
+  <rect width="1024" height="1024" rx="232" fill="url(#glow)"/>
+  <g fill="none" stroke="#FFFFFF" stroke-width="88" stroke-linecap="round">
+    <path d="M296 322h432"/>
+    <path d="M352 702V482C352 392 334 322 296 322"/>
+    <path d="M600 702V322"/>
+  </g>
 </svg>

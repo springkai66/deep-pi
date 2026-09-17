@@ -96,6 +96,14 @@ pub struct ProjectRecord {
     pub created_at: i64,
     pub last_opened_at: i64,
 }
+/// 项目最近一次手动选择的模型与推理强度；thinking_level 为 None 表示该项目从未记录过档位。
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectModelPref {
+    pub provider: String,
+    pub model_id: String,
+    pub thinking_level: Option<String>,
+}
 
 pub struct TaskStore {
     connection: Mutex<Connection>,
@@ -234,6 +242,13 @@ impl TaskStore {
                     created_at INTEGER NOT NULL,
                     last_opened_at INTEGER NOT NULL,
                     removed_at INTEGER
+                );
+                CREATE TABLE IF NOT EXISTS project_model_prefs (
+                    project_id TEXT PRIMARY KEY NOT NULL,
+                    provider TEXT NOT NULL,
+                    model_id TEXT NOT NULL,
+                    thinking_level TEXT,
+                    updated_at INTEGER NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
                 CREATE INDEX IF NOT EXISTS idx_tasks_archived_at ON tasks(archived_at);
@@ -418,6 +433,51 @@ impl TaskStore {
             )
             .map_err(|error| format!("failed to remove project: {error}"))?;
         ensure_updated(affected)
+    }
+    /// 记住项目最近一次手动选择的模型与推理强度：按 project_id 主键 upsert。
+    /// 项目移除是软删除且重新添加会复用原 id，因此选择随目录沿用。
+    pub fn set_project_model_pref(
+        &self,
+        project_id: &str,
+        provider: &str,
+        model_id: &str,
+        thinking_level: Option<&str>,
+    ) -> Result<(), String> {
+        self.connection
+            .lock()
+            .map_err(|_| "task database lock is poisoned".to_string())?
+            .execute(
+                "INSERT INTO project_model_prefs (project_id, provider, model_id, thinking_level, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(project_id) DO UPDATE SET
+                     provider = excluded.provider,
+                     model_id = excluded.model_id,
+                     thinking_level = excluded.thinking_level,
+                     updated_at = excluded.updated_at",
+                params![project_id, provider, model_id, thinking_level, now_millis()?],
+            )
+            .map_err(|error| format!("failed to save project model preference: {error}"))?;
+        Ok(())
+    }
+
+    pub fn project_model_pref(&self, project_id: &str) -> Result<Option<ProjectModelPref>, String> {
+        self.connection
+            .lock()
+            .map_err(|_| "task database lock is poisoned".to_string())?
+            .query_row(
+                "SELECT provider, model_id, thinking_level
+                 FROM project_model_prefs WHERE project_id = ?1",
+                [project_id],
+                |row| {
+                    Ok(ProjectModelPref {
+                        provider: row.get(0)?,
+                        model_id: row.get(1)?,
+                        thinking_level: row.get(2)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|error| format!("failed to read project model preference: {error}"))
     }
 
     fn project(&self, id: &str) -> Result<Option<ProjectRecord>, String> {
@@ -1107,7 +1167,7 @@ pub async fn delete_task(app: AppHandle, task_id: String) -> Result<(), String> 
 
 #[cfg(test)]
 mod tests {
-    use super::{TaskStatus, TaskStore};
+    use super::{ProjectModelPref, TaskStatus, TaskStore};
 
     #[test]
     fn adds_a_project_once_and_links_new_pi_tasks() {
@@ -1174,6 +1234,63 @@ mod tests {
             store.list_projects().expect("projects should list").len(),
             1
         );
+
+        std::fs::remove_dir_all(root).expect("project directory should be removed");
+    }
+
+    #[test]
+    fn remembers_project_model_preference_across_removal() {
+        let root =
+            std::env::temp_dir().join(format!("deeppi-model-pref-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("project directory should be created");
+        let store = TaskStore::in_memory().expect("in-memory store should open");
+        let project = store
+            .add_project(root.to_str().expect("project path should be utf8"))
+            .expect("project should be added");
+
+        assert_eq!(
+            store
+                .project_model_pref(&project.id)
+                .expect("missing preference should read"),
+            None
+        );
+
+        store
+            .set_project_model_pref(&project.id, "deepseek", "deepseek-chat", Some("high"))
+            .expect("preference should save");
+        assert_eq!(
+            store
+                .project_model_pref(&project.id)
+                .expect("preference should read"),
+            Some(ProjectModelPref {
+                provider: "deepseek".into(),
+                model_id: "deepseek-chat".into(),
+                thinking_level: Some("high".into()),
+            })
+        );
+
+        store
+            .set_project_model_pref(&project.id, "deepseek", "deepseek-reasoner", None)
+            .expect("replacement preference should save");
+        let replacement = store
+            .project_model_pref(&project.id)
+            .expect("replacement preference should read")
+            .expect("replacement preference row should exist");
+        assert_eq!(replacement.model_id, "deepseek-reasoner");
+        assert_eq!(replacement.thinking_level, None);
+
+        store
+            .remove_project(&project.id)
+            .expect("project should be removed");
+        store
+            .add_project(root.to_str().expect("project path should be utf8"))
+            .expect("project should be reactivated");
+        let survived = store
+            .project_model_pref(&project.id)
+            .expect("preference should survive reactivation")
+            .expect("preference row should persist");
+        assert_eq!(survived.provider, "deepseek");
+        assert_eq!(survived.model_id, "deepseek-reasoner");
 
         std::fs::remove_dir_all(root).expect("project directory should be removed");
     }

@@ -17,7 +17,7 @@ use crate::{
     rpc_transport::{RpcEvent, RpcTransport},
     runtime::RuntimeOperationLock,
     settings::SettingsStore,
-    task::{TaskRecord, TaskStatus, TaskStore},
+    task::{ProjectModelPref, TaskRecord, TaskStatus, TaskStore},
 };
 
 struct RpcRun {
@@ -215,8 +215,8 @@ fn start(app: &AppHandle, request: StartRpcRequest) -> Result<TaskRecord, String
                         log::error!("Failed to finish RPC task: {error}");
                     }
                     runs.remove(&task_id);
-                    let _ = exit_app.emit_to(
-                        "main",
+                    // 广播给所有窗口：主窗口（任务标签）与任务看板浮窗都要即时感知退出。
+                    let _ = exit_app.emit(
                         "rpc-task-exit",
                         json!({
                             "taskId":task_id, "runId":exit_run, "status":status,
@@ -423,6 +423,58 @@ pub async fn stop_rpc_task(
     tauri::async_runtime::spawn_blocking(move || transport.shutdown(Duration::from_secs(5)))
         .await
         .map_err(|error| error.to_string())?
+}
+
+/// 保存任务所属项目最近一次手动选择的模型与推理强度；之后该项目新建的 RPC 会话会自动沿用。
+#[tauri::command]
+pub async fn save_last_model_choice(
+    webview: tauri::Webview,
+    app: AppHandle,
+    task_id: String,
+    provider: String,
+    model_id: String,
+    thinking_level: Option<String>,
+) -> Result<(), String> {
+    require_main(&webview)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = app.state::<TaskStore>();
+        let task = store.get(&task_id)?.ok_or("Task not found")?;
+        let project_id = task
+            .project_id
+            .as_deref()
+            .ok_or("Task does not belong to a project")?;
+        store.set_project_model_pref(
+            project_id,
+            &provider,
+            &model_id,
+            thinking_level.as_deref().filter(|level| !level.is_empty()),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// 读取任务所属项目最近一次手动选择的模型与推理强度；无记录或任务不属于项目时返回 null。
+#[tauri::command]
+pub async fn get_last_model_choice(
+    webview: tauri::Webview,
+    app: AppHandle,
+    task_id: String,
+) -> Result<Option<ProjectModelPref>, String> {
+    require_main(&webview)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = app.state::<TaskStore>();
+        let Some(task) = store.get(&task_id)? else {
+            return Ok(None);
+        };
+        let choice = match task.project_id.as_deref() {
+            Some(project_id) => store.project_model_pref(project_id)?,
+            None => None,
+        };
+        Ok(choice)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[cfg(test)]

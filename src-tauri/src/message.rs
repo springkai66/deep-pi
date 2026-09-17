@@ -50,7 +50,7 @@ pub fn msg(code: &str) -> String {
 /// 构造带参数消息码。
 ///
 /// ```
-/// # use deeppi::message::msg_with;
+/// # use deeppi_lib::message::msg_with;
 /// let text = msg_with("runtime.dsh.pinned", &[("latest", "0.2.0"), ("pinned", "0.1.5")]);
 /// assert_eq!(text, "@msg:runtime.dsh.pinned?latest=0.2.0&pinned=0.1.5");
 /// ```

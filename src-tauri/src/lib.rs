@@ -8,6 +8,7 @@ mod bridge;
 mod credentials;
 mod diagnostics;
 mod dialog_text;
+mod board;
 mod dsh;
 mod dsh_api;
 mod durable_file;
@@ -25,7 +26,7 @@ mod git_sync;
 #[cfg(all(test, windows))]
 mod git_test_support;
 mod market;
-mod message;
+pub mod message;
 mod native_pi;
 mod operation;
 mod package;
@@ -107,6 +108,7 @@ pub fn run() {
         .manage(provider::ProviderConfigGate::default())
         .setup(|app| {
             let handle = app.handle().clone();
+            board::install_main_window_hooks(app.handle());
             let roaming = app.path().app_data_dir()?;
             let local = app.path().app_local_data_dir()?;
             // Recovery and database migration must finish before publishing any store.
@@ -175,6 +177,7 @@ pub fn run() {
                 diagnostics::diagnostics_snapshot,
                 diagnostics::diagnostics_clear,
                 diagnostics::diagnostics_export,
+                board::open_board_window,
                 rpc::start_rpc_task,
                 rpc::subscribe_rpc,
                 rpc::rpc_command,
@@ -182,6 +185,8 @@ pub fn run() {
                 rpc::rpc_history_page,
                 rpc::rpc_history_close,
                 rpc::stop_rpc_task,
+                rpc::save_last_model_choice,
+                rpc::get_last_model_choice,
                 project_files::list_project_files,
                 project_watch::start_project_watch,
                 project_watch::stop_project_watch,
