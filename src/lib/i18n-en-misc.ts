@@ -36,6 +36,9 @@ export const EN_MISC: Record<string, string> = {
   // —— 终端面板 TerminalPane.svelte ——
   " · 正在切换模式": " · Switching modes",
   "切换到对话模式": "Switch to conversation mode",
+  "打开命令终端": "Open command terminal",
+  "关闭命令终端": "Close command terminal",
+  "Shell 已退出（代码 {code}）。": "Shell exited (code {code}).",
 
 
   // —— 诊断面板 DiagnosticsPanel.svelte ——

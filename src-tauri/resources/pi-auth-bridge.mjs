@@ -40,7 +40,11 @@ function redact(text) {
 }
 
 function errorMessage(error) {
-  return redact(error instanceof Error ? error.message : String(error));
+  const message = error instanceof Error ? error.message : String(error);
+  const cause = error instanceof Error && error.cause
+    ? `: ${error.cause instanceof Error ? error.cause.message : String(error.cause)}`
+    : "";
+  return redact(`${message}${cause}`);
 }
 
 function abortError() {

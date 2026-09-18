@@ -13,6 +13,8 @@
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import {
     Bot,
+    ClipboardList,
+    Terminal,
     FolderPlus,
     Kanban,
   PanelLeftClose,
@@ -36,6 +38,7 @@
   import type { GitDiffSelection } from "$lib/git-diff";
   import type { GitDiffArea } from "$lib/git-status";
   import ChatPane from "$lib/ChatPane.svelte";
+  import ShellPane from "$lib/ShellPane.svelte";
   import { hostCommandEnabled, hostShortcutDecision, shortcutLabel, shortcutAria, type HostCommand, type HostShortcutContext } from "$lib/shortcuts";
   import { createTaskModeSwitcher, type InteractionMode } from "$lib/task-mode";
   import { SplitSquareHorizontal, SplitSquareVertical } from "@lucide/svelte";
@@ -68,7 +71,6 @@
   import type { Task, TaskStatus } from "$lib/task";
   import {
     changePaneCapacity,
-    hasProjectConflict,
     openPane,
     splitPane,
   } from "$lib/workspace";
@@ -123,11 +125,9 @@
   let errorMessage = $state("");
   let layout = $state<LayoutMode>("single");
   let view = $state<"workspace" | "settings">("workspace");
-  /**
-   * 进入设置前的界面（工作区 + 当前智能体 + 看板态），退出设置时原样返回：
-   * 从 DSH 进设置就回 DSH，而不是一律回 Pi 工作区。
-   */
-  let settingsReturn = $state<{ agent: "pi" | "dsh"; boardView: boolean }>({ agent: "pi", boardView: false });
+  let settingsOpen = $state(false);
+  let shellOpen = $state(false);
+  let settingsDialog = $state<HTMLElement>();
   /**
    * 控制柱悬停展开态：DSH 工作区下控制柱默认收起（把宽度让给原生 Webview），
    * 鼠标移上去/键盘聚焦时展开，移走即收回。
@@ -249,7 +249,7 @@
   // Serialize visibility requests because native child Webviews cover HTML menus.
   $effect(() => {
     const child = dshWebview;
-    const visible = activeAgent === "dsh" && view === "workspace" && !dialogRequest && !closingWindow && !recoveryProject;
+    const visible = activeAgent === "dsh" && view === "workspace" && !settingsOpen && !dialogRequest && !closingWindow && !recoveryProject;
     dshVisibility = dshVisibility.then(async () => {
       if (child) {
         if (visible) await child.show();
@@ -257,6 +257,17 @@
       }
     }).catch((error) => { console.error("DSH visibility:", error); });
   });
+
+  $effect(() => {
+    if (settingsOpen) void tick().then(() => settingsDialog?.focus());
+  });
+
+  function handleSettingsKeydown(event: KeyboardEvent) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeSettings();
+    }
+  }
 
   async function focusTaskSearch() {
     await showPi();
@@ -293,7 +304,7 @@
     return {
       pi: activeAgent === "pi", workspace: view === "workspace", rpc: activeTask?.interactionMode === "rpc",
       fileOpen: !!openedFile, fileReady: !!fileEditor && !!fileId && fileDocuments.some((doc) => doc.id === fileId && !!doc.state),
-      fileBusy: fileSaving, navigationLocked: view === "settings" && (settingsPackageBusy || diagnosticsBusy),
+      fileBusy: fileSaving, navigationLocked: settingsOpen && (settingsPackageBusy || diagnosticsBusy),
       modal: !!dialogRequest, recovery: !!recoveryProject, closing: closingWindow,
     };
   }
@@ -581,11 +592,21 @@
       applyWorkspace: (storedTasks, storedProjects, storedSettings) => {
         tasks = storedTasks;
         projects = storedProjects;
-        terminalTaskIds = storedTasks.filter((task) => task.agent === "pi" && task.runId).map((task) => task.id);
-        selectedProjectId =
+        const nextTerminalTaskIds = storedTasks.filter((task) => task.agent === "pi" && task.runId).map((task) => task.id);
+        terminalTaskIds = nextTerminalTaskIds;
+        const nextProjectId =
           storedProjects.find((project) => project.path === storedSettings.lastProject)?.id ??
           storedProjects[0]?.id ??
           null;
+        selectedProjectId = nextProjectId;
+        const initialPane = changePaneCapacity({
+          current: [],
+          active: null,
+          available: nextTerminalTaskIds.filter((id) => storedTasks.find((task) => task.id === id)?.projectId === nextProjectId),
+          capacity: paneCapacity,
+        });
+        paneTaskIds = initialPane.panes;
+        activeTaskId = initialPane.active;
       },
       error: (scope, error) => {
         if (scope === "workspace") startupFailure = tm(String(error));
@@ -931,8 +952,12 @@
     view = "workspace";
     await tick();
     if (dshWebview) {
-      await dshWebview.show();
-      await dshWebview.setFocus();
+      if (settingsOpen) {
+        await dshWebview.hide();
+      } else {
+        await dshWebview.show();
+        await dshWebview.setFocus();
+      }
       await syncDshBounds();
       return;
     }
@@ -950,7 +975,7 @@
         height: Math.max(1, bounds.height),
       });
       dshWebview = await waitForDshWebview();
-      if (activeAgent !== "dsh" || dialogRequest || view !== "workspace") await dshWebview.hide();
+      if (activeAgent !== "dsh" || dialogRequest || view !== "workspace" || settingsOpen) await dshWebview.hide();
       else await dshWebview.setFocus();
       await syncDshBounds();
     } catch (error) {
@@ -970,33 +995,28 @@
   }
 
   function openSettings() {
-    // 记住进入设置前的界面与智能体，退出时原样恢复（不再一律回 Pi 工作区）。
-    settingsReturn = { agent: activeAgent, boardView };
-    view = "settings";
+    settingsOpen = true;
+    void dshWebview?.hide();
   }
 
   function closeSettings() {
     if (!canLeaveSettings()) return;
-    // 恢复到进入设置前的界面：DSH 就回 DSH，Pi 看板/普通工作区也一并还原。
-    if (settingsReturn.agent === "dsh") {
-      void showDsh();
-      return;
+    settingsOpen = false;
+    if (activeAgent === "dsh") {
+      void tick().then(() => dshVisibility.then(() => dshWebview?.setFocus()));
     }
-    boardView = settingsReturn.boardView;
-    view = "workspace";
-    void dshWebview?.hide();
   }
 
   function canLeaveSettings() {
-    if (view === "settings" && diagnosticsBusy) {
+    if (settingsOpen && diagnosticsBusy) {
       showError(t("诊断操作正在处理，请先完成或取消操作"));
       return false;
     }
-    if (view === "settings" && dshBusy) {
+    if (settingsOpen && dshBusy) {
       showError(t("DSH 检测/修复操作正在处理，请先完成或取消操作"));
       return false;
     }
-    if (view === "settings" && settingsPackageBusy) {
+    if (settingsOpen && settingsPackageBusy) {
       showError(t("扩展操作正在处理，请先完成或取消操作"));
       return false;
     }
@@ -1019,15 +1039,6 @@
     errorMessage = "";
     try {
       if (selectedProjectId !== project.id) selectProject(project);
-      if (
-        hasProjectConflict(project.path, piTasks) &&
-        !(await confirmDialog(
-          t("确认并发写入"),
-          t("该项目已有活动任务，继续可能产生文件冲突。仍要创建任务吗？"),
-        ))
-      ) {
-        return;
-      }
       if (runningCount >= settings.maxConcurrentTasks) return;
       const task = await invoke<Task>(mode === "rpc" ? "start_rpc_task" : "start_pi_task", {
         request: { projectId: project.id, title: "", rows: 32, cols: 100 },
@@ -1068,6 +1079,33 @@
       activeAgent = "pi";
       boardView = true;
     }
+  }
+
+  /// 四象限清单浮窗：独立 OS 窗口，打开失败只显示非阻塞错误提示。
+  async function openChecklistWindow() {
+    if (!canLeaveSettings()) return;
+    try {
+      await invoke("open_checklist_window");
+    } catch (cause) {
+      showError(t("四象限清单窗口打开失败：{error}", { error: tm(String(cause)) }));
+    }
+  }
+
+  async function openShell() {
+    if (!canLeaveSettings()) return;
+    if (!selectedProjectId || !selectedProject) {
+      showError(t("请先添加并选择一个项目目录"));
+      return;
+    }
+    activeAgent = "pi";
+    view = "workspace";
+    boardView = false;
+    shellOpen = true;
+    await dshWebview?.hide();
+  }
+
+  function closeShell() {
+    shellOpen = false;
   }
 
   /// 看板浮窗没有终端窗格与模式切换器：卡片动作全部委托回主窗口执行。
@@ -1209,6 +1247,7 @@
   }
 
   async function switchTaskMode(task: Task, mode: InteractionMode) {
+    if (mode === "tui" && !terminalModule) loadTerminalModule();
     try {
       const restarted = await modeSwitcher.switch(task, mode);
       if (restarted) applyTaskRestart(task, restarted);
@@ -1283,7 +1322,7 @@
   </section>
 {/if}
 
-  <div style={`--sidebar-w:${sidebarWidth ?? 260}px; --files-w:${filesWidth ?? 260}px; --git-w:${gitWidth ?? 300}px`} class:dsh-mode={activeAgent === "dsh"} class:rail-closed={railCollapsed} class:sidebar-hidden={!showSidebar} class:files-hidden={!showFiles} class:files-visible={showFiles} class:git-visible={showGit} class="app-shell" inert={closingWindow || startupPending || !!startupFailure} aria-busy={closingWindow || startupPending}>
+  <div style={`--sidebar-w:${sidebarWidth ?? 260}px; --files-w:${filesWidth ?? 260}px; --git-w:${gitWidth ?? 300}px`} class:dsh-mode={activeAgent === "dsh"} class:rail-closed={railCollapsed} class:sidebar-hidden={!showSidebar} class:files-hidden={!showFiles} class:files-visible={showFiles} class:git-visible={showGit} class="app-shell" inert={closingWindow || startupPending || !!startupFailure || settingsOpen} aria-busy={closingWindow || startupPending}>
   <nav class="command-rail" class:rail-collapsed={railCollapsed}
     aria-label={t("工作区导航")}
     onmouseenter={() => { railExpanded = true; }}
@@ -1299,8 +1338,8 @@
       aria-label={t("DSH 工作区")} aria-pressed={activeAgent === "dsh"}
       title={railTitle(t("DSH 工作区"), "dsh")} onclick={showDsh}><Globe size={18} /></button>
     <div class="rail-spacer"></div>
-    <button type="button" class="rail-item" class:selected={view !== "workspace"}
-      aria-label={t("设置")} aria-pressed={view !== "workspace"} aria-keyshortcuts={shortcutAria("settings")}
+    <button type="button" class="rail-item" class:selected={settingsOpen}
+      aria-label={t("设置")} aria-pressed={settingsOpen} aria-keyshortcuts={shortcutAria("settings")}
       title={`${t("设置")} (${shortcutLabel("settings")})`} onclick={openSettings}><Settings2 size={18} /></button>
   </nav>
   <header class="topbar">
@@ -1320,9 +1359,15 @@
         <button type="button" aria-label={t("切换 Git 变更栏")} title={showGit ? t("隐藏 Git 变更栏") : t("显示 Git 变更栏")}
           aria-pressed={showGit} onclick={() => { if (!canLeaveSettings()) return; gitVisible = !gitVisible; }}><GitBranch size={16} /></button>
       {/if}
+      {#if activeAgent === "pi"}
+        <button type="button" aria-label={t("命令终端")} title={t("打开命令终端")} aria-pressed={shellOpen}
+          onclick={() => void openShell()}><Terminal size={16} /></button>
+      {/if}
       <button type="button" aria-label={t("任务看板")}
         title={t("任务看板：总览所有任务状态")}
         onclick={() => void openBoardWindow()}><Kanban size={16} /></button>
+      <button type="button" aria-label={t("四象限清单")} title={t("四象限清单")}
+        onclick={() => void openChecklistWindow()}><ClipboardList size={16} /></button>
     </div>
   </header>
   <aside class="project-sidebar" class:panel-hidden={!showSidebar} aria-label={t("项目侧栏")}>
@@ -1348,7 +1393,7 @@
     />
   </aside>
 
-  <main class="workspace" class:settings-view={view === "settings"} bind:this={workspace}>
+  <main class="workspace" bind:this={workspace}>
     {#if boardView && activeAgent === "pi" && view === "workspace"}
       <div class="board-view">
         <TaskBoard
@@ -1401,7 +1446,176 @@
           </div>
         {/if}
       </div>
-    {:else if view === "settings"}
+    {:else if !selectedProject}
+      <div class="empty-state" class:panel-hidden={boardView}>
+        <Bot size={32} strokeWidth={1.4} />
+        <h1>{t("工作区")}</h1>
+        <button type="button" class="start-button" onclick={addProject}>
+          <FolderPlus size={16} />{t("添加项目目录")}
+        </button>
+      </div>
+    {:else if terminalTasks.length === 0}
+      <div class="empty-state" class:panel-hidden={boardView}>
+        <Bot size={32} strokeWidth={1.4} />
+        <h1>{selectedProject.name}</h1>
+        <button type="button" class="start-button" onclick={() => void startTask()} disabled={!canStart}>
+          <Plus size={16} />{t("新建任务")}
+        </button>
+      </div>
+    {/if}
+      <div class="workspace-content" style:grid-row={inlineSessionTabs ? "1 / -1" : undefined} class:panel-hidden={boardView || activeAgent !== "pi" || view !== "workspace" || terminalTasks.length === 0 || !selectedProject}>
+        <div
+          class:single={layout === "single"}
+          class:split={layout === "split"}
+          class:grid={layout === "grid"}
+          class:pane-count-one={paneTaskIds.length === 1}
+          class="terminal-grid"
+        >
+          {#each allTerminalTasks as task (task.id)}
+            {#if task.interactionMode === "rpc"}
+              <ChatPane
+                taskId={task.id} runId={task.runId} title={task.title}
+                tabs={inlineSessionTabs && task.id === activeTaskId ? sessionTabs : undefined}
+                autoName={/^(Pi Task \d+|Session [0-9a-f]{8})$/.test(task.title)}
+                onAutoRename={(title) => void autoRenameTask(task, title)}
+                switching={switchingTasks.has(task.id)}
+                visible={activeAgent === "pi" && view === "workspace" && !inspectingFile && task.projectId === selectedProjectId && paneTaskIds.includes(task.id)}
+                active={task.id === activeTaskId}
+                focusToken={composerFocusToken}
+                onUseTerminal={() => void switchTaskMode(task, "tui")}
+                onDialog={(request) => dialogs.request(request)}
+                onCancelDialogs={(scope) => dialogs.cancelScope(scope)}
+                onActivity={(busy) => {
+                  if (task.status === "running" && !busy && task.projectId === selectedProjectId) filesRefreshToken++;
+                  if (["running", "waiting"].includes(task.status)) task.status = busy ? "running" : "waiting";
+                }}
+              onOpenModelSettings={() => openSettingsCategory("models")}
+              onReloadSession={() => void restartTask(task, "rpc")}
+              />
+            {:else if terminalModule}
+              {#await terminalModule}
+                <section class="terminal-pane" class:panel-hidden={activeAgent !== "pi" || view !== "workspace" || inspectingFile || task.projectId !== selectedProjectId || !paneTaskIds.includes(task.id)}>
+                  <p role="status">{t("正在加载终端…")}</p>
+                </section>
+              {:then terminal}
+                <terminal.default
+                  transitioning={switchingTasks.has(task.id)}
+                  runId={task.runId}
+                  taskId={task.id}
+                  title={task.title}
+                  status={task.status}
+                  codeFont={settings.codeFont}
+                  sessionFontName={settings.sessionFontName}
+                  sessionFontSize={settings.sessionFontSize}
+                  colorMode={settings.colorMode}
+                  visible={activeAgent === "pi" && view === "workspace" && !inspectingFile && task.projectId === selectedProjectId && paneTaskIds.includes(task.id)}
+                  active={task.id === activeTaskId}
+                  onExit={(exitCode, error, exitedRunId) => { if (task.runId === exitedRunId) markExited(task, exitCode, error); }}
+                  onUseConversation={() => void switchTaskMode(task, "rpc")}
+                />
+              {:catch}
+                <section class="terminal-pane" class:panel-hidden={activeAgent !== "pi" || view !== "workspace" || inspectingFile || task.projectId !== selectedProjectId || !paneTaskIds.includes(task.id)}>
+                  <p role="alert">{t("终端组件加载失败")}</p>
+                  <button type="button" title={t("重新加载终端组件")} aria-label={t("重新加载终端组件")} onclick={loadTerminalModule}><RotateCcw size={16} /></button>
+                </section>
+              {/await}
+            {:else}
+              <section class="terminal-pane" class:panel-hidden={activeAgent !== "pi" || view !== "workspace" || inspectingFile || task.projectId !== selectedProjectId || !paneTaskIds.includes(task.id)}>
+                <p role="status">{t("正在加载终端…")}</p>
+              </section>
+            {/if}
+          {/each}
+        </div>
+      </div>
+    <div class="file-preview-layer" class:panel-hidden={!inspectingFile}
+      style="position: absolute; inset: 0; min-width: 0; min-height: 0; z-index: 2;" style:grid-row={standaloneSessionTabs ? "2" : "1 / -1"}>
+    {#if openedFile && editorModule}
+      {#await editorModule then module}
+        <module.default bind:this={fileEditor} documents={fileDocuments} controller={fileWorkspace}
+          projectId={openedFile.projectId} path={openedFile.path} line={openedFile.line} column={openedFile.column}
+          visible={openedFile.projectId === selectedProjectId && activeAgent === "pi" && view === "workspace"}
+          editorConfigured={!!settings.externalEditor} refreshToken={filesRefreshToken}
+          onConfigureEditor={() => openSettingsCategory("advanced")}
+          onSelect={(path) => openFile(path)} onHide={() => { openedFile = null; }}
+          requestDialog={(request) => dialogs.request(request)} />
+      {:catch error}
+        <p role="alert">{t("编辑器加载失败：{error}", { error: tm(String(error)) })}</p>
+      {/await}
+    {/if}
+    {#if openedDiff && openedDiff.projectId === selectedProjectId && activeAgent === "pi" && view === "workspace"}
+      <GitDiffView selection={openedDiff} refreshToken={filesRefreshToken + gitWatchRefreshToken} onClose={() => { openedDiff = null; }} />
+    {/if}
+    </div>
+    {#if shellOpen && selectedProject}
+      <div class="shell-overlay">
+        <ShellPane
+          projectId={selectedProject.id}
+          shell={settings.terminalShell}
+          codeFont={settings.codeFont}
+          sessionFontName={settings.sessionFontName}
+          sessionFontSize={settings.sessionFontSize}
+          colorMode={settings.colorMode}
+          onClose={closeShell}
+        />
+      </div>
+    {/if}
+    {#if recoveryProject && recoveryModule}
+      {#await recoveryModule then module}
+        {#key recoveryProject.id}
+          <module.default projectId={recoveryProject.id} projectName={recoveryProject.name}
+            onClose={() => { if (!recoveryBusy) recoveryProject = null; }}
+            onBusyChange={(busy) => { recoveryBusy = busy; }}
+            canOperate={() => !closingWindow && !fileSaving && !fileWorkspace.busy() && !gitIndexBusy}
+            onChanged={(projectId) => { if (projectId === selectedProjectId) filesRefreshToken++; }}
+            requestDialog={(request) => dialogs.request(request)} />
+        {/key}
+      {:catch error}
+        <section class="recovery-error" role="alert">
+          <p>{t("恢复副本界面加载失败：{error}", { error: tm(String(error)) })}</p>
+          <button onclick={() => { recoveryProject = null; recoveryModule = null; }}>{t("关闭")}</button>
+        </section>
+      {/await}
+    {/if}
+  </main>
+  <aside class="file-panel" class:panel-hidden={!showFiles} aria-label={t("文件侧栏")}>
+    <div class="panel-resize-handle resize-left" role="separator" aria-orientation="vertical" aria-label={t("拖拽调整文件栏宽度")} title={t("拖拽调整宽度")} onpointerdown={(event) => startPanelResize("files", event)}></div>
+    <button type="button" class="panel-toggle" aria-label={t("隐藏文件栏")} title={t("隐藏文件栏")}
+      onclick={() => { filesVisible = false; }}><PanelRightClose size={15} /></button>
+    <div class="file-project-selector">
+      <select aria-label={t("文件所属项目")} value={selectedProjectId ?? ""}
+        onchange={(event) => { const project = projects.find((item) => item.id === event.currentTarget.value); if (project) selectProject(project); }}>
+        {#if !projects.length}<option value="">{t("未选择项目")}</option>{/if}
+        {#each projects as project (project.id)}<option value={project.id}>{project.name}</option>{/each}
+      </select>
+      <button type="button" aria-label={t("添加项目目录")} title={t("添加项目目录")} onclick={addProject}><FolderPlus size={16} /></button>
+      <button type="button" aria-label={t("恢复副本")} title={t("恢复副本…")} disabled={!selectedProjectId || recoveryBusy}
+        onclick={() => { recoveryModule ??= import("$lib/FileRecoveryPanel.svelte"); recoveryProject = selectedProject ? { id: selectedProject.id, name: selectedProject.name } : null; }}><History size={16} /></button>
+    </div>
+    {#if fileSidebarVisited}
+      <FileSidebar project={selectedProject} onOpen={openFile}
+        visible={showFiles} refreshToken={filesRefreshToken}
+        {watchError} onRetryWatch={() => { watchRetry++; }}
+        searchFocusToken={showFiles ? fileSearchFocusToken : 0} />
+    {/if}
+  </aside>
+  <GitSidebar projectId={selectedProjectId}
+    visible={showGit} refreshToken={filesRefreshToken + gitWatchRefreshToken}
+    onResizeStart={(event) => startPanelResize("git", event)}
+    selected={openedDiff?.projectId === selectedProjectId ? openedDiff : null} onOpen={openGitDiff}
+    onBusyChange={(busy) => { gitIndexBusy = busy; }}
+    onChanged={(projectId, path) => {
+      if (openedDiff?.projectId === projectId && (!path || openedDiff.path === path)) openedDiff = null;
+      if (selectedProjectId === projectId) filesRefreshToken++;
+    }}
+    onClose={() => { gitVisible = false; }} />
+
+  </div>
+<AppDialog request={dialogRequest} onResolve={resolveDialog} />
+<AppToasts />
+{#if settingsOpen}
+  <div class="settings-overlay" role="presentation">
+    <div class="settings-modal" role="dialog" aria-modal="true" aria-label={t("设置")} tabindex="-1"
+      bind:this={settingsDialog} onkeydown={handleSettingsKeydown}>
       <PiSettings
         saving={settingsSaving}
         closeBlocked={settingsPackageBusy || diagnosticsBusy || dshBusy}
@@ -1459,158 +1673,18 @@
           />
         {/snippet}
       </PiSettings>
-    {:else if !selectedProject}
-      <div class="empty-state" class:panel-hidden={boardView}>
-        <Bot size={32} strokeWidth={1.4} />
-        <h1>{t("工作区")}</h1>
-        <button type="button" class="start-button" onclick={addProject}>
-          <FolderPlus size={16} />{t("添加项目目录")}
-        </button>
-      </div>
-    {:else if terminalTasks.length === 0}
-      <div class="empty-state" class:panel-hidden={boardView}>
-        <Bot size={32} strokeWidth={1.4} />
-        <h1>{selectedProject.name}</h1>
-        <button type="button" class="start-button" onclick={() => void startTask()} disabled={!canStart}>
-          <Plus size={16} />{t("新建任务")}
-        </button>
-      </div>
-    {/if}
-      <div class="workspace-content" style:grid-row={inlineSessionTabs ? "1 / -1" : undefined} class:panel-hidden={boardView || activeAgent !== "pi" || view !== "workspace" || terminalTasks.length === 0 || !selectedProject}>
-        <div
-          class:single={layout === "single"}
-          class:split={layout === "split"}
-          class:grid={layout === "grid"}
-          class:pane-count-one={paneTaskIds.length === 1}
-          class="terminal-grid"
-        >
-          {#each allTerminalTasks as task (task.id)}
-            {#if task.interactionMode === "rpc"}
-              <ChatPane
-                taskId={task.id} runId={task.runId} title={task.title}
-                tabs={inlineSessionTabs && task.id === activeTaskId ? sessionTabs : undefined}
-                autoName={/^(Pi Task \d+|Session [0-9a-f]{8})$/.test(task.title)}
-                onAutoRename={(title) => void autoRenameTask(task, title)}
-                switching={switchingTasks.has(task.id)}
-                visible={activeAgent === "pi" && view === "workspace" && !inspectingFile && task.projectId === selectedProjectId && paneTaskIds.includes(task.id)}
-                active={task.id === activeTaskId}
-                focusToken={composerFocusToken}
-                onUseTerminal={() => void switchTaskMode(task, "tui")}
-                onDialog={(request) => dialogs.request(request)}
-                onCancelDialogs={(scope) => dialogs.cancelScope(scope)}
-                onActivity={(busy) => {
-                  if (task.status === "running" && !busy && task.projectId === selectedProjectId) filesRefreshToken++;
-                  if (["running", "waiting"].includes(task.status)) task.status = busy ? "running" : "waiting";
-                }}
-              onOpenModelSettings={() => openSettingsCategory("models")}
-              onReloadSession={() => void restartTask(task, "rpc")}
-              />
-            {:else}
-            {#if terminalModule}
-            {#await terminalModule}
-              <section class="terminal-pane" class:panel-hidden={activeAgent !== "pi" || view !== "workspace" || inspectingFile || task.projectId !== selectedProjectId || !paneTaskIds.includes(task.id)}>
-                <p role="status">{t("正在加载终端…")}</p>
-              </section>
-            {:then terminal}
-            <terminal.default
-              transitioning={switchingTasks.has(task.id)}
-              runId={task.runId}
-              taskId={task.id}
-              title={task.title}
-              status={task.status}
-              codeFont={settings.codeFont}
-              sessionFontName={settings.sessionFontName}
-              sessionFontSize={settings.sessionFontSize}
-              colorMode={settings.colorMode}
-              visible={activeAgent === "pi" && view === "workspace" && !inspectingFile && task.projectId === selectedProjectId && paneTaskIds.includes(task.id)}
-              active={task.id === activeTaskId}
-              onExit={(exitCode, error, exitedRunId) => { if (task.runId === exitedRunId) markExited(task, exitCode, error); }}
-              onUseConversation={() => void switchTaskMode(task, "rpc")}
-            />
-            {:catch}
-              <section class="terminal-pane" class:panel-hidden={activeAgent !== "pi" || view !== "workspace" || inspectingFile || task.projectId !== selectedProjectId || !paneTaskIds.includes(task.id)}>
-                <p role="alert">{t("终端组件加载失败")}</p>
-                <button type="button" title={t("重新加载终端组件")} aria-label={t("重新加载终端组件")} onclick={loadTerminalModule}><RotateCcw size={16} /></button>
-              </section>
-            {/await}
-            {/if}
-            {/if}
-          {/each}
-        </div>
-      </div>
-    <div class="file-preview-layer" class:panel-hidden={!inspectingFile}
-      style="position: absolute; inset: 0; min-width: 0; min-height: 0; z-index: 2;" style:grid-row={standaloneSessionTabs ? "2" : "1 / -1"}>
-    {#if openedFile && editorModule}
-      {#await editorModule then module}
-        <module.default bind:this={fileEditor} documents={fileDocuments} controller={fileWorkspace}
-          projectId={openedFile.projectId} path={openedFile.path} line={openedFile.line} column={openedFile.column}
-          visible={openedFile.projectId === selectedProjectId && activeAgent === "pi" && view === "workspace"}
-          editorConfigured={!!settings.externalEditor} refreshToken={filesRefreshToken}
-          onConfigureEditor={() => openSettingsCategory("advanced")}
-          onSelect={(path) => openFile(path)} onHide={() => { openedFile = null; }}
-          requestDialog={(request) => dialogs.request(request)} />
-      {:catch error}
-        <p role="alert">{t("编辑器加载失败：{error}", { error: tm(String(error)) })}</p>
-      {/await}
-    {/if}
-    {#if openedDiff && openedDiff.projectId === selectedProjectId && activeAgent === "pi" && view === "workspace"}
-      <GitDiffView selection={openedDiff} refreshToken={filesRefreshToken + gitWatchRefreshToken} onClose={() => { openedDiff = null; }} />
-    {/if}
     </div>
-    {#if recoveryProject && recoveryModule}
-      {#await recoveryModule then module}
-        {#key recoveryProject.id}
-          <module.default projectId={recoveryProject.id} projectName={recoveryProject.name}
-            onClose={() => { if (!recoveryBusy) recoveryProject = null; }}
-            onBusyChange={(busy) => { recoveryBusy = busy; }}
-            canOperate={() => !closingWindow && !fileSaving && !fileWorkspace.busy() && !gitIndexBusy}
-            onChanged={(projectId) => { if (projectId === selectedProjectId) filesRefreshToken++; }}
-            requestDialog={(request) => dialogs.request(request)} />
-        {/key}
-      {:catch error}
-        <section class="recovery-error" role="alert">
-          <p>{t("恢复副本界面加载失败：{error}", { error: tm(String(error)) })}</p>
-          <button onclick={() => { recoveryProject = null; recoveryModule = null; }}>{t("关闭")}</button>
-        </section>
-      {/await}
-    {/if}
-  </main>
-  <aside class="file-panel" class:panel-hidden={!showFiles} aria-label={t("文件侧栏")}>
-    <div class="panel-resize-handle resize-left" role="separator" aria-orientation="vertical" aria-label={t("拖拽调整文件栏宽度")} title={t("拖拽调整宽度")} onpointerdown={(event) => startPanelResize("files", event)}></div>
-    <button type="button" class="panel-toggle" aria-label={t("隐藏文件栏")} title={t("隐藏文件栏")}
-      onclick={() => { filesVisible = false; }}><PanelRightClose size={15} /></button>
-    <div class="file-project-selector">
-      <select aria-label={t("文件所属项目")} value={selectedProjectId ?? ""}
-        onchange={(event) => { const project = projects.find((item) => item.id === event.currentTarget.value); if (project) selectProject(project); }}>
-        {#if !projects.length}<option value="">{t("未选择项目")}</option>{/if}
-        {#each projects as project (project.id)}<option value={project.id}>{project.name}</option>{/each}
-      </select>
-      <button type="button" aria-label={t("添加项目目录")} title={t("添加项目目录")} onclick={addProject}><FolderPlus size={16} /></button>
-      <button type="button" aria-label={t("恢复副本")} title={t("恢复副本…")} disabled={!selectedProjectId || recoveryBusy}
-        onclick={() => { recoveryModule ??= import("$lib/FileRecoveryPanel.svelte"); recoveryProject = selectedProject ? { id: selectedProject.id, name: selectedProject.name } : null; }}><History size={16} /></button>
-    </div>
-    {#if fileSidebarVisited}
-      <FileSidebar project={selectedProject} onOpen={openFile}
-        visible={showFiles} refreshToken={filesRefreshToken}
-        {watchError} onRetryWatch={() => { watchRetry++; }}
-        searchFocusToken={showFiles ? fileSearchFocusToken : 0} />
-    {/if}
-  </aside>
-  <GitSidebar projectId={selectedProjectId}
-    visible={showGit} refreshToken={filesRefreshToken + gitWatchRefreshToken}
-    onResizeStart={(event) => startPanelResize("git", event)}
-    selected={openedDiff?.projectId === selectedProjectId ? openedDiff : null} onOpen={openGitDiff}
-    onBusyChange={(busy) => { gitIndexBusy = busy; }}
-    onChanged={(projectId, path) => {
-      if (openedDiff?.projectId === projectId && (!path || openedDiff.path === path)) openedDiff = null;
-      if (selectedProjectId === projectId) filesRefreshToken++;
-    }}
-    onClose={() => { gitVisible = false; }} />
-
-  <AppDialog request={dialogRequest} onResolve={resolveDialog} />
-  <AppToasts />
   </div>
+{/if}
+
 <style>
-  .recovery-error { position: absolute; inset: 0; z-index: 15; padding: 16px; background: var(--page-bg); overflow: auto; }
-  .recovery-error p { overflow-wrap: anywhere; }
+  .settings-overlay { position: fixed; inset: 0; z-index: 18; display: grid; place-items: center; padding: 36px; background: rgb(3 6 4 / 46%); }
+  .shell-overlay { position: absolute; inset: 8px; z-index: 12; min-width: 0; min-height: 0; overflow: hidden; border-radius: 6px; box-shadow: 0 18px 50px rgb(0 0 0 / 38%); }
+  .settings-modal { width: min(1100px, calc(100vw - 72px)); height: min(760px, calc(100vh - 72px)); min-width: 0; min-height: 0; overflow: hidden; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--page-bg); box-shadow: 0 24px 70px rgb(0 0 0 / 34%); outline: none; }
+  .settings-modal :global(.settings-page) { min-width: 0; }
+  .settings-modal :global(.settings-layout) { min-width: 0; min-height: 0; }
+  @media (max-width: 760px), (max-height: 560px) {
+    .settings-overlay { padding: 12px; }
+    .settings-modal { width: 100%; height: 100%; border-radius: 8px; }
+  }
 </style>

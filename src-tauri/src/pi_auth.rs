@@ -27,8 +27,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, Url};
 
-use crate::{app_paths::AppPaths, provider::validate_provider_id};
 use crate::message::{msg, msg_with};
+use crate::{app_paths::AppPaths, provider::validate_provider_id};
 
 /// include_str! 的桥接脚本源码，与 `bridge.rs` 的 pi 扩展同一打包模式：
 /// 随应用携带、使用时按内容比对安装到托管目录，不依赖打包资源解析。
@@ -222,17 +222,26 @@ impl BridgeProcess {
             .expect("pi auth pending map poisoned")
             .insert(id, sender);
         let write_result = (|| -> Result<(), String> {
-            let mut slot = self.stdin.lock().map_err(|_| msg("pi.auth.internal_unavailable"))?;
+            let mut slot = self
+                .stdin
+                .lock()
+                .map_err(|_| msg("pi.auth.internal_unavailable"))?;
             let stdin = slot
                 .as_mut()
                 .ok_or_else(|| msg("pi.auth.bridge_unavailable"))?;
-            let body = serde_json::to_vec(&payload)
-                .map_err(|error| msg_with("pi.auth.request_invalid", &[("error", &error.to_string())]))?;
+            let body = serde_json::to_vec(&payload).map_err(|error| {
+                msg_with("pi.auth.request_invalid", &[("error", &error.to_string())])
+            })?;
             stdin
                 .write_all(&body)
                 .and_then(|()| stdin.write_all(b"\n"))
                 .and_then(|()| stdin.flush())
-                .map_err(|error| msg_with("pi.auth.request_write_failed", &[("error", &error.to_string())]))
+                .map_err(|error| {
+                    msg_with(
+                        "pi.auth.request_write_failed",
+                        &[("error", &error.to_string())],
+                    )
+                })
         })();
         if let Err(error) = write_result {
             self.shared
@@ -386,18 +395,34 @@ fn pi_sdk_index(paths: &AppPaths) -> Result<PathBuf, String> {
 /// 把桥接脚本安装到托管缓存目录（内容不变则跳过写盘）。
 fn install_bridge(paths: &AppPaths) -> Result<PathBuf, String> {
     let directory = paths.cache.join("auth-bridge");
-    fs::create_dir_all(&directory)
-        .map_err(|error| msg_with("pi.auth.bridge_install_failed", &[("error", &error.to_string())]))?;
+    fs::create_dir_all(&directory).map_err(|error| {
+        msg_with(
+            "pi.auth.bridge_install_failed",
+            &[("error", &error.to_string())],
+        )
+    })?;
     let destination = directory.join("pi-auth-bridge.mjs");
     if fs::read_to_string(&destination).ok().as_deref() == Some(BRIDGE_SOURCE) {
         return Ok(destination);
     }
-    let mut file = atomic_write_file::AtomicWriteFile::open(&destination)
-        .map_err(|error| msg_with("pi.auth.bridge_install_failed", &[("error", &error.to_string())]))?;
-    file.write_all(BRIDGE_SOURCE.as_bytes())
-        .map_err(|error| msg_with("pi.auth.bridge_install_failed", &[("error", &error.to_string())]))?;
-    file.commit()
-        .map_err(|error| msg_with("pi.auth.bridge_install_failed", &[("error", &error.to_string())]))?;
+    let mut file = atomic_write_file::AtomicWriteFile::open(&destination).map_err(|error| {
+        msg_with(
+            "pi.auth.bridge_install_failed",
+            &[("error", &error.to_string())],
+        )
+    })?;
+    file.write_all(BRIDGE_SOURCE.as_bytes()).map_err(|error| {
+        msg_with(
+            "pi.auth.bridge_install_failed",
+            &[("error", &error.to_string())],
+        )
+    })?;
+    file.commit().map_err(|error| {
+        msg_with(
+            "pi.auth.bridge_install_failed",
+            &[("error", &error.to_string())],
+        )
+    })?;
     Ok(destination)
 }
 
@@ -449,7 +474,9 @@ fn host_port_to_http_proxy(value: &str) -> Option<String> {
     let (host, port_text) = value.rsplit_once(':')?;
     let host = host.trim();
     let port_text = port_text.trim();
-    if host.is_empty() || port_text.is_empty() || !port_text.bytes().all(|byte| byte.is_ascii_digit())
+    if host.is_empty()
+        || port_text.is_empty()
+        || !port_text.bytes().all(|byte| byte.is_ascii_digit())
     {
         return None;
     }
@@ -460,8 +487,9 @@ fn host_port_to_http_proxy(value: &str) -> Option<String> {
     Some(format!("http://{host}:{port}"))
 }
 
-/// Windows 系统代理解析（注册表 Internet Settings）。未启用、无法解析或不满足
-/// 安全规则（`validate_proxy`：仅 HTTPS 或回环 HTTP）时返回 None，保持直连现状。
+/// Windows 系统代理解析（注册表 Internet Settings）。某些代理客户端会把
+/// ProxyEnable 保持为 0，但仍写入 ProxyServer 并由浏览器实际使用；只要地址
+/// 通过安全校验，就应交给桥接子进程，否则 OAuth 会绕过浏览器代理直连超时。
 #[cfg(windows)]
 fn detect_system_proxy() -> Option<String> {
     use crate::provider::validate_proxy;
@@ -470,10 +498,6 @@ fn detect_system_proxy() -> Option<String> {
     let settings = winreg::RegKey::predef(HKEY_CURRENT_USER)
         .open_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings")
         .ok()?;
-    let enabled: u32 = settings.get_value("ProxyEnable").ok()?;
-    if enabled == 0 {
-        return None;
-    }
     let raw: String = settings.get_value("ProxyServer").ok()?;
     let proxy = parse_windows_proxy_server(&raw)?;
     validate_proxy(Some(&proxy)).ok()?;
@@ -541,9 +565,12 @@ fn spawn_bridge(
     if let Some(inject) = inject {
         command.env("PI_AUTH_BRIDGE_TEST_INJECT", inject);
     }
-    let mut child = command
-        .spawn()
-        .map_err(|error| msg_with("pi.auth.bridge_launch_failed", &[("error", &error.to_string())]))?;
+    let mut child = command.spawn().map_err(|error| {
+        msg_with(
+            "pi.auth.bridge_launch_failed",
+            &[("error", &error.to_string())],
+        )
+    })?;
     let stdin = child
         .stdin
         .take()
@@ -593,7 +620,10 @@ impl PiAuthManager {
         app: Option<&AppHandle>,
         paths: &AppPaths,
     ) -> Result<Arc<BridgeProcess>, String> {
-        let mut guard = self.bridge.lock().map_err(|_| msg("pi.auth.internal_unavailable"))?;
+        let mut guard = self
+            .bridge
+            .lock()
+            .map_err(|_| msg("pi.auth.internal_unavailable"))?;
         if let Some(bridge) = guard.as_ref() {
             if !bridge.shared.dead.load(Ordering::Acquire) {
                 return Ok(bridge.clone());
@@ -623,7 +653,12 @@ pub async fn pi_auth_providers(app: AppHandle) -> Result<Vec<PiAuthProviderInfo>
         serde_json::from_value::<Vec<PiAuthProviderInfo>>(
             value.get("providers").cloned().unwrap_or(Value::Null),
         )
-        .map_err(|error| msg_with("pi.auth.providers_invalid", &[("error", &error.to_string())]))
+        .map_err(|error| {
+            msg_with(
+                "pi.auth.providers_invalid",
+                &[("error", &error.to_string())],
+            )
+        })
     })
     .await
     .map_err(|error| msg_with("pi.auth.worker_failed", &[("error", &error.to_string())]))?
@@ -739,7 +774,10 @@ pub async fn pi_auth_start_login(
 fn assert_active_login(bridge: &BridgeProcess, login_id: &str) -> Result<(), String> {
     match bridge.active_login() {
         Some((id, _)) if id == login_id => Ok(()),
-        Some((_, provider)) => Err(msg_with("pi.auth.login_not_owned", &[("provider", &provider)])),
+        Some((_, provider)) => Err(msg_with(
+            "pi.auth.login_not_owned",
+            &[("provider", &provider)],
+        )),
         None => Err(msg("pi.auth.login_missing")),
     }
 }
@@ -1236,7 +1274,10 @@ export default {{
         let login_id = ack["login"].as_str().unwrap().to_owned();
         wait_event(&events, "prompt").expect("select prompt should arrive");
         bridge
-            .request(json!({ "op": "cancel", "login": login_id }), CONTROL_TIMEOUT)
+            .request(
+                json!({ "op": "cancel", "login": login_id }),
+                CONTROL_TIMEOUT,
+            )
             .expect("cancel should succeed");
         let done = drain_until_done(&events).unwrap();
         assert_eq!(done["ok"], json!(false));
@@ -1326,7 +1367,10 @@ export default {
             }
         }
         bridge
-            .request(json!({ "op": "cancel", "login": login_id }), CONTROL_TIMEOUT)
+            .request(
+                json!({ "op": "cancel", "login": login_id }),
+                CONTROL_TIMEOUT,
+            )
             .expect("cleanup cancel should succeed");
     }
 
@@ -1398,7 +1442,8 @@ export default {
                         saw_prompt = true;
                     }
                     if event == Some("notify")
-                        && value.get("message").and_then(Value::as_str) == Some("chosen:device_code")
+                        && value.get("message").and_then(Value::as_str)
+                            == Some("chosen:device_code")
                     {
                         chosen = true;
                     }

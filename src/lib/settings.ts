@@ -6,6 +6,7 @@ export type ColorMode = "system" | "light" | "dark";
 export type Theme = string;
 export type CodeFont = "cascadia" | "consolas" | "jetbrains";
 export type CloseBehavior = "ask" | "minimize" | "exit";
+export type TerminalShell = "powershell" | "pwsh" | "bash" | "cmd";
 export interface ExternalEditor {
   kind: "vscode" | "notepadPlusPlus";
   executable: string;
@@ -32,6 +33,8 @@ export interface AppSettings {
   customThemes: ThemePack[];
   /** 界面语言。 */
   language: Locale;
+  /** 新建命令终端使用的 Shell；Pi TUI 终端不受此设置影响。 */
+  terminalShell: TerminalShell;
   piEnvironment: "managed";
 }
 
@@ -51,6 +54,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   snoozedUpdates: {},
   language: DEFAULT_LOCALE,
   externalEditor: null,
+  terminalShell: "powershell",
   piEnvironment: "managed",
   customThemes: [],
 };
@@ -65,11 +69,20 @@ export const CODE_FONT_OPTIONS: Array<{ value: CodeFont; label: string }> = [
 
 const DEFAULT_APP_STACK = `system-ui, "Segoe UI", "Microsoft YaHei UI", sans-serif`;
 const DEFAULT_SESSION_STACK = `system-ui, "Segoe UI", "Microsoft YaHei UI", sans-serif`;
+const MONOSPACE_CODE_FALLBACK = `"Cascadia Mono", "Cascadia Code", Consolas, "JetBrains Mono", "Segoe UI Mono", monospace`;
 const CODE_FONT_FAMILIES: Record<CodeFont, string> = {
-  cascadia: `"Cascadia Mono", Consolas, monospace`,
-  consolas: `Consolas, "Cascadia Mono", monospace`,
-  jetbrains: `"JetBrains Mono", Consolas, monospace`,
+  cascadia: MONOSPACE_CODE_FALLBACK,
+  consolas: `Consolas, "Cascadia Mono", "Cascadia Code", "JetBrains Mono", "Segoe UI Mono", monospace`,
+  jetbrains: `"JetBrains Mono", "Cascadia Mono", "Cascadia Code", Consolas, "Segoe UI Mono", monospace`,
 };
+
+function ensureMonospaceFallback(stack: string): string {
+  const normalized = stack.trim();
+  if (!normalized) return MONOSPACE_CODE_FALLBACK;
+  return /(?:^|,)\s*(?:ui-)?monospace\s*(?:,|$)/i.test(normalized)
+    ? normalized
+    : `${normalized}, ${MONOSPACE_CODE_FALLBACK}`;
+}
 
 function quoteFamily(name: string): string {
   const escaped = name.replace(/["\\]/g, "").trim();
@@ -91,9 +104,14 @@ export function cssSessionFontFamily(name: string, themeFont?: string): string {
   return fontFamilyStack(name, themeFont?.trim() || DEFAULT_SESSION_STACK);
 }
 
+/** 原生 TUI 与命令终端优先使用等宽代码字体；未显式选择会话字体时不回落到比例字体。 */
+export function cssTerminalFontFamily(name: string, codeFont: CodeFont, themeFont?: string): string {
+  return name.trim() ? fontFamilyStack(name, cssCodeFontFamily(codeFont, themeFont)) : cssCodeFontFamily(codeFont, themeFont);
+}
+
 /** 代码字体：默认项（cascadia）允许主题覆盖，用户显式选择时以用户为准。 */
 export function cssCodeFontFamily(font: CodeFont, themeFont?: string): string {
-  if (font === "cascadia") return themeFont?.trim() || CODE_FONT_FAMILIES.cascadia;
+  if (font === "cascadia") return ensureMonospaceFallback(themeFont?.trim() || CODE_FONT_FAMILIES.cascadia);
   return CODE_FONT_FAMILIES[font];
 }
 

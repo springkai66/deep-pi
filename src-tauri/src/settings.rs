@@ -40,6 +40,14 @@ fn default_close_behavior() -> String {
     "ask".into()
 }
 
+fn default_terminal_shell() -> String {
+    if cfg!(windows) {
+        "powershell".into()
+    } else {
+        "bash".into()
+    }
+}
+
 fn default_pi_environment() -> String {
     "managed".into()
 }
@@ -53,6 +61,19 @@ fn deserialize_pi_environment<'de, D: serde::Deserializer<'de>>(
     } else {
         value
     })
+}
+
+fn deserialize_terminal_shell<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<String, D::Error> {
+    let value = String::deserialize(deserializer)?;
+    Ok(
+        if matches!(value.as_str(), "powershell" | "pwsh" | "bash" | "cmd") {
+            value
+        } else {
+            default_terminal_shell()
+        },
+    )
 }
 
 /// 导入主题数量上限，避免设置文件被无限撑大。
@@ -131,6 +152,11 @@ pub struct AppSettings {
     #[serde(default)]
     pub external_editor: Option<crate::external_editor::ExternalEditor>,
     #[serde(
+        default = "default_terminal_shell",
+        deserialize_with = "deserialize_terminal_shell"
+    )]
+    pub terminal_shell: String,
+    #[serde(
         default = "default_pi_environment",
         deserialize_with = "deserialize_pi_environment"
     )]
@@ -163,6 +189,7 @@ impl Default for AppSettings {
             code_font: default_code_font(),
             close_behavior: default_close_behavior(),
             external_editor: None,
+            terminal_shell: default_terminal_shell(),
             pi_environment: default_pi_environment(),
             custom_themes: Vec::new(),
             language: default_language(),
@@ -295,6 +322,12 @@ fn validate(settings: &AppSettings) -> Result<(), String> {
     }
     if !matches!(settings.language.as_str(), "zh-CN" | "zh-TW" | "en") {
         return Err("language must be zh-CN, zh-TW, or en".into());
+    }
+    if !matches!(
+        settings.terminal_shell.as_str(),
+        "powershell" | "pwsh" | "bash" | "cmd"
+    ) {
+        return Err("terminalShell is invalid".into());
     }
     if let Some(editor) = &settings.external_editor {
         editor.validate()?;

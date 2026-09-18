@@ -1235,7 +1235,15 @@
               <span>{t("请求选项")}</span>
               <button type="button" class="quiet-button compact" onclick={addHeader}><Plus size={13} />{t("添加 Header")}</button>
             </div>
-            <label>{t("代理")}<input bind:value={draft.proxy} placeholder="http://127.0.0.1:7890" autocomplete="url" /></label>
+            <div class="proxy-field">
+              <label>{t("模型代理")}
+                <input bind:value={draft.proxy} placeholder="http://127.0.0.1:7890" autocomplete="url" />
+              </label>
+              <span class="proxy-state" class:configured={Boolean(draft.proxy?.trim())} role="status">
+                {draft.proxy?.trim() ? t("已启用") : t("未启用")}
+              </span>
+            </div>
+            <p class="field-hint">{t("留空则直连；代理 URL 必须使用 HTTPS 或本机回环 HTTP。")}</p>
             {#if headerEntries.length === 0}
               <p class="empty">{t("没有自定义 Header。")}</p>
             {:else}
@@ -1474,7 +1482,11 @@
   .primary-button:hover:not(:disabled) { filter: brightness(1.08); }
   .quiet-button.compact { min-height: 26px; padding: 0 7px; }
   button:disabled { cursor: default; opacity: .45; }
-  .request-section > label { margin-bottom: 8px; }
+  .proxy-field { display: flex; align-items: end; gap: 8px; }
+  .proxy-field label { flex: 1; min-width: 0; }
+  .proxy-state { flex-shrink: 0; margin-bottom: 7px; color: var(--text-muted); font-size: 10px; }
+  .proxy-state.configured { color: var(--accent); }
+  .field-hint { margin: 6px 0 8px; color: var(--text-muted); font-size: 10px; }
   .header-list { display: grid; gap: 6px; }
   .header-row { display: grid; grid-template-columns: minmax(100px, .8fr) minmax(120px, 1.2fr) 30px; gap: 6px; align-items: center; }
   .credential-row { gap: 7px; }

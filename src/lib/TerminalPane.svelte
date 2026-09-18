@@ -8,8 +8,7 @@
   import { onMount } from "svelte";
   import { Bot } from "@lucide/svelte";
   import {
-    cssCodeFontFamily,
-    cssSessionFontFamily,
+    cssTerminalFontFamily,
     isLightColorMode,
     FONT_SIZE_RANGE,
     type CodeFont,
@@ -106,10 +105,17 @@
 
   $effect(() => {
     if (!terminal) return;
-    terminal.options.fontFamily = cssSessionFontFamily(sessionFontName) || cssCodeFontFamily(codeFont);
+    terminal.options.fontFamily = cssTerminalFontFamily(sessionFontName, codeFont);
     terminal.options.fontSize = Math.round(Math.min(FONT_SIZE_RANGE.max, Math.max(FONT_SIZE_RANGE.min, sessionFontSize)));
     terminal.options.theme = terminalTheme(isLightColorMode(colorMode));
-    requestAnimationFrame(resizeTerminal);
+    const refreshLayout = () => {
+      if (!terminal) return;
+      terminal.clearTextureAtlas();
+      terminal.refresh(0, Math.max(0, terminal.rows - 1));
+      resizeTerminal();
+    };
+    requestAnimationFrame(refreshLayout);
+    void document.fonts.ready.then(refreshLayout).catch(() => {});
   });
 
   function decodeBase64(value: string): Uint8Array {
@@ -123,9 +129,12 @@
       convertEol: false,
       cursorBlink: true,
       cursorStyle: "bar",
-      fontFamily: cssSessionFontFamily(sessionFontName) || cssCodeFontFamily(codeFont),
+      fontFamily: cssTerminalFontFamily(sessionFontName, codeFont),
       fontSize: Math.round(Math.min(FONT_SIZE_RANGE.max, Math.max(FONT_SIZE_RANGE.min, sessionFontSize))),
-      lineHeight: 1.15,
+      lineHeight: 1.2,
+      letterSpacing: 0,
+      fontWeight: 400,
+      fontWeightBold: 600,
       scrollback: 5_000,
       theme: terminalTheme(isLightColorMode(colorMode)),
     });
@@ -184,6 +193,11 @@
       }).catch(() => {});
     };
     resizeTerminal = resize;
+    void document.fonts.ready.then(() => {
+      if (disposed) return;
+      terminalInstance.refresh(0, Math.max(0, terminalInstance.rows - 1));
+      resize();
+    }).catch(() => {});
 
     const resizeObserver = new ResizeObserver(resize);
     resizeObserver.observe(container);
@@ -251,6 +265,8 @@
     border-radius: 6px;
     background: #111412;
     font-family: var(--code-font);
+    font-variant-ligatures: none;
+    font-feature-settings: "liga" 0, "calt" 0;
   }
 
   .terminal-pane.hidden {

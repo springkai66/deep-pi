@@ -30,6 +30,11 @@ describe("compact session header invariants", () => {
     expect(preview).toContain('<GitDiffView');
   });
 
+  it("creates a new session without a concurrent-write confirmation dialog", () => {
+    expect(page).not.toContain('t("确认并发写入")');
+    expect(page).not.toContain('t("该项目已有活动任务，继续可能产生文件冲突。仍要创建任务吗？")');
+  });
+
   it("replaces the title, suppresses empty metadata, and preserves narrow-pane actions", () => {
     expect(chat).toContain('tabs?: Snippet');
     expect(chat).toContain('<div class="header-tabs">{@render tabs()}</div>');
@@ -41,5 +46,12 @@ describe("compact session header invariants", () => {
     expect(tabs).toContain('.session-tab:focus-within .session-tab-close');
     expect(tabs).not.toContain('tabindex="-1"\n          class="session-tab-close"');
     expect(tabs).toContain('width: 22px;\n    height: 22px;');
+  });
+  it("keeps the Pi terminal visible while the lazy component loads", () => {
+    expect(page).toContain('if (mode === "tui" && !terminalModule) loadTerminalModule();');
+    expect(page).toContain("{:else if terminalModule}");
+    expect(page).toMatch(/\{:else\}\r?\n\s+<section class="terminal-pane"/);
+    expect(page).toContain("available: nextTerminalTaskIds.filter");
+    expect(page).toContain("activeTaskId = initialPane.active;");
   });
 });

@@ -6,6 +6,7 @@ mod agenticskills;
 mod app_paths;
 mod board;
 mod bridge;
+mod checklist;
 mod credentials;
 mod diagnostics;
 mod dialog_text;
@@ -47,6 +48,7 @@ mod rpc_transport;
 mod runtime;
 mod runtime_pointer;
 mod settings;
+mod shell;
 mod snapshot;
 mod startup;
 mod task;
@@ -97,6 +99,7 @@ pub fn run() {
         .manage(operation::OperationManager::default())
         .manage(package::PackageOperationLock::default())
         .manage(pty::PtyManager::default())
+        .manage(shell::ShellManager::default())
         .manage(rpc::RpcManager::default())
         .manage(rpc_history::HistoryStore::default())
         .manage(project_files::FileIndexGate::default())
@@ -139,6 +142,7 @@ pub fn run() {
                     paths.managed_pi_runtime()?;
                     paths.managed_dsh_runtime()?;
                     let store = task::TaskStore::open(&paths.database)?;
+                    let checklist_store = checklist::ChecklistStore::open(&paths.checklist)?;
                     let file_recovery = file_recovery::RecoveryStore::open(
                         &paths.database.with_file_name("file-recovery.db"),
                     )?;
@@ -150,6 +154,7 @@ pub fn run() {
                     worker_app.manage(paths);
                     worker_app.manage(store);
                     worker_app.manage(file_recovery);
+                    worker_app.manage(checklist_store);
                     worker_app.manage(settings);
                     log::info!(
                         "event=app_initialization status=ready duration_ms={}",
@@ -180,6 +185,11 @@ pub fn run() {
                 diagnostics::diagnostics_clear,
                 diagnostics::diagnostics_export,
                 board::open_board_window,
+                checklist::open_checklist_window,
+                checklist::list_checklist_items,
+                checklist::add_checklist_item,
+                checklist::toggle_checklist_item,
+                checklist::delete_checklist_item,
                 rpc::start_rpc_task,
                 rpc::subscribe_rpc,
                 rpc::rpc_command,
@@ -268,6 +278,10 @@ pub fn run() {
                 pty::stop_all_pi_tasks,
                 pty::stop_pi_task,
                 pty::stop_pi_run,
+                shell::start_shell,
+                shell::write_shell,
+                shell::resize_shell,
+                shell::stop_shell,
                 runtime::runtime_status,
                 runtime::check_runtime_updates,
                 runtime::clear_runtime_update_cache,

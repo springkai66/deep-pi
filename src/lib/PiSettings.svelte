@@ -230,6 +230,19 @@
           </label>
           {#if taskLimitError}<p id="task-limit-error" role="alert">{taskLimitError}</p>{/if}
         </section>
+        <section class="settings-group" aria-labelledby="terminal-heading">
+          <h3 id="terminal-heading">{t("命令终端")}</h3>
+          <label class="setting-control"><strong>{t("默认 Shell")}</strong>
+            <select value={runtime.settings.terminalShell} aria-label={t("默认 Shell")}
+              onchange={(event) => updateSettings({ terminalShell: event.currentTarget.value as AppSettings["terminalShell"] })}>
+              <option value="powershell">PowerShell</option>
+              <option value="pwsh">PowerShell 7</option>
+              <option value="bash">Bash</option>
+              <option value="cmd">{t("命令提示符")}</option>
+            </select>
+          </label>
+          <p class="muted">{t("只影响之后打开的命令终端；Pi 终端仍用于 Pi TUI 会话。")}</p>
+        </section>
       </div>
       <div class="settings-panel" hidden={category !== "appearance"}>
         <section class="settings-group" aria-labelledby="theme-heading">

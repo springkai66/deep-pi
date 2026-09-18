@@ -191,7 +191,12 @@ pub fn validate_proxy(proxy: Option<&str>) -> Result<(), String> {
         return Ok(());
     };
     valid_text(proxy, "provider.proxy.invalid", MAX_URL_LENGTH)?;
-    let url = Url::parse(proxy).map_err(|error| msg_with("provider.proxy.unparsable", &[("error", &error.to_string())]))?;
+    let url = Url::parse(proxy).map_err(|error| {
+        msg_with(
+            "provider.proxy.unparsable",
+            &[("error", &error.to_string())],
+        )
+    })?;
     let is_loopback_http =
         url.scheme() == "http" && matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1"));
     if url.scheme() != "https" && !is_loopback_http {
@@ -718,7 +723,12 @@ fn provider_response_body(body: &mut ureq::Body) -> Result<String, String> {
         .limit(MAX_PROVIDER_RESPONSE_BYTES)
         .lossy_utf8(true)
         .read_to_string()
-        .map_err(|error| msg_with("provider.model_response.read_failed", &[("error", &error.to_string())]))
+        .map_err(|error| {
+            msg_with(
+                "provider.model_response.read_failed",
+                &[("error", &error.to_string())],
+            )
+        })
 }
 
 fn first_string(object: &Map<String, Value>, keys: &[&str]) -> Option<String> {
@@ -766,8 +776,12 @@ pub fn parse_provider_models(
     body: &str,
     provider_id: &str,
 ) -> Result<Vec<ProviderModelSummary>, String> {
-    let value: Value = serde_json::from_str(body)
-        .map_err(|error| msg_with("provider.model_response.invalid", &[("error", &error.to_string())]))?;
+    let value: Value = serde_json::from_str(body).map_err(|error| {
+        msg_with(
+            "provider.model_response.invalid",
+            &[("error", &error.to_string())],
+        )
+    })?;
     let entries = value
         .as_array()
         .or_else(|| value.get("data").and_then(Value::as_array))
@@ -852,8 +866,12 @@ pub(crate) fn provider_agent(provider: &ProviderRecord) -> Result<ureq::Agent, S
         .timeout_global(Some(PROVIDER_REQUEST_TIMEOUT))
         .http_status_as_error(false);
     if let Some(proxy) = provider.proxy.as_deref() {
-        let proxy =
-            ureq::Proxy::new(proxy).map_err(|error| msg_with("provider.proxy.unparsable", &[("error", &error.to_string())]))?;
+        let proxy = ureq::Proxy::new(proxy).map_err(|error| {
+            msg_with(
+                "provider.proxy.unparsable",
+                &[("error", &error.to_string())],
+            )
+        })?;
         config = config.proxy(Some(proxy));
     }
     Ok(config.build().new_agent())
@@ -904,8 +922,12 @@ fn chat_agent(provider: &ProviderRecord, timeout: Duration) -> Result<ureq::Agen
         .timeout_global(Some(timeout))
         .http_status_as_error(false);
     if let Some(proxy) = provider.proxy.as_deref() {
-        let proxy =
-            ureq::Proxy::new(proxy).map_err(|error| msg_with("provider.proxy.unparsable", &[("error", &error.to_string())]))?;
+        let proxy = ureq::Proxy::new(proxy).map_err(|error| {
+            msg_with(
+                "provider.proxy.unparsable",
+                &[("error", &error.to_string())],
+            )
+        })?;
         config = config.proxy(Some(proxy));
     }
     Ok(config.build().new_agent())
@@ -1091,9 +1113,12 @@ fn fetch_provider_models(provider: &ProviderRecord) -> Result<Vec<ProviderModelS
     let agent = provider_agent(provider)?;
     let request = agent.get(url.as_str()).header("Accept", "application/json");
     let request = apply_provider_auth(request, provider, api_key.as_deref());
-    let mut response = request
-        .call()
-        .map_err(|error| msg_with("provider.model_request.error", &[("error", &error.to_string())]))?;
+    let mut response = request.call().map_err(|error| {
+        msg_with(
+            "provider.model_request.error",
+            &[("error", &error.to_string())],
+        )
+    })?;
     let status = response.status().as_u16();
     let body = provider_response_body(response.body_mut())?;
     if !(200..300).contains(&status) {

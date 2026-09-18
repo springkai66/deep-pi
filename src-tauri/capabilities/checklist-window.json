@@ -1,0 +1,13 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "checklist-window",
+  "description": "四象限清单独立窗口：关闭自身、按标题栏拖动无边框窗口、边缘缩放、设置窗口标题",
+  "windows": ["checklist"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-close",
+    "core:window:allow-set-title",
+    "core:window:allow-start-dragging",
+    "core:window:allow-start-resize-dragging"
+  ]
+}

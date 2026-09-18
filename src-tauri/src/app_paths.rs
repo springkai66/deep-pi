@@ -5,6 +5,7 @@ use crate::message::{msg, msg_with};
 #[derive(Clone, Debug)]
 pub struct AppPaths {
     pub database: PathBuf,
+    pub checklist: PathBuf,
     pub settings: PathBuf,
     pub backups: PathBuf,
     pub pi_home: PathBuf,
@@ -39,6 +40,7 @@ impl AppPaths {
     ) -> Result<Self, String> {
         let paths = Self {
             database: roaming.join("deeppi.db"),
+            checklist: roaming.join("checklist.db"),
             settings: roaming.join("settings.json"),
             backups: roaming.join("backups"),
             pi_home: roaming.join("agents").join("pi"),
@@ -255,6 +257,11 @@ mod tests {
             .parent()
             .expect("database has a parent")
             .is_dir());
+        assert_eq!(
+            paths.checklist,
+            root.join("roaming").join("checklist.db"),
+            "checklist stays in DeepPi application data",
+        );
         assert!(paths.pi_home.is_dir());
         assert!(paths.dsh_home.is_dir());
         assert!(paths.runtimes.is_dir());

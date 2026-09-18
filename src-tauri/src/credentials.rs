@@ -195,7 +195,12 @@ pub async fn test_provider_connection(
         test_provider_connection_inner(app.state(), request)
     })
     .await
-    .map_err(|error| msg_with("provider.connection.worker_failed", &[("error", &error.to_string())]))?
+    .map_err(|error| {
+        msg_with(
+            "provider.connection.worker_failed",
+            &[("error", &error.to_string())],
+        )
+    })?
 }
 
 fn test_provider_connection_inner(
@@ -222,9 +227,12 @@ fn test_provider_connection_inner(
     let api_key = provider_api_key(&provider.id)?;
     let request = agent.get(&probe_url).header("Accept", "application/json");
     let request = crate::provider::apply_provider_auth(request, &provider, api_key.as_deref());
-    let response = request
-        .call()
-        .map_err(|error| msg_with("provider.connection.failed", &[("error", &error.to_string())]))?;
+    let response = request.call().map_err(|error| {
+        msg_with(
+            "provider.connection.failed",
+            &[("error", &error.to_string())],
+        )
+    })?;
     let status = response.status().as_u16();
     Ok(ProviderConnectionResult {
         provider_id,
@@ -241,7 +249,12 @@ pub async fn test_model_connection(
     use tauri::Manager;
     tauri::async_runtime::spawn_blocking(move || test_model_connection_inner(app.state(), request))
         .await
-        .map_err(|error| msg_with("provider.model_test.worker_failed", &[("error", &error.to_string())]))?
+        .map_err(|error| {
+            msg_with(
+                "provider.model_test.worker_failed",
+                &[("error", &error.to_string())],
+            )
+        })?
 }
 
 fn model_probe_target(
@@ -332,8 +345,12 @@ fn test_model_connection_inner(
     };
     let mut last_error = String::new();
     for (target_url, body) in targets {
-        let url = tauri::Url::parse(&target_url)
-            .map_err(|error| msg_with("provider.test_url.invalid", &[("error", &error.to_string())]))?;
+        let url = tauri::Url::parse(&target_url).map_err(|error| {
+            msg_with(
+                "provider.test_url.invalid",
+                &[("error", &error.to_string())],
+            )
+        })?;
         let request = agent
             .post(url.as_str())
             .header("Accept", "application/json");
@@ -360,7 +377,10 @@ fn test_model_connection_inner(
                 last_error = format!("HTTP {status}");
             }
             Err(error) => {
-                last_error = msg_with("provider.connection.failed", &[("error", &error.to_string())]);
+                last_error = msg_with(
+                    "provider.connection.failed",
+                    &[("error", &error.to_string())],
+                );
                 result.error = Some(last_error.clone());
                 break;
             }

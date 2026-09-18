@@ -206,6 +206,11 @@ pub fn install_main_window_hooks(app: &AppHandle) {
             if let Some(board) = app_for_exit.get_webview_window(BOARD_LABEL) {
                 let _ = board.destroy();
             }
+            if let Some(checklist) =
+                app_for_exit.get_webview_window(crate::checklist::CHECKLIST_LABEL)
+            {
+                let _ = checklist.destroy();
+            }
         }
     });
 }

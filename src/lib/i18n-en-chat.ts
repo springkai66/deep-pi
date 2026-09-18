@@ -125,6 +125,11 @@ export const EN_CHAT: Record<string, string> = {
   "退出应用": "Quit app",
   "同时运行任务数": "Concurrent tasks",
   "同时运行任务数必须为 1 到 16 的整数": "Concurrent tasks must be an integer from 1 to 16",
+  "命令终端": "Command terminal",
+  "默认 Shell": "Default shell",
+  "命令提示符": "Command Prompt",
+  "只影响之后打开的命令终端；Pi 终端仍用于 Pi TUI 会话。":
+    "Only affects command terminals opened from now on; the Pi terminal remains the Pi TUI session.",
 
   // —— 设置页：外观 ——
   "主题": "Themes",
