@@ -2,6 +2,8 @@
 export const EN_MISC: Record<string, string> = {
   // —— 应用对话框 AppDialog.svelte ——
   "关闭对话框": "Close",
+  "提示": "Notifications",
+  "关闭提示": "Dismiss notification",
   // 注意：「关闭」在本项目有两义——推理强度的 off 档（EN_CHAT 里是 "Off"）
   // 和关闭按钮。为避免同一个中文键被两种含义争用，对话框按钮的原文已改为
   // 「关闭对话框」，因此这里只需要上面这一条。

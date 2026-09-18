@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use tauri::{AppHandle, Manager, State, Url};
 
+use crate::message::{msg, msg_with};
 use crate::{app_paths::AppPaths, credentials::provider_api_key};
 
 const MAX_PROVIDERS: usize = 100;
@@ -103,23 +104,23 @@ pub struct DeleteProviderRequest {
     pub id: String,
 }
 
-fn valid_text(value: &str, field: &str, max_len: usize) -> Result<(), String> {
+fn valid_text(value: &str, code: &str, max_len: usize) -> Result<(), String> {
     if value.trim().is_empty()
         || value.len() > max_len
         || value.chars().any(|character| character.is_control())
     {
-        return Err(format!("{field} is invalid"));
+        return Err(msg(code));
     }
     Ok(())
 }
 
 pub(crate) fn validate_provider_id(id: &str) -> Result<(), String> {
-    valid_text(id, "provider id", 64)?;
+    valid_text(id, "provider.id.invalid", 64)?;
     if id
         .chars()
         .any(|character| !character.is_ascii_alphanumeric() && !matches!(character, '-' | '_'))
     {
-        return Err("provider id may contain only letters, numbers, '-' and '_'".into());
+        return Err(msg("provider.id.invalid"));
     }
     Ok(())
 }
@@ -128,22 +129,27 @@ pub fn validate_base_url(base_url: Option<&str>) -> Result<(), String> {
     let Some(base_url) = base_url else {
         return Ok(());
     };
-    valid_text(base_url, "base URL", MAX_URL_LENGTH)?;
-    let url = Url::parse(base_url).map_err(|error| format!("base URL is invalid: {error}"))?;
+    valid_text(base_url, "provider.base_url.invalid", MAX_URL_LENGTH)?;
+    let url = Url::parse(base_url).map_err(|error| {
+        msg_with(
+            "provider.base_url.unparsable",
+            &[("error", &error.to_string())],
+        )
+    })?;
     let is_loopback_http =
         url.scheme() == "http" && matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1"));
     if url.scheme() != "https" && !is_loopback_http {
-        return Err("base URL must use HTTPS or loopback HTTP".into());
+        return Err(msg("provider.base_url.scheme"));
     }
     if !url.username().is_empty() || url.password().is_some() || url.query().is_some() {
-        return Err("base URL must not contain credentials or a query".into());
+        return Err(msg("provider.base_url.query"));
     }
     Ok(())
 }
 
 fn validate_headers(headers: &BTreeMap<String, String>) -> Result<(), String> {
     if headers.len() > MAX_HEADERS {
-        return Err("too many provider headers".into());
+        return Err(msg("provider.headers.too_many"));
     }
     for (name, value) in headers {
         if name.is_empty()
@@ -169,12 +175,12 @@ fn validate_headers(headers: &BTreeMap<String, String>) -> Result<(), String> {
                     )
             })
         {
-            return Err("provider header name is invalid".into());
+            return Err(msg("provider.header.name.invalid"));
         }
         if value.len() > MAX_HEADER_VALUE_LENGTH
             || value.chars().any(|character| character.is_control())
         {
-            return Err("provider header value is invalid".into());
+            return Err(msg("provider.header.value.invalid"));
         }
     }
     Ok(())
@@ -184,15 +190,15 @@ pub fn validate_proxy(proxy: Option<&str>) -> Result<(), String> {
     let Some(proxy) = proxy else {
         return Ok(());
     };
-    valid_text(proxy, "proxy", MAX_URL_LENGTH)?;
-    let url = Url::parse(proxy).map_err(|error| format!("proxy is invalid: {error}"))?;
+    valid_text(proxy, "provider.proxy.invalid", MAX_URL_LENGTH)?;
+    let url = Url::parse(proxy).map_err(|error| msg_with("provider.proxy.unparsable", &[("error", &error.to_string())]))?;
     let is_loopback_http =
         url.scheme() == "http" && matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1"));
     if url.scheme() != "https" && !is_loopback_http {
-        return Err("proxy must use HTTPS or loopback HTTP".into());
+        return Err(msg("provider.proxy.scheme"));
     }
     if !url.username().is_empty() || url.password().is_some() || url.query().is_some() {
-        return Err("proxy must not contain credentials or a query".into());
+        return Err(msg("provider.proxy.query"));
     }
     Ok(())
 }
@@ -206,65 +212,65 @@ fn validate_cost(cost: Option<&ModelCostConfig>) -> Result<(), String> {
         .flatten()
     {
         if !value.is_finite() || value < 0.0 {
-            return Err("model costs must be finite and non-negative".into());
+            return Err(msg("provider.cost.invalid"));
         }
     }
     Ok(())
 }
 
 fn validate_model(model: &ConfiguredModel) -> Result<(), String> {
-    valid_text(&model.id, "model id", MAX_TEXT_LENGTH)?;
-    valid_text(&model.name, "model name", MAX_TEXT_LENGTH)?;
+    valid_text(&model.id, "provider.model_id.invalid", MAX_TEXT_LENGTH)?;
+    valid_text(&model.name, "provider.model_name.invalid", MAX_TEXT_LENGTH)?;
     if model.context_window == 0 || model.context_window > 100_000_000 {
-        return Err("context window is out of range".into());
+        return Err(msg("provider.context_window.invalid"));
     }
     if model.max_tokens == 0 || model.max_tokens > 100_000_000 {
-        return Err("max tokens is out of range".into());
+        return Err(msg("provider.max_tokens.invalid"));
     }
     if model.input.is_empty() || model.input.len() > 8 {
-        return Err("model input types are invalid".into());
+        return Err(msg("provider.input.invalid"));
     }
     for input in &model.input {
-        valid_text(input, "model input type", 32)?;
+        valid_text(input, "provider.input.invalid", 32)?;
     }
     if model.thinking_levels.len() > 8 {
-        return Err("model thinking levels are invalid".into());
+        return Err(msg("provider.levels.invalid"));
     }
     let mut levels = BTreeSet::new();
     for level in &model.thinking_levels {
-        valid_text(level, "thinking level", 32)?;
+        valid_text(level, "provider.levels.invalid", 32)?;
         if !levels.insert(level) {
-            return Err("model thinking levels must be unique".into());
+            return Err(msg("provider.levels.duplicate"));
         }
     }
     if !model.reasoning && !model.thinking_levels.is_empty() {
-        return Err("non-reasoning models cannot define thinking levels".into());
+        return Err(msg("provider.levels.not_reasoning"));
     }
     validate_cost(model.cost.as_ref())
 }
 
 fn validate_provider(request: &SaveProviderRequest) -> Result<(), String> {
     validate_provider_id(&request.id)?;
-    valid_text(&request.name, "provider name", MAX_TEXT_LENGTH)?;
-    valid_text(&request.api, "provider API", MAX_TEXT_LENGTH)?;
+    valid_text(&request.name, "provider.name.invalid", MAX_TEXT_LENGTH)?;
+    valid_text(&request.api, "provider.api.invalid", MAX_TEXT_LENGTH)?;
     if request
         .api
         .chars()
         .any(|character| character.is_whitespace())
     {
-        return Err("provider API must not contain whitespace".into());
+        return Err(msg("provider.model_api.whitespace"));
     }
     validate_base_url(request.base_url.as_deref())?;
     validate_proxy(request.proxy.as_deref())?;
     validate_headers(&request.headers)?;
     if request.models.len() > MAX_MODELS {
-        return Err("too many models".into());
+        return Err(msg("provider.models.too_many"));
     }
     let mut ids = BTreeSet::new();
     for model in &request.models {
         validate_model(model)?;
         if !ids.insert(&model.id) {
-            return Err("model ids must be unique".into());
+            return Err(msg("provider.models.duplicate"));
         }
     }
     Ok(())
@@ -576,7 +582,7 @@ fn read_models_file(path: &Path) -> Result<Value, String> {
     let value: Value = serde_json::from_str(&content)
         .map_err(|error| format!("Pi models.json is invalid: {error}"))?;
     if !value.is_object() {
-        return Err("Pi models.json root must be an object".into());
+        return Err(msg("provider.file.root_invalid"));
     }
     Ok(value)
 }
@@ -601,7 +607,7 @@ pub(crate) fn list_provider_file(path: &Path) -> Result<Vec<ProviderRecord>, Str
         .and_then(Value::as_object)
         .ok_or_else(|| "Pi models.json providers must be an object".to_string())?;
     if providers.len() > MAX_PROVIDERS {
-        return Err("too many Pi providers".into());
+        return Err(msg("provider.count.too_many"));
     }
     providers
         .iter()
@@ -633,7 +639,7 @@ fn save_provider_file(
         .as_object_mut()
         .ok_or_else(|| "Pi models.json providers must be an object".to_string())?;
     if !providers.contains_key(&request.id) && providers.len() >= MAX_PROVIDERS {
-        return Err("too many Pi providers".into());
+        return Err(msg("provider.count.too_many"));
     }
     let provider = providers
         .entry(request.id.clone())
@@ -686,7 +692,12 @@ fn delete_provider_file(path: &Path, id: &str) -> Result<(), String> {
 
 pub(crate) fn provider_models_url(base_url: &str, api: &str) -> Result<Url, String> {
     validate_base_url(Some(base_url))?;
-    let mut url = Url::parse(base_url).map_err(|error| format!("base URL is invalid: {error}"))?;
+    let mut url = Url::parse(base_url).map_err(|error| {
+        msg_with(
+            "provider.base_url.unparsable",
+            &[("error", &error.to_string())],
+        )
+    })?;
     let base_path = url.path().trim_end_matches('/');
     let suffix = if api == "anthropic-messages" && !base_path.ends_with("/v1") {
         "v1/models"
@@ -707,7 +718,7 @@ fn provider_response_body(body: &mut ureq::Body) -> Result<String, String> {
         .limit(MAX_PROVIDER_RESPONSE_BYTES)
         .lossy_utf8(true)
         .read_to_string()
-        .map_err(|error| format!("failed to read provider model response: {error}"))
+        .map_err(|error| msg_with("provider.model_response.read_failed", &[("error", &error.to_string())]))
 }
 
 fn first_string(object: &Map<String, Value>, keys: &[&str]) -> Option<String> {
@@ -756,7 +767,7 @@ pub fn parse_provider_models(
     provider_id: &str,
 ) -> Result<Vec<ProviderModelSummary>, String> {
     let value: Value = serde_json::from_str(body)
-        .map_err(|error| format!("provider model response is invalid JSON: {error}"))?;
+        .map_err(|error| msg_with("provider.model_response.invalid", &[("error", &error.to_string())]))?;
     let entries = value
         .as_array()
         .or_else(|| value.get("data").and_then(Value::as_array))
@@ -842,7 +853,7 @@ pub(crate) fn provider_agent(provider: &ProviderRecord) -> Result<ureq::Agent, S
         .http_status_as_error(false);
     if let Some(proxy) = provider.proxy.as_deref() {
         let proxy =
-            ureq::Proxy::new(proxy).map_err(|error| format!("proxy is invalid: {error}"))?;
+            ureq::Proxy::new(proxy).map_err(|error| msg_with("provider.proxy.unparsable", &[("error", &error.to_string())]))?;
         config = config.proxy(Some(proxy));
     }
     Ok(config.build().new_agent())
@@ -894,7 +905,7 @@ fn chat_agent(provider: &ProviderRecord, timeout: Duration) -> Result<ureq::Agen
         .http_status_as_error(false);
     if let Some(proxy) = provider.proxy.as_deref() {
         let proxy =
-            ureq::Proxy::new(proxy).map_err(|error| format!("proxy is invalid: {error}"))?;
+            ureq::Proxy::new(proxy).map_err(|error| msg_with("provider.proxy.unparsable", &[("error", &error.to_string())]))?;
         config = config.proxy(Some(proxy));
     }
     Ok(config.build().new_agent())
@@ -915,8 +926,12 @@ pub(crate) fn chat_url(base_url: &str, api: &str) -> Result<String, String> {
         format!("{base}/chat/completions")
     };
     // 仅用于校验 URL 形状；实际请求使用字符串。
-    ureq::http::Uri::try_from(path.as_str())
-        .map_err(|error| format!("base URL is invalid: {error}"))?;
+    ureq::http::Uri::try_from(path.as_str()).map_err(|error| {
+        msg_with(
+            "provider.base_url.unparsable",
+            &[("error", &error.to_string())],
+        )
+    })?;
     Ok(path)
 }
 
@@ -1070,7 +1085,7 @@ fn fetch_provider_models(provider: &ProviderRecord) -> Result<Vec<ProviderModelS
     let base_url = provider
         .base_url
         .as_deref()
-        .ok_or_else(|| "provider has no base URL".to_string())?;
+        .ok_or_else(|| msg("provider.base_url.missing"))?;
     let url = provider_models_url(base_url, &provider.api)?;
     let api_key = provider_api_key(&provider.id)?;
     let agent = provider_agent(provider)?;
@@ -1078,11 +1093,14 @@ fn fetch_provider_models(provider: &ProviderRecord) -> Result<Vec<ProviderModelS
     let request = apply_provider_auth(request, provider, api_key.as_deref());
     let mut response = request
         .call()
-        .map_err(|error| format!("provider model request failed: {error}"))?;
+        .map_err(|error| msg_with("provider.model_request.error", &[("error", &error.to_string())]))?;
     let status = response.status().as_u16();
     let body = provider_response_body(response.body_mut())?;
     if !(200..300).contains(&status) {
-        return Err(format!("provider model request failed: HTTP {status}"));
+        return Err(msg_with(
+            "provider.model_request.failed",
+            &[("status", &status.to_string())],
+        ));
     }
     parse_provider_models(&body, &provider.id)
 }
@@ -1106,7 +1124,7 @@ fn list_provider_models_inner(
     let provider = list_provider_file(&paths.pi_models_file())?
         .into_iter()
         .find(|provider| provider.id == request.provider_id)
-        .ok_or_else(|| format!("Pi provider not found: {}", request.provider_id))?;
+        .ok_or_else(|| msg_with("provider.not_found", &[("provider", &request.provider_id)]))?;
     fetch_provider_models(&provider)
 }
 

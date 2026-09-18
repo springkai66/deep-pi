@@ -25,9 +25,10 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, Url};
 
 use crate::{app_paths::AppPaths, provider::validate_provider_id};
+use crate::message::{msg, msg_with};
 
 /// include_str! 的桥接脚本源码，与 `bridge.rs` 的 pi 扩展同一打包模式：
 /// 随应用携带、使用时按内容比对安装到托管目录，不依赖打包资源解析。
@@ -133,6 +134,24 @@ pub struct PiAuthLoginAck {
 #[serde(rename_all = "camelCase")]
 pub struct PiAuthLoginRequest {
     provider_id: String,
+    /// 界面预先选定的登录方式（如 openai-codex 的 `browser` / `device_code`）；
+    /// 为 None 时由 pi 的默认流程决定，选择提示照常转发给界面。
+    #[serde(default)]
+    login_method: Option<String>,
+}
+
+/// 官方供应商可用模型（pi 运行时自带目录，官方登录后免 API Key）。
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PiOfficialModel {
+    pub id: String,
+    pub name: String,
+    pub context_window: Option<u64>,
+    pub max_tokens: Option<u64>,
+    pub reasoning: bool,
+    pub input: Vec<String>,
+    pub input_cost: Option<f64>,
+    pub output_cost: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -190,7 +209,7 @@ impl Drop for BridgeProcess {
 impl BridgeProcess {
     fn request(&self, mut payload: Value, timeout: Duration) -> Result<Value, String> {
         if self.shared.dead.load(Ordering::Acquire) {
-            return Err("pi auth bridge is not running".into());
+            return Err(msg("pi.auth.bridge_unavailable"));
         }
         let id = self.shared.next_request_id.fetch_add(1, Ordering::Relaxed) + 1;
         if let Some(object) = payload.as_object_mut() {
@@ -203,23 +222,23 @@ impl BridgeProcess {
             .expect("pi auth pending map poisoned")
             .insert(id, sender);
         let write_result = (|| -> Result<(), String> {
-            let mut slot = self.stdin.lock().map_err(|_| "pi auth stdin poisoned")?;
+            let mut slot = self.stdin.lock().map_err(|_| msg("pi.auth.internal_unavailable"))?;
             let stdin = slot
                 .as_mut()
-                .ok_or_else(|| "pi auth bridge is not running".to_string())?;
+                .ok_or_else(|| msg("pi.auth.bridge_unavailable"))?;
             let body = serde_json::to_vec(&payload)
-                .map_err(|error| format!("failed to serialize pi auth request: {error}"))?;
+                .map_err(|error| msg_with("pi.auth.request_invalid", &[("error", &error.to_string())]))?;
             stdin
                 .write_all(&body)
                 .and_then(|()| stdin.write_all(b"\n"))
                 .and_then(|()| stdin.flush())
-                .map_err(|error| format!("failed to write pi auth request: {error}"))
+                .map_err(|error| msg_with("pi.auth.request_write_failed", &[("error", &error.to_string())]))
         })();
         if let Err(error) = write_result {
             self.shared
                 .pending
                 .lock()
-                .map_err(|_| "pi auth pending map poisoned")?
+                .map_err(|_| msg("pi.auth.internal_unavailable"))?
                 .remove(&id);
             return Err(error);
         }
@@ -231,17 +250,18 @@ impl BridgeProcess {
                     let message = value
                         .get("error")
                         .and_then(Value::as_str)
-                        .unwrap_or("pi auth bridge request failed");
-                    Err(redact(message))
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| msg("pi.auth.bridge_request_failed"));
+                    Err(redact(&message))
                 }
             }
             Err(_) => {
                 self.shared
                     .pending
                     .lock()
-                    .map_err(|_| "pi auth pending map poisoned")?
+                    .map_err(|_| msg("pi.auth.internal_unavailable"))?
                     .remove(&id);
-                Err("pi auth bridge request timed out".into())
+                Err(msg("pi.auth.bridge_timeout"))
             }
         }
     }
@@ -285,7 +305,7 @@ fn read_line_bounded<R: BufRead>(
             if buffer.len() + take > maximum {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    "pi auth bridge output line exceeded the size limit",
+                    msg("pi.auth.bridge_output_invalid"),
                 ));
             }
             buffer.extend_from_slice(&available[..take]);
@@ -337,7 +357,7 @@ fn read_loop(
         }
     }
     shared.dead.store(true, Ordering::Release);
-    fail_pending(&shared, "pi auth bridge exited");
+    fail_pending(&shared, &msg("pi.auth.bridge_exited"));
     if let Ok(mut active) = shared.active_login.lock() {
         *active = None;
     }
@@ -359,7 +379,7 @@ fn pi_sdk_index(paths: &AppPaths) -> Result<PathBuf, String> {
     if sdk.is_file() {
         Ok(sdk)
     } else {
-        Err("managed Pi runtime has no SDK entry".into())
+        Err(msg("pi.auth.runtime_missing"))
     }
 }
 
@@ -367,18 +387,126 @@ fn pi_sdk_index(paths: &AppPaths) -> Result<PathBuf, String> {
 fn install_bridge(paths: &AppPaths) -> Result<PathBuf, String> {
     let directory = paths.cache.join("auth-bridge");
     fs::create_dir_all(&directory)
-        .map_err(|error| format!("failed to create pi auth bridge directory: {error}"))?;
+        .map_err(|error| msg_with("pi.auth.bridge_install_failed", &[("error", &error.to_string())]))?;
     let destination = directory.join("pi-auth-bridge.mjs");
     if fs::read_to_string(&destination).ok().as_deref() == Some(BRIDGE_SOURCE) {
         return Ok(destination);
     }
     let mut file = atomic_write_file::AtomicWriteFile::open(&destination)
-        .map_err(|error| format!("failed to open pi auth bridge: {error}"))?;
+        .map_err(|error| msg_with("pi.auth.bridge_install_failed", &[("error", &error.to_string())]))?;
     file.write_all(BRIDGE_SOURCE.as_bytes())
-        .map_err(|error| format!("failed to write pi auth bridge: {error}"))?;
+        .map_err(|error| msg_with("pi.auth.bridge_install_failed", &[("error", &error.to_string())]))?;
     file.commit()
-        .map_err(|error| format!("failed to commit pi auth bridge: {error}"))?;
+        .map_err(|error| msg_with("pi.auth.bridge_install_failed", &[("error", &error.to_string())]))?;
     Ok(destination)
+}
+
+/// 解析 Windows `ProxyServer` 注册表值，返回形如 `http://host:port` 的代理。
+/// 支持三种形态：`127.0.0.1:7890`（单值同时用于 http/https）、
+/// `http=…;https=…`（按协议分组，优先 https）、`socks=…`（仅 SOCKS 无法映射
+/// 为 HTTP 代理，返回 None）。其余或非法输入返回 None。
+#[cfg_attr(not(windows), allow(dead_code))]
+fn parse_windows_proxy_server(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    if raw.contains('=') {
+        let mut https = None;
+        let mut http = None;
+        for part in raw.split(';') {
+            let Some((scheme, value)) = part.trim().split_once('=') else {
+                continue;
+            };
+            match scheme.trim().to_ascii_lowercase().as_str() {
+                "https" => https = Some(value.trim()),
+                "http" => http = Some(value.trim()),
+                // ftp= / socks= 等其它协议条目与 HTTP(S) 代理环境变量无关。
+                _ => {}
+            }
+        }
+        return host_port_to_http_proxy(https.or(http)?);
+    }
+    host_port_to_http_proxy(raw)
+}
+
+/// 把 `host:port` 或 URL 形态的代理统一成 `http://host:port`。
+#[cfg_attr(not(windows), allow(dead_code))]
+fn host_port_to_http_proxy(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if value.contains("//") {
+        let url = Url::parse(value).ok()?;
+        if url.scheme() != "http" {
+            return None;
+        }
+        let host = url.host_str()?;
+        let port = url.port_or_known_default()?;
+        return Some(format!("http://{host}:{port}"));
+    }
+    let (host, port_text) = value.rsplit_once(':')?;
+    let host = host.trim();
+    let port_text = port_text.trim();
+    if host.is_empty() || port_text.is_empty() || !port_text.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let port: u16 = port_text.parse().ok()?;
+    if port == 0 {
+        return None;
+    }
+    Some(format!("http://{host}:{port}"))
+}
+
+/// Windows 系统代理解析（注册表 Internet Settings）。未启用、无法解析或不满足
+/// 安全规则（`validate_proxy`：仅 HTTPS 或回环 HTTP）时返回 None，保持直连现状。
+#[cfg(windows)]
+fn detect_system_proxy() -> Option<String> {
+    use crate::provider::validate_proxy;
+    use winreg::enums::HKEY_CURRENT_USER;
+
+    let settings = winreg::RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings")
+        .ok()?;
+    let enabled: u32 = settings.get_value("ProxyEnable").ok()?;
+    if enabled == 0 {
+        return None;
+    }
+    let raw: String = settings.get_value("ProxyServer").ok()?;
+    let proxy = parse_windows_proxy_server(&raw)?;
+    validate_proxy(Some(&proxy)).ok()?;
+    Some(proxy)
+}
+
+/// 非 Windows 平台暂不解析系统代理。
+#[cfg(not(windows))]
+fn detect_system_proxy() -> Option<String> {
+    None
+}
+
+/// 决定桥接子进程要注入的代理环境变量：已有任何代理环境变量时尊重现有配置
+/// （返回 None），否则使用系统代理。`lookup` 由调用方注入以便测试。
+fn decide_proxy_injection(
+    lookup: &dyn Fn(&str) -> Option<String>,
+    system_proxy: Option<String>,
+) -> Option<Vec<(&'static str, String)>> {
+    for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
+        if lookup(key).is_some_and(|value| !value.trim().is_empty()) {
+            return None;
+        }
+    }
+    let proxy = system_proxy?;
+    let no_proxy = "localhost,127.0.0.1,::1".to_string();
+    Some(vec![
+        ("HTTP_PROXY", proxy.clone()),
+        ("HTTPS_PROXY", proxy.clone()),
+        ("http_proxy", proxy.clone()),
+        ("https_proxy", proxy.clone()),
+        ("NO_PROXY", no_proxy.clone()),
+        ("no_proxy", no_proxy),
+    ])
 }
 
 fn spawn_bridge(
@@ -399,20 +527,31 @@ fn spawn_bridge(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
+    // 系统代理注入：桥接内的 OAuth token 交换走 pi 的 EnvHttpProxyAgent，只认
+    // HTTP(S)_PROXY 环境变量。浏览器端走系统代理能完成授权，而这里直连会被
+    // 部分官方服务（如 OpenAI）按地区拦截（HTTP 403），造成「网页成功、应用
+    // 报失败」。用户已显式配置代理环境变量时尊重现状，不覆盖。
+    if let Some(pairs) =
+        decide_proxy_injection(&|key| std::env::var(key).ok(), detect_system_proxy())
+    {
+        for (key, value) in pairs {
+            command.env(key, value);
+        }
+    }
     if let Some(inject) = inject {
         command.env("PI_AUTH_BRIDGE_TEST_INJECT", inject);
     }
     let mut child = command
         .spawn()
-        .map_err(|error| format!("failed to launch pi auth bridge: {error}"))?;
+        .map_err(|error| msg_with("pi.auth.bridge_launch_failed", &[("error", &error.to_string())]))?;
     let stdin = child
         .stdin
         .take()
-        .ok_or_else(|| "pi auth bridge stdin unavailable".to_string())?;
+        .ok_or_else(|| msg("pi.auth.bridge_pipe_unavailable"))?;
     let stdout = child
         .stdout
         .take()
-        .ok_or_else(|| "pi auth bridge stdout unavailable".to_string())?;
+        .ok_or_else(|| msg("pi.auth.bridge_pipe_unavailable"))?;
     let shared = Arc::new(BridgeShared {
         pending: Mutex::new(HashMap::new()),
         next_request_id: AtomicU64::new(0),
@@ -454,7 +593,7 @@ impl PiAuthManager {
         app: Option<&AppHandle>,
         paths: &AppPaths,
     ) -> Result<Arc<BridgeProcess>, String> {
-        let mut guard = self.bridge.lock().map_err(|_| "pi auth manager poisoned")?;
+        let mut guard = self.bridge.lock().map_err(|_| msg("pi.auth.internal_unavailable"))?;
         if let Some(bridge) = guard.as_ref() {
             if !bridge.shared.dead.load(Ordering::Acquire) {
                 return Ok(bridge.clone());
@@ -463,6 +602,14 @@ impl PiAuthManager {
         let bridge = Arc::new(spawn_bridge(app, paths, None, None)?);
         *guard = Some(bridge.clone());
         Ok(bridge)
+    }
+
+    /// 回收当前桥接进程（下一命令按需重建）。取消登录后调用，确保被中断
+    /// 会话的 active_login 标记随之消失，不会卡住后续的重新登录。
+    fn reset(&self) {
+        if let Ok(mut guard) = self.bridge.lock() {
+            *guard = None;
+        }
     }
 }
 
@@ -476,10 +623,10 @@ pub async fn pi_auth_providers(app: AppHandle) -> Result<Vec<PiAuthProviderInfo>
         serde_json::from_value::<Vec<PiAuthProviderInfo>>(
             value.get("providers").cloned().unwrap_or(Value::Null),
         )
-        .map_err(|error| format!("pi auth provider list is invalid: {error}"))
+        .map_err(|error| msg_with("pi.auth.providers_invalid", &[("error", &error.to_string())]))
     })
     .await
-    .map_err(|error| format!("pi auth worker failed: {error}"))?
+    .map_err(|error| msg_with("pi.auth.worker_failed", &[("error", &error.to_string())]))?
 }
 
 #[tauri::command]
@@ -492,11 +639,23 @@ pub async fn pi_auth_status(app: AppHandle) -> Result<PiAuthStatusResponse, Stri
         let credentials = serde_json::from_value::<Vec<PiAuthCredentialSummary>>(
             value.get("credentials").cloned().unwrap_or(Value::Null),
         )
-        .map_err(|error| format!("pi auth status is invalid: {error}"))?;
-        let (active_login, active_login_provider) = bridge
-            .active_login()
-            .map(|(id, provider)| (Some(id), Some(provider)))
-            .unwrap_or((None, None));
+        .map_err(|error| msg_with("pi.auth.status_invalid", &[("error", &error.to_string())]))?;
+        // Rust 侧的活动登录标记优先；桥接自报值作兜底（覆盖标记滞后或进程
+        // 重建等极端时序），保证界面总能看到进行中的登录并重新接上面板。
+        let (active_login, active_login_provider) = match bridge.active_login() {
+            Some((id, provider)) => (Some(id), Some(provider)),
+            None => {
+                let login = value
+                    .get("activeLogin")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                let provider = value
+                    .get("activeLoginProvider")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                (login.clone(), provider.or(login))
+            }
+        };
         Ok(PiAuthStatusResponse {
             credentials,
             active_login,
@@ -504,7 +663,30 @@ pub async fn pi_auth_status(app: AppHandle) -> Result<PiAuthStatusResponse, Stri
         })
     })
     .await
-    .map_err(|error| format!("pi auth worker failed: {error}"))?
+    .map_err(|error| msg_with("pi.auth.worker_failed", &[("error", &error.to_string())]))?
+}
+
+#[tauri::command]
+pub async fn pi_auth_provider_models(
+    app: AppHandle,
+    request: PiAuthProviderRef,
+) -> Result<Vec<PiOfficialModel>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        validate_provider_id(&request.provider_id)?;
+        let manager = app.state::<PiAuthManager>();
+        let paths = app.state::<AppPaths>();
+        let bridge = manager.ensure(Some(&app), &paths)?;
+        let value = bridge.request(
+            json!({ "op": "models", "provider": request.provider_id }),
+            REQUEST_TIMEOUT,
+        )?;
+        serde_json::from_value::<Vec<PiOfficialModel>>(
+            value.get("models").cloned().unwrap_or(Value::Null),
+        )
+        .map_err(|error| msg_with("pi.auth.models_invalid", &[("error", &error.to_string())]))
+    })
+    .await
+    .map_err(|error| msg_with("pi.auth.worker_failed", &[("error", &error.to_string())]))?
 }
 
 #[tauri::command]
@@ -519,21 +701,23 @@ pub async fn pi_auth_start_login(
         let _serial = manager
             .start_lock
             .lock()
-            .map_err(|_| "pi auth start lock poisoned")?;
+            .map_err(|_| msg("pi.auth.internal_unavailable"))?;
         let bridge = manager.ensure(Some(&app), &paths)?;
         if let Some((_, provider)) = bridge.active_login() {
-            return Err(format!(
-                "another official login is already in progress ({provider})"
-            ));
+            return Err(msg_with("pi.auth.login_busy", &[("provider", &provider)]));
         }
         let ack = bridge.request(
-            json!({ "op": "login", "provider": request.provider_id }),
+            json!({
+                "op": "login",
+                "provider": request.provider_id,
+                "method": request.login_method,
+            }),
             REQUEST_TIMEOUT,
         )?;
         let login_id = ack
             .get("login")
             .and_then(Value::as_str)
-            .ok_or_else(|| "pi auth bridge did not acknowledge the login".to_string())?
+            .ok_or_else(|| msg("pi.auth.login_not_acknowledged"))?
             .to_owned();
         *bridge
             .shared
@@ -549,16 +733,14 @@ pub async fn pi_auth_start_login(
         })
     })
     .await
-    .map_err(|error| format!("pi auth worker failed: {error}"))?
+    .map_err(|error| msg_with("pi.auth.worker_failed", &[("error", &error.to_string())]))?
 }
 
 fn assert_active_login(bridge: &BridgeProcess, login_id: &str) -> Result<(), String> {
     match bridge.active_login() {
         Some((id, _)) if id == login_id => Ok(()),
-        Some((_, provider)) => Err(format!(
-            "active official login belongs to {provider}, not this request"
-        )),
-        None => Err("no official login is in progress".into()),
+        Some((_, provider)) => Err(msg_with("pi.auth.login_not_owned", &[("provider", &provider)])),
+        None => Err(msg("pi.auth.login_missing")),
     }
 }
 
@@ -582,7 +764,7 @@ pub async fn pi_auth_respond(app: AppHandle, request: PiAuthRespondRequest) -> R
             .map(|_| ())
     })
     .await
-    .map_err(|error| format!("pi auth worker failed: {error}"))?
+    .map_err(|error| msg_with("pi.auth.worker_failed", &[("error", &error.to_string())]))?
 }
 
 #[tauri::command]
@@ -592,15 +774,22 @@ pub async fn pi_auth_cancel(app: AppHandle, request: PiAuthLoginRef) -> Result<(
         let paths = app.state::<AppPaths>();
         let bridge = manager.ensure(Some(&app), &paths)?;
         assert_active_login(&bridge, &request.login_id)?;
-        bridge
+        let result = bridge
             .request(
                 json!({ "op": "cancel", "login": request.login_id }),
                 CONTROL_TIMEOUT,
             )
-            .map(|_| ())
+            .map(|_| ());
+        if result.is_ok() {
+            // 取消成功即回收桥接进程：被中断的 pi 登录可能残留回调服务器与
+            // 轮询任务；下一次命令按需重建进程，active_login 标记随之消失，
+            // 保证「取消 → 立即重新登录」总能成功。
+            manager.reset();
+        }
+        result
     })
     .await
-    .map_err(|error| format!("pi auth worker failed: {error}"))?
+    .map_err(|error| msg_with("pi.auth.worker_failed", &[("error", &error.to_string())]))?
 }
 
 #[tauri::command]
@@ -618,7 +807,7 @@ pub async fn pi_auth_logout(app: AppHandle, request: PiAuthProviderRef) -> Resul
             .map(|_| ())
     })
     .await
-    .map_err(|error| format!("pi auth worker failed: {error}"))?
+    .map_err(|error| msg_with("pi.auth.worker_failed", &[("error", &error.to_string())]))?
 }
 
 #[cfg(test)]
@@ -657,6 +846,81 @@ mod tests {
             .unwrap()
             .contains("[redacted]"));
         assert_eq!(sanitized["provider"], json!("anthropic"));
+    }
+
+    #[test]
+    fn parses_windows_proxy_server_forms() {
+        // 单值形态：host:port 同时用于 http/https。
+        assert_eq!(
+            parse_windows_proxy_server("127.0.0.1:7890").as_deref(),
+            Some("http://127.0.0.1:7890")
+        );
+        assert_eq!(
+            parse_windows_proxy_server(" localhost:8080 ").as_deref(),
+            Some("http://localhost:8080")
+        );
+        // 按协议分组：优先 https 条目，大小写不敏感。
+        assert_eq!(
+            parse_windows_proxy_server("http=10.0.0.2:80;https=10.0.0.2:443").as_deref(),
+            Some("http://10.0.0.2:443")
+        );
+        assert_eq!(
+            parse_windows_proxy_server("HTTP=10.0.0.2:8080").as_deref(),
+            Some("http://10.0.0.2:8080")
+        );
+        // 仅 SOCKS 无法映射为 HTTP 代理环境变量；空值与非法端口返回 None。
+        assert_eq!(parse_windows_proxy_server("socks=127.0.0.1:1080"), None);
+        assert_eq!(parse_windows_proxy_server(""), None);
+        assert_eq!(parse_windows_proxy_server("host:not-a-port"), None);
+    }
+
+    #[test]
+    fn proxy_injection_respects_existing_env() {
+        // 用户已显式配置代理环境变量：不注入、不覆盖。
+        let existing = |key: &str| (key == "HTTPS_PROXY").then(|| "http://env-proxy:1".to_string());
+        assert!(decide_proxy_injection(&existing, Some("http://127.0.0.1:7890".into())).is_none());
+        let none = |_: &str| None::<String>;
+        let pairs = decide_proxy_injection(&none, Some("http://127.0.0.1:7890".into()))
+            .expect("system proxy should be injected");
+        assert!(pairs
+            .iter()
+            .any(|(key, value)| *key == "HTTPS_PROXY" && value == "http://127.0.0.1:7890"));
+        assert!(pairs.iter().any(|(key, _)| *key == "NO_PROXY"));
+        // 没有可用系统代理时不注入任何东西。
+        assert!(decide_proxy_injection(&none, None).is_none());
+    }
+
+    #[test]
+    fn parses_official_model_list() {
+        let models: Vec<PiOfficialModel> = serde_json::from_value(json!([
+            {
+                "id": "gpt-5.3-codex-spark",
+                "name": "GPT-5.3 Codex Spark",
+                "contextWindow": 128000,
+                "maxTokens": 128000,
+                "reasoning": true,
+                "input": ["text"],
+                "inputCost": 1.75,
+                "outputCost": 14.0
+            },
+            {
+                "id": "k3",
+                "name": "Kimi K3",
+                "contextWindow": null,
+                "maxTokens": null,
+                "reasoning": false,
+                "input": [],
+                "inputCost": null,
+                "outputCost": null
+            }
+        ]))
+        .unwrap();
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].context_window, Some(128_000));
+        assert_eq!(models[0].input_cost, Some(1.75));
+        assert!(models[0].reasoning);
+        assert_eq!(models[1].context_window, None);
+        assert_eq!(models[1].output_cost, None);
     }
 
     #[test]
@@ -952,5 +1216,224 @@ export default {{
         let done = drain_until_done(&events).unwrap();
         assert_eq!(done["ok"], json!(false));
         assert!(done["error"].as_str().unwrap().len() < 512);
+    }
+
+    /// 取消后立即重新登录：桥内会话标记已释放，第二次 login 直接得到 ack。
+    #[test]
+    #[ignore = "requires the managed Pi SDK; exercised with --include-ignored"]
+    fn cancel_then_second_login_starts_cleanly() {
+        let Some((paths, _fixture)) = fixture_with_dev_runtime() else {
+            return;
+        };
+        let (emit, events) = collector();
+        let bridge = spawn_bridge(None, &paths, None, Some(emit)).expect("bridge should spawn");
+        let ack = bridge
+            .request(
+                json!({ "op": "login", "provider": "openai-codex" }),
+                REQUEST_TIMEOUT,
+            )
+            .expect("first login should be acknowledged");
+        let login_id = ack["login"].as_str().unwrap().to_owned();
+        wait_event(&events, "prompt").expect("select prompt should arrive");
+        bridge
+            .request(json!({ "op": "cancel", "login": login_id }), CONTROL_TIMEOUT)
+            .expect("cancel should succeed");
+        let done = drain_until_done(&events).unwrap();
+        assert_eq!(done["ok"], json!(false));
+        // 取消后立即重登：桥内 activeLogins 已随 done 清空。
+        let ack2 = bridge
+            .request(
+                json!({ "op": "login", "provider": "openai-codex" }),
+                REQUEST_TIMEOUT,
+            )
+            .expect("second login should start right after cancel");
+        let second = ack2["login"].as_str().unwrap().to_owned();
+        assert_ne!(second, login_id);
+        bridge
+            .request(json!({ "op": "cancel", "login": second }), CONTROL_TIMEOUT)
+            .expect("cleanup cancel should succeed");
+    }
+
+    /// status 应答之后重发进行中登录的等待 prompt，供界面重连恢复面板。
+    #[test]
+    #[ignore = "requires the managed Pi SDK; exercised with --include-ignored"]
+    fn status_replays_pending_prompt_of_active_login() {
+        let Some((paths, fixture)) = fixture_with_dev_runtime() else {
+            return;
+        };
+        let inject = fixture.0.join("inject-status.mjs");
+        fs::write(
+            &inject,
+            r#"import { pathToFileURL } from "node:url";
+export default {
+  async createRuntime(pi) {
+    const sdk = pathToFileURL(process.env.PI_AUTH_PI_SDK).href;
+    return {
+      async getProviders() {
+        return [{ id: "fixture-oauth", name: "Fixture", auth: { oauth: { name: "Fixture (Pro)", isSubscription: true } } }];
+      },
+      async listCredentials() {
+        return [];
+      },
+      async login(providerId, type, interaction) {
+        interaction.notify({ type: "auth_url", url: "https://fixture.example/authorize" });
+        await interaction.prompt({ type: "manual_code", message: "Paste the code" });
+        return { type: "oauth" };
+      },
+    };
+  },
+};"#,
+        )
+        .unwrap();
+        let (emit, events) = collector();
+        let bridge =
+            spawn_bridge(None, &paths, Some(&inject), Some(emit)).expect("bridge should spawn");
+        let ack = bridge
+            .request(
+                json!({ "op": "login", "provider": "fixture-oauth" }),
+                REQUEST_TIMEOUT,
+            )
+            .expect("login should be acknowledged");
+        let login_id = ack["login"].as_str().unwrap().to_owned();
+        wait_event(&events, "prompt").expect("prompt should arrive");
+
+        let status = bridge
+            .request(json!({ "op": "status" }), REQUEST_TIMEOUT)
+            .expect("status should succeed");
+        assert_eq!(status["activeLogin"], json!(login_id));
+        assert_eq!(status["activeLoginProvider"], json!("fixture-oauth"));
+
+        // 原始 prompt 已被上面的 wait_event 消费；这里应能等到重放的那条
+        //（status 应答之后桥接会重发仍待输入的 prompt）。
+        let deadline = std::time::Instant::now() + EVENT_TIMEOUT;
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                panic!("timed out waiting for the replayed prompt event");
+            }
+            match events.recv_timeout(remaining.min(Duration::from_secs(1))) {
+                Ok(value) => {
+                    if value.get("event").and_then(Value::as_str) == Some("prompt")
+                        && value.get("login").and_then(Value::as_str) == Some(login_id.as_str())
+                    {
+                        break;
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    panic!("pi auth bridge event channel closed");
+                }
+            }
+        }
+        bridge
+            .request(json!({ "op": "cancel", "login": login_id }), CONTROL_TIMEOUT)
+            .expect("cleanup cancel should succeed");
+    }
+
+    /// 界面预选登录方式：选择提示由桥接直接回答，不再转发给界面。
+    #[test]
+    #[ignore = "requires the managed Pi SDK; exercised with --include-ignored"]
+    fn preferred_login_method_answers_the_select_prompt() {
+        let Some((paths, fixture)) = fixture_with_dev_runtime() else {
+            return;
+        };
+        let inject = fixture.0.join("inject-method.mjs");
+        fs::write(
+            &inject,
+            r#"import { pathToFileURL } from "node:url";
+export default {
+  async createRuntime(pi) {
+    const sdk = pathToFileURL(process.env.PI_AUTH_PI_SDK).href;
+    const storage = await import(new URL("core/auth-storage.js", sdk).href);
+    const authPath = process.env.PI_AUTH_AUTH_JSON;
+    return {
+      async getProviders() {
+        return [{ id: "fixture-oauth", name: "Fixture", auth: { oauth: { name: "Fixture (Pro)", isSubscription: true } } }];
+      },
+      async listCredentials() {
+        return [];
+      },
+      async login(providerId, type, interaction) {
+        const choice = await interaction.prompt({
+          type: "select",
+          message: "Select login method:",
+          options: [
+            { id: "browser", label: "Browser login" },
+            { id: "device_code", label: "Device code login" },
+          ],
+        });
+        interaction.notify({ type: "info", message: `chosen:${choice}` });
+        const credential = { type: "oauth", access: "fixture-access", refresh: "fixture-refresh", expires: Date.now() + 3600_000 };
+        await storage.AuthStorage.create(authPath).modify(providerId, async () => credential);
+        return credential;
+      },
+    };
+  },
+};"#,
+        )
+        .unwrap();
+        let (emit, events) = collector();
+        let bridge =
+            spawn_bridge(None, &paths, Some(&inject), Some(emit)).expect("bridge should spawn");
+        let ack = bridge
+            .request(
+                json!({ "op": "login", "provider": "fixture-oauth", "method": "device_code" }),
+                REQUEST_TIMEOUT,
+            )
+            .expect("login should be acknowledged");
+        assert!(ack["login"].is_string());
+
+        let mut chosen = false;
+        let mut saw_prompt = false;
+        let deadline = std::time::Instant::now() + EVENT_TIMEOUT;
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                panic!("timed out waiting for the login result");
+            }
+            match events.recv_timeout(remaining.min(Duration::from_secs(1))) {
+                Ok(value) => {
+                    let event = value.get("event").and_then(Value::as_str);
+                    if event == Some("prompt") {
+                        saw_prompt = true;
+                    }
+                    if event == Some("notify")
+                        && value.get("message").and_then(Value::as_str) == Some("chosen:device_code")
+                    {
+                        chosen = true;
+                    }
+                    if event == Some("done") {
+                        assert_eq!(value["ok"], json!(true));
+                        break;
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    panic!("pi auth bridge event channel closed");
+                }
+            }
+        }
+        assert!(chosen, "fixture 应收到预选的登录方式");
+        assert!(!saw_prompt, "预选命中时选择提示不得转发给界面");
+    }
+
+    /// 模型目录 op：返回 pi 运行时自带的供应商模型（官方登录后免 API Key）。
+    #[test]
+    #[ignore = "requires the managed Pi SDK; exercised with --include-ignored"]
+    fn lists_provider_models_from_pi_runtime() {
+        let Some((paths, _fixture)) = fixture_with_dev_runtime() else {
+            return;
+        };
+        let (emit, _events) = collector();
+        let bridge = spawn_bridge(None, &paths, None, Some(emit)).expect("bridge should spawn");
+        let reply = bridge
+            .request(
+                json!({ "op": "models", "provider": "openai-codex" }),
+                REQUEST_TIMEOUT,
+            )
+            .expect("models request should succeed");
+        let models: Vec<PiOfficialModel> = serde_json::from_value(reply["models"].clone()).unwrap();
+        assert!(!models.is_empty(), "pi 运行时应提供 codex 模型");
+        assert!(models.iter().all(|model| !model.id.is_empty()));
     }
 }

@@ -15,6 +15,7 @@ import { APP_MESSAGES_EXTRA } from "./app-messages-extra";
 import { APP_MESSAGES_GIT } from "./app-messages-git";
 import { APP_MESSAGES_RUNTIME } from "./app-messages-runtime";
 import { APP_MESSAGES_DIALOGS } from "./app-messages-dialogs";
+import { APP_MESSAGES_PROVIDERS } from "./app-messages-providers";
 import { interpolate } from "./i18n-core";
 import type { Locale } from "./locale";
 
@@ -46,6 +47,7 @@ export const APP_MESSAGES: Record<string, AppMessageText> = {
   ...APP_MESSAGES_GIT,
   ...APP_MESSAGES_FILES,
   ...APP_MESSAGES_DIALOGS,
+  ...APP_MESSAGES_PROVIDERS,
 };
 
 export interface ParsedAppMessage {

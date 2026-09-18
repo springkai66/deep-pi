@@ -138,7 +138,7 @@ async function opStatus() {
   });
 }
 
-const activeLogins = new Map(); // loginId -> AbortController
+const activeLogins = new Map(); // loginId -> { controller, provider }
 const pendingPrompts = new Map(); // promptId -> { login, resolve, reject }
 let nextPromptId = 0;
 
@@ -162,7 +162,7 @@ function closePromptsOf(loginId, reject = false) {
   }
 }
 
-function interactionFor(loginId, controller) {
+function interactionFor(loginId, controller, preferredMethod = null) {
   return {
     signal: controller.signal,
     notify(event) {
@@ -174,8 +174,17 @@ function interactionFor(loginId, controller) {
           reject(abortError());
           return;
         }
+        // 界面已在创建流程里选好登录方式：命中即直接回答该选择提示
+        //（未命中则照常转发给界面，行为与以前一致）。
+        if (preferredMethod && prompt.type === "select") {
+          const option = (prompt.options ?? []).find((entry) => entry?.id === preferredMethod);
+          if (option) {
+            resolve(option.id);
+            return;
+          }
+        }
         const promptId = String(++nextPromptId);
-        const entry = { login: loginId, resolve, reject };
+        const entry = { login: loginId, resolve, reject, prompt };
         pendingPrompts.set(promptId, entry);
         if (prompt.signal) {
           // 流程自带取消（如回调先到、manual_code 输入被放弃）时解除等待并关闭面板。
@@ -202,16 +211,26 @@ function interactionFor(loginId, controller) {
 
 async function opLogin(id, request) {
   const provider = String(request.provider ?? "");
-  if (!provider) throw new Error("provider is required");
-  if (activeLogins.size > 0) throw new Error("another login is already in progress");
+  if (!provider) throw new Error("@msg:pi.auth.bridge_provider_missing");
+  if (activeLogins.size > 0) throw new Error("@msg:pi.auth.bridge_login_busy");
+  // 界面可以提前选定登录方式（如 openai-codex 的 browser / device_code）：
+  // 桥接在收到对应的选择提示时直接回答，不再二次询问。
+  const preferredMethod =
+    typeof request.method === "string" && request.method.trim() !== ""
+      ? request.method.trim()
+      : null;
   const loginId = `login-${id}`;
   const controller = new AbortController();
-  activeLogins.set(loginId, controller);
+  activeLogins.set(loginId, { controller, provider });
   // 先应答 ack（Rust/界面据此记录活动登录），后续交互以事件下发。
   reply(id, { ok: true, login: loginId, provider });
   try {
     const runtime = await getRuntime();
-    const credential = await runtime.login(provider, "oauth", interactionFor(loginId, controller));
+    const credential = await runtime.login(
+      provider,
+      "oauth",
+      interactionFor(loginId, controller, preferredMethod),
+    );
     send({
       event: "done",
       login: loginId,
@@ -228,22 +247,82 @@ async function opLogin(id, request) {
   }
 }
 
+/** 桥内当前活动登录（至多一个）：供 status 操作用于界面重连。 */
+function activeLoginInfo() {
+  for (const [loginId, entry] of activeLogins) {
+    return { login: loginId, provider: entry.provider ?? null };
+  }
+  return null;
+}
+
+/** 供应商模型目录（pi 运行时自带；官方登录后无需 API Key 即可使用）。 */
+async function opModels(request) {
+  const provider = String(request.provider ?? "");
+  if (!provider) throw new Error("provider is required");
+  const runtime = await getRuntime();
+  let models = [];
+  try {
+    models = runtime.getModels(provider) ?? [];
+  } catch {
+    models = [];
+  }
+  return models
+    .map((model) => ({
+      id: String(model?.id ?? ""),
+      name: String(model?.name ?? model?.id ?? ""),
+      contextWindow: typeof model?.contextWindow === "number" ? model.contextWindow : null,
+      maxTokens: typeof model?.maxTokens === "number" ? model.maxTokens : null,
+      reasoning: !!model?.reasoning,
+      input: Array.isArray(model?.input) ? model.input.map(String) : [],
+      inputCost: typeof model?.cost?.input === "number" ? model.cost.input : null,
+      outputCost: typeof model?.cost?.output === "number" ? model.cost.output : null,
+    }))
+    .filter((model) => model.id !== "");
+}
+
 async function dispatch(id, request) {
   switch (request.op) {
     case "providers":
       reply(id, { ok: true, providers: await opProviders() });
       break;
-    case "status":
-      reply(id, { ok: true, credentials: await opStatus() });
+    case "status": {
+      const credentials = await opStatus();
+      const active = activeLoginInfo();
+      reply(id, {
+        ok: true,
+        credentials,
+        activeLogin: active?.login ?? null,
+        activeLoginProvider: active?.provider ?? null,
+      });
+      // 界面重连：应答之后重发该登录仍在等待的 prompt，让重挂载的面板先按
+      // status 重建，再恢复输入项（重发顺序必须在应答之后）。
+      if (active) {
+        for (const [promptId, entry] of pendingPrompts) {
+          if (entry.login !== active.login) continue;
+          send({
+            event: "prompt",
+            login: entry.login,
+            promptId,
+            kind: entry.prompt.type,
+            message: entry.prompt.message,
+            placeholder: entry.prompt.placeholder ?? null,
+            options: entry.prompt.options ?? null,
+          });
+        }
+      }
       break;
+    }
     case "login":
       await opLogin(id, request);
+      break;
+    case "models":
+      reply(id, { ok: true, models: await opModels(request) });
       break;
     case "respond": {
       const promptId = String(request.promptId ?? "");
       const entry = pendingPrompts.get(promptId);
       if (!entry) {
-        reply(id, { ok: false, error: "no pending prompt with that id" });
+        reply(id, { ok: false, error: "@msg:pi.auth.bridge_prompt_missing" });
         break;
       }
       pendingPrompts.delete(promptId);
@@ -254,9 +333,9 @@ async function dispatch(id, request) {
     }
     case "cancel": {
       const loginId = String(request.login ?? "");
-      const controller = activeLogins.get(loginId);
+      const controller = activeLogins.get(loginId)?.controller;
       if (!controller) {
-        reply(id, { ok: false, error: "no active login with that id" });
+        reply(id, { ok: false, error: "@msg:pi.auth.bridge_login_missing" });
         break;
       }
       // 桥侧先关闭并 reject 该登录的所有等待 prompt，再中断登录本身。
@@ -273,7 +352,7 @@ async function dispatch(id, request) {
       break;
     }
     default:
-      reply(id, { ok: false, error: `unknown op: ${redact(String(request.op ?? ""))}` });
+      reply(id, { ok: false, error: `@msg:pi.auth.bridge_unknown_op?op=${encodeURIComponent(redact(String(request.op ?? "")))}` });
   }
 }
 
@@ -298,6 +377,6 @@ readline.on("line", (line) => {
   });
 });
 readline.on("close", () => {
-  for (const controller of activeLogins.values()) controller.abort();
+  for (const { controller } of activeLogins.values()) controller.abort();
   process.exit(0);
 });

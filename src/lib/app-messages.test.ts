@@ -280,3 +280,29 @@ describe("dialog placeholder contract with the Rust renderer", () => {
     expect(problems).toEqual([]);
   });
 });
+
+describe("模型设置错误码的三语言渲染", () => {
+  it("同一个官方登录错误码按当前语言给出中文 / 繁中 / 英文", () => {
+    expect(resolveAppMessage("@msg:pi.auth.login_missing", "zh-CN")).toBe("当前没有进行中的官方登录");
+    expect(resolveAppMessage("@msg:pi.auth.login_missing", "zh-TW")).toBe("目前沒有進行中的官方登入");
+    expect(resolveAppMessage("@msg:pi.auth.login_missing", "en")).toBe("No official sign-in is in progress.");
+  });
+
+  it("带参数的错误码把参数填进本地化文案", () => {
+    const code = "@msg:pi.auth.login_busy?provider=openai-codex";
+    expect(resolveAppMessage(code, "zh-CN")).toContain("已有官方登录正在进行（openai-codex）");
+    expect(resolveAppMessage(code, "en")).toContain("Another official sign-in is already in progress (openai-codex)");
+  });
+
+  it("桥接回传的错误码同样是三语可用", () => {
+    expect(resolveAppMessage("@msg:pi.auth.bridge_login_busy", "zh-CN")).toContain("桥接中已有登录在进行");
+    expect(resolveAppMessage("@msg:pi.auth.bridge_login_busy", "en")).toContain("already handling a login");
+  });
+
+  it("Provider / 凭据校验错误码也走同一套目录", () => {
+    expect(resolveAppMessage("@msg:provider.proxy.scheme", "zh-CN")).toContain("回环 HTTP");
+    expect(resolveAppMessage("@msg:provider.proxy.scheme", "en")).toContain("loopback HTTP");
+    expect(resolveAppMessage("@msg:credentials.api_key.invalid", "zh-CN")).toContain("API Key 无效");
+    expect(resolveAppMessage("@msg:credentials.api_key.invalid", "en")).toContain("API key is invalid");
+  });
+});

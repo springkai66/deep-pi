@@ -1,7 +1,7 @@
 <script lang="ts">
   import { Channel, invoke } from "@tauri-apps/api/core";
   import { ArrowDown, ArrowUp, Bot, ChevronDown, History, RefreshCw, Sparkles, Square, Terminal, UserRound } from "@lucide/svelte";
-  import { onMount, tick, untrack } from "svelte";
+  import { onMount, tick, untrack, type Snippet } from "svelte";
   import type { DialogRequest, DialogValue } from "./dialog";
   import { applyRpcEvent, contentText, emptyConversation, loadHistory, messageRenderable, readableRpcError, record, type RpcEvent } from "./rpc-state";
   import { onModelsChanged } from "./model-config-sync";
@@ -34,6 +34,7 @@
     taskId: string;
     runId: string | null | undefined;
     title: string;
+    tabs?: Snippet;
     visible: boolean;
     active: boolean;
     switching: boolean;
@@ -47,7 +48,7 @@
     onOpenModelSettings?: () => void;
     onReloadSession?: () => void;
   }
-  let { taskId, runId, title, visible, active, switching, focusToken, autoName, onUseTerminal, onDialog, onCancelDialogs, onActivity, onAutoRename, onOpenModelSettings, onReloadSession }: Props = $props();
+  let { taskId, runId, title, tabs, visible, active, switching, focusToken, autoName, onUseTerminal, onDialog, onCancelDialogs, onActivity, onAutoRename, onOpenModelSettings, onReloadSession }: Props = $props();
   let conversation = $state(emptyConversation());
   let draft = $state("");
   let restoredDraft = $state("");
@@ -973,8 +974,12 @@
 
 <section class="terminal-pane chat-pane" class:hidden={!visible} class:active aria-label={title}>
   <header>
-    <Bot size={16} /><strong title={title}>{title}</strong>
-    {#if sessionStats?.tokens}
+    {#if tabs}
+      <div class="header-tabs">{@render tabs()}</div>
+    {:else}
+      <Bot size={16} /><strong title={title}>{title}</strong>
+    {/if}
+    {#if sessionStats?.tokens && (Object.values(sessionStats.tokens).some((value) => value > 0) || (sessionStats.cost ?? 0) > 0)}
       <details class="stats">
         <summary title={t("Token 统计（点击查看明细）")}>
           <span class="stat">↑{formatTokens(sessionStats.tokens.input)}</span>
@@ -998,7 +1003,9 @@
         </div>
       </details>
     {/if}
-    <span class="model-name" title={modelName}>{modelName}</span>
+    {#if modelName.trim() && modelName.trim().toLowerCase() !== "unknown"}
+      <span class="model-name" title={modelName}>{modelName}</span>
+    {/if}
     {#if turnCount > 0}
       <div class="turn-nav">
         <button type="button" class="turn-trigger" bind:this={turnTrigger} aria-haspopup="true"
@@ -1227,10 +1234,12 @@
 <style>
   .chat-pane { position: relative; display: flex; flex-direction: column; grid-template-rows: none; min-height: 0; min-width: 0; border: 1px solid var(--border); background: var(--page-bg); overflow: hidden; }
   .chat-pane.hidden { display: none; }
-  header { display: flex; align-items: center; gap: 8px; flex-shrink: 0; min-height: 38px; padding: 6px 12px; border-bottom: 1px solid var(--border); background: var(--surface); }
+  header { display: flex; align-items: center; gap: 4px; flex-shrink: 0; min-width: 0; min-height: 34px; padding: 2px 8px; border-bottom: 1px solid var(--border); background: var(--surface); }
+  .header-tabs { flex: 1; min-width: 0; }
+  .chat-pane { container-type: inline-size; }
   header strong { flex: 1; font-size: 12px; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-  .model-name { max-width: 35%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); font-size: 11px; }
-  .stats { position: relative; }
+  .model-name { max-width: 20%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); font-size: 11px; }
+  .stats { position: relative; flex-shrink: 0; }
   .stats summary { display: inline-flex; align-items: center; gap: 8px; padding: 2px 8px; border: 1px solid transparent; border-radius: 4px; cursor: pointer; list-style: none; }
   .stats summary::-webkit-details-marker { display: none; }
   .stats summary:hover { border-color: var(--border); background: var(--surface-hover); }
@@ -1313,4 +1322,10 @@
   .turn-dot:hover { background: var(--accent); opacity: 1; }
   .turn-dot.active { height: 18px; background: var(--accent); opacity: 1; }
   article.jump-flash { outline-color: var(--accent); }
+  @container (max-width: 600px) {
+    .model-name, .turn-label { display: none; }
+    .stats summary { gap: 4px; padding: 2px; }
+    .stats summary .hit, .stats summary .cost { display: none; }
+    header .turn-trigger { padding: 0 4px; }
+  }
 </style>

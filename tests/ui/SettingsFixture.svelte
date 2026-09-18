@@ -4,9 +4,17 @@
   import PiMcpSkillsSettings from "../../src/lib/PiMcpSkillsSettings.svelte";
   import PiProviderSettings from "../../src/lib/PiProviderSettings.svelte";
   import PiMarketplace from "../../src/lib/PiMarketplace.svelte";
+  import AppToasts from "../../src/lib/AppToasts.svelte";
+  import { notices } from "../../src/lib/notices.svelte";
   import { DEFAULT_APP_SETTINGS, cssAppFontFamily, cssSessionFontFamily, type AppSettings } from "../../src/lib/settings";
   import type { SettingsCategory } from "../../src/lib/settings-navigation";
   import type { ProviderRecord } from "../../src/lib/provider";
+
+  /** 与 +page.svelte 的 showError 一致：记录到导航栏并弹一条浮字提示。 */
+  function reportError(cause: unknown) {
+    error = String(cause);
+    notices.push(String(cause), "error");
+  }
 
   let category = $state<SettingsCategory>("general");
   let settings = $state<AppSettings>({ ...DEFAULT_APP_SETTINGS });
@@ -46,6 +54,16 @@
       return provider as T;
     }
     if (name === "provider_credential_status") return { apiKeyConfigured: false, nativeAuthConfigured: false, authType: null, configured: false } as T;
+    // 官方（OAuth）通道：模型设置页的「官方供应商」分组与新建弹窗都走这些命令。
+    if (name === "pi_auth_providers") {
+      return [
+        { id: "openai-codex", name: "OpenAI Codex", oauth: true, oauthName: "OpenAI (ChatGPT Plus/Pro)", isSubscription: true },
+        { id: "anthropic", name: "Anthropic", oauth: true, oauthName: "Anthropic (Claude Pro/Max)", isSubscription: true },
+        { id: "github-copilot", name: "GitHub Copilot", oauth: true, oauthName: "GitHub Copilot", isSubscription: true },
+      ] as T;
+    }
+    if (name === "pi_auth_status") return { credentials: [], activeLogin: null, activeLoginProvider: null } as T;
+    if (name === "pi_auth_provider_models") return [] as T;
     throw new Error(`Fixture: unsupported command ${name}`);
   };
   $effect(() => {
@@ -84,13 +102,16 @@
     runningPiCount={1}
     dshRunning={true}
   >
-    {#snippet models()}<PiProviderSettings embedded invokeCommand={command} confirm={async () => true} onClose={() => {}} onError={(cause) => { error = String(cause); }} />{/snippet}
+    {#snippet models()}<PiProviderSettings embedded invokeCommand={command} confirm={async () => true} onClose={() => {}} onError={reportError} />{/snippet}
     {#snippet extensions()}<PiMarketplace embedded projectPath={null} invokeCommand={command} confirm={async () => true} onClose={() => {}} onError={(cause) => { error = String(cause); }} />{/snippet}
     {#snippet mcp()}<PiMcpSkillsSettings mode="mcp" invokeCommand={command} onError={(cause) => { error = String(cause); }} onBusyChange={() => {}} />{/snippet}
     {#snippet skills()}<PiMcpSkillsSettings mode="skills" invokeCommand={command} onError={(cause) => { error = String(cause); }} onBusyChange={() => {}} />{/snippet}
     {#snippet dsh()}<p>DSH</p>{/snippet}
   </PiSettings>
 </main>
+
+<!-- 与正式应用一致：错误以顶部浮字提示展示，便于夹具验证。 -->
+<AppToasts />
 
 <style>
   :global(#app) { height: 100%; display: flex; flex-direction: column; }

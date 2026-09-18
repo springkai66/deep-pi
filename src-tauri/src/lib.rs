@@ -242,6 +242,7 @@ pub fn run() {
                 pi_auth::pi_auth_respond,
                 pi_auth::pi_auth_cancel,
                 pi_auth::pi_auth_logout,
+                pi_auth::pi_auth_provider_models,
                 agenticskills::agentic_mcp_detail,
                 agenticskills::agentic_skill_detail,
                 agenticskills::agentic_workflow_detail,

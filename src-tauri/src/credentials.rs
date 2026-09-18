@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::State;
 
+use crate::message::{msg, msg_with};
 use crate::{
     app_paths::AppPaths,
     provider::{list_provider_file, provider_agent, validate_provider_id},
@@ -67,7 +68,7 @@ pub struct ModelTestResult {
 fn entry(provider_id: &str) -> Result<keyring::Entry, String> {
     validate_provider_id(provider_id)?;
     keyring::Entry::new(KEYRING_SERVICE, provider_id)
-        .map_err(|error| format!("failed to open Windows Credential Manager entry: {error}"))
+        .map_err(|error| msg_with("credentials.open.failed", &[("error", &error.to_string())]))
 }
 
 fn validate_api_key(api_key: &str) -> Result<(), String> {
@@ -75,21 +76,25 @@ fn validate_api_key(api_key: &str) -> Result<(), String> {
         || api_key.len() > MAX_API_KEY_LENGTH
         || api_key.chars().any(|character| character.is_control())
     {
-        return Err("API key is invalid".into());
+        return Err(msg("credentials.api_key.invalid"));
     }
     Ok(())
 }
 
 fn validate_connection_url(base_url: &str) -> Result<(), String> {
-    let url =
-        tauri::Url::parse(base_url).map_err(|error| format!("base URL is invalid: {error}"))?;
+    let url = tauri::Url::parse(base_url).map_err(|error| {
+        msg_with(
+            "provider.base_url.unparsable",
+            &[("error", &error.to_string())],
+        )
+    })?;
     let is_loopback_http =
         url.scheme() == "http" && matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1"));
     if url.scheme() != "https" && !is_loopback_http {
-        return Err("base URL must use HTTPS or loopback HTTP".into());
+        return Err(msg("provider.base_url.scheme"));
     }
     if !url.username().is_empty() || url.password().is_some() || url.query().is_some() {
-        return Err("base URL must not contain credentials or a query".into());
+        return Err(msg("provider.base_url.query"));
     }
     Ok(())
 }
@@ -98,7 +103,10 @@ fn credential_configured(provider_id: &str) -> Result<bool, String> {
     match entry(provider_id)?.get_password() {
         Ok(api_key) => Ok(!api_key.is_empty()),
         Err(keyring::Error::NoEntry) => Ok(false),
-        Err(error) => Err(format!("failed to read provider credential: {error}")),
+        Err(error) => Err(msg_with(
+            "credentials.read.failed",
+            &[("error", &error.to_string())],
+        )),
     }
 }
 
@@ -106,7 +114,10 @@ pub(crate) fn provider_api_key(provider_id: &str) -> Result<Option<String>, Stri
     match entry(provider_id)?.get_password() {
         Ok(api_key) if !api_key.is_empty() => Ok(Some(api_key)),
         Ok(_) | Err(keyring::Error::NoEntry) => Ok(None),
-        Err(error) => Err(format!("failed to read provider credential: {error}")),
+        Err(error) => Err(msg_with(
+            "credentials.read.failed",
+            &[("error", &error.to_string())],
+        )),
     }
 }
 
@@ -122,12 +133,12 @@ pub fn credential_helper(provider_id: &str) -> Result<(), String> {
     let api_key = entry(provider_id)?
         .get_password()
         .map_err(|error| match error {
-            keyring::Error::NoEntry => "provider credential is not configured".to_string(),
-            error => format!("failed to read provider credential: {error}"),
+            keyring::Error::NoEntry => msg("credentials.not_configured"),
+            error => msg_with("credentials.read.failed", &[("error", &error.to_string())]),
         })?;
     io::stdout()
         .write_all(api_key.as_bytes())
-        .map_err(|error| format!("failed to write provider credential: {error}"))
+        .map_err(|error| msg_with("credentials.write.failed", &[("error", &error.to_string())]))
 }
 
 #[tauri::command]
@@ -153,7 +164,7 @@ pub fn save_provider_credential(
     validate_api_key(&request.api_key)?;
     entry(&request.provider_id)?
         .set_password(&request.api_key)
-        .map_err(|error| format!("failed to save provider credential: {error}"))?;
+        .map_err(|error| msg_with("credentials.save.failed", &[("error", &error.to_string())]))?;
     Ok(ProviderCredentialStatus {
         provider_id: request.provider_id,
         configured: true,
@@ -167,7 +178,10 @@ pub fn save_provider_credential(
 pub fn delete_provider_credential(request: ProviderCredentialRequest) -> Result<(), String> {
     match entry(&request.provider_id)?.delete_credential() {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(error) => Err(format!("failed to delete provider credential: {error}")),
+        Err(error) => Err(msg_with(
+            "credentials.delete.failed",
+            &[("error", &error.to_string())],
+        )),
     }
 }
 
@@ -181,7 +195,7 @@ pub async fn test_provider_connection(
         test_provider_connection_inner(app.state(), request)
     })
     .await
-    .map_err(|error| format!("provider connection worker failed: {error}"))?
+    .map_err(|error| msg_with("provider.connection.worker_failed", &[("error", &error.to_string())]))?
 }
 
 fn test_provider_connection_inner(
@@ -193,11 +207,11 @@ fn test_provider_connection_inner(
     let provider = list_provider_file(&paths.pi_models_file())?
         .into_iter()
         .find(|provider| provider.id == provider_id)
-        .ok_or_else(|| format!("Pi provider not found: {provider_id}"))?;
+        .ok_or_else(|| msg_with("provider.not_found", &[("provider", &provider_id)]))?;
     let base_url = provider
         .base_url
         .as_deref()
-        .ok_or_else(|| "provider has no base URL".to_string())?;
+        .ok_or_else(|| msg("provider.base_url.missing"))?;
     validate_connection_url(base_url)?;
     // 探测 /models 端点（与拉取模型一致），而不是裸根地址：
     // 裸根 GET 常见 404，无法区分“网络可达但配置错误”和“服务健康”。
@@ -210,7 +224,7 @@ fn test_provider_connection_inner(
     let request = crate::provider::apply_provider_auth(request, &provider, api_key.as_deref());
     let response = request
         .call()
-        .map_err(|error| format!("provider connection failed: {error}"))?;
+        .map_err(|error| msg_with("provider.connection.failed", &[("error", &error.to_string())]))?;
     let status = response.status().as_u16();
     Ok(ProviderConnectionResult {
         provider_id,
@@ -227,7 +241,7 @@ pub async fn test_model_connection(
     use tauri::Manager;
     tauri::async_runtime::spawn_blocking(move || test_model_connection_inner(app.state(), request))
         .await
-        .map_err(|error| format!("model test worker failed: {error}"))?
+        .map_err(|error| msg_with("provider.model_test.worker_failed", &[("error", &error.to_string())]))?
 }
 
 fn model_probe_target(
@@ -285,7 +299,7 @@ fn model_probe_target(
                 "generationConfig": {"maxOutputTokens": 1},
             }),
         )]),
-        _ => Err(format!("unsupported provider API: {api}")),
+        _ => Err(msg_with("credentials.api.unsupported", &[("api", api)])),
     }
 }
 
@@ -295,16 +309,16 @@ fn test_model_connection_inner(
 ) -> Result<ModelTestResult, String> {
     let model_id = request.model_id.trim().to_string();
     if model_id.is_empty() || model_id.len() > 256 || model_id.chars().any(char::is_control) {
-        return Err("model id is invalid".into());
+        return Err(msg("provider.model_id.invalid"));
     }
     let provider = list_provider_file(&paths.pi_models_file())?
         .into_iter()
         .find(|provider| provider.id == request.provider_id)
-        .ok_or_else(|| format!("Pi provider not found: {}", request.provider_id))?;
+        .ok_or_else(|| msg_with("provider.not_found", &[("provider", &request.provider_id)]))?;
     let base_url = provider
         .base_url
         .as_deref()
-        .ok_or_else(|| "provider has no base URL".to_string())?;
+        .ok_or_else(|| msg("provider.base_url.missing"))?;
     validate_connection_url(base_url)?;
     let targets = model_probe_target(&provider.api, base_url, &model_id)?;
     let agent = provider_agent(&provider)?;
@@ -319,7 +333,7 @@ fn test_model_connection_inner(
     let mut last_error = String::new();
     for (target_url, body) in targets {
         let url = tauri::Url::parse(&target_url)
-            .map_err(|error| format!("model probe URL is invalid: {error}"))?;
+            .map_err(|error| msg_with("provider.test_url.invalid", &[("error", &error.to_string())]))?;
         let request = agent
             .post(url.as_str())
             .header("Accept", "application/json");
@@ -346,7 +360,7 @@ fn test_model_connection_inner(
                 last_error = format!("HTTP {status}");
             }
             Err(error) => {
-                last_error = format!("provider connection failed: {error}");
+                last_error = msg_with("provider.connection.failed", &[("error", &error.to_string())]);
                 result.error = Some(last_error.clone());
                 break;
             }

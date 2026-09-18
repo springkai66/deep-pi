@@ -40,6 +40,8 @@
   import { createTaskModeSwitcher, type InteractionMode } from "$lib/task-mode";
   import { SplitSquareHorizontal, SplitSquareVertical } from "@lucide/svelte";
   import AppDialog from "$lib/AppDialog.svelte";
+  import AppToasts from "$lib/AppToasts.svelte";
+  import { notices } from "$lib/notices.svelte";
   import { checkAppUpdate, installAppUpdate, type AppUpdateState, type Update } from "$lib/app-update";
   import type { DialogRequest, DialogValue } from "$lib/dialog";
   import type { Project } from "$lib/project";
@@ -247,7 +249,7 @@
   // Serialize visibility requests because native child Webviews cover HTML menus.
   $effect(() => {
     const child = dshWebview;
-    const visible = activeAgent === "dsh" && !dialogRequest && !closingWindow && !recoveryProject;
+    const visible = activeAgent === "dsh" && view === "workspace" && !dialogRequest && !closingWindow && !recoveryProject;
     dshVisibility = dshVisibility.then(async () => {
       if (child) {
         if (visible) await child.show();
@@ -393,6 +395,19 @@
   const terminalTasks = $derived(
     allTerminalTasks.filter((task) => task.projectId === selectedProjectId),
   );
+  const inlineSessionTabs = $derived(
+    activeAgent === "pi" && view === "workspace" && !boardView && !inspectingFile &&
+    !!selectedProject && terminalTasks.some((task) => task.id === activeTaskId &&
+      task.interactionMode === "rpc" && paneTaskIds.includes(task.id)),
+  );
+  const standaloneSessionTabs = $derived(
+    !!selectedProject && terminalTasks.length > 0 && !inlineSessionTabs &&
+    view === "workspace" && !(boardView && activeAgent === "pi"),
+  );
+  $effect(() => {
+    standaloneSessionTabs;
+    if (activeAgent === "dsh") void tick().then(syncDshBounds);
+  });
   const projectTerminalIds = $derived(terminalTasks.map((task) => task.id));
   const paneCapacity = $derived(layout === "single" ? 1 : layout === "split" ? 2 : 4);
   const canStart = $derived(
@@ -678,13 +693,9 @@
 
   function showError(error: unknown) {
     // 后端只回消息码（`@msg:` 协议），在这里按当前语言渲染。
+    // 错误不用阻塞弹窗：改为顶部居中的浮动提示，自动消失、不打断操作。
     errorMessage = tm(String(error));
-    void dialogs.request({
-      kind: "alert",
-      title: t("操作失败"),
-      message: errorMessage,
-      confirmLabel: t("知道了"),
-    });
+    notices.push(errorMessage, "error");
   }
 
   function resolveDialog(value: DialogValue) {
@@ -897,7 +908,7 @@
 
   async function syncDshBounds() {
     if (!dshWebview || activeAgent !== "dsh") return;
-    const bounds = workspace.getBoundingClientRect();
+    const bounds = (workspace.querySelector(".dsh-placeholder") ?? workspace).getBoundingClientRect();
     await dshWebview.setPosition(new LogicalPosition(bounds.left, bounds.top));
     await dshWebview.setSize(
       new LogicalSize(Math.max(1, bounds.width), Math.max(1, bounds.height)),
@@ -930,7 +941,7 @@
     errorMessage = "";
     try {
       const url = await invoke<string>("start_dsh");
-      const bounds = workspace.getBoundingClientRect();
+      const bounds = (workspace.querySelector(".dsh-placeholder") ?? workspace).getBoundingClientRect();
       await invoke("create_dsh_webview", {
         baseUrl: url,
         x: bounds.left,
@@ -939,7 +950,7 @@
         height: Math.max(1, bounds.height),
       });
       dshWebview = await waitForDshWebview();
-      if (activeAgent !== "dsh" || dialogRequest) await dshWebview.hide();
+      if (activeAgent !== "dsh" || dialogRequest || view !== "workspace") await dshWebview.hide();
       else await dshWebview.setFocus();
       await syncDshBounds();
     } catch (error) {
@@ -1240,6 +1251,25 @@
   }
 </script>
 
+{#snippet sessionTabs()}
+  <TaskTabs
+    tasks={terminalTasks}
+    {activeTaskId}
+    onOpen={(task) => { if (task.agent === "pi") { boardView = false; void showPi(); } openTask(task); }}
+    onRename={renameTask}
+    onStop={stopTask}
+    onArchive={archiveTask}
+    onRestart={restartTask}
+    onRestore={restoreTask}
+    onDelete={deleteTask}
+    onClose={closeTask}
+    onAdd={() => void startTask()}
+    onSplit={splitTask}
+    splitActive={layout !== "single"}
+    onUnsplit={() => changeLayout("single")}
+  />
+{/snippet}
+
 <svelte:head><title>DeepPi</title></svelte:head>
 
 {#if startupPending || startupFailure}
@@ -1277,8 +1307,6 @@
     <div class="stage-crumbs">
       {#if activeAgent === "pi" && selectedProject}
         <span class="crumb-project"><span class="crumb-dot"></span>{selectedProject.name}</span>
-        <span class="crumb-sep">/</span>
-        <span class="crumb-task" title={activeTask?.title ?? ""}>{activeTask?.title ?? t("未选择任务")}</span>
       {:else if activeAgent === "pi"}
         <span class="crumb-task">{t("尚未选择项目")}</span>
       {:else}
@@ -1347,8 +1375,11 @@
       <button type="button" class="panel-toggle workspace-toggle files-toggle" aria-label={t("展开文件栏")} title={t("展开文件栏")}
         onclick={() => { filesVisible = true; }}><PanelRightOpen size={15} /></button>
     {/if}
-    {#if activeAgent === "dsh"}
-      <div class="dsh-placeholder" aria-live="polite">
+    {#if standaloneSessionTabs}
+      <div style="min-width: 0; padding: 2px 8px;">{@render sessionTabs()}</div>
+    {/if}
+    {#if activeAgent === "dsh" && view === "workspace"}
+      <div class="dsh-placeholder" style:grid-row={standaloneSessionTabs ? "2" : "1 / -1"} aria-live="polite">
         {#if isDshStarting}
           <span>{t("正在启动 DSH")}</span>
         {:else if dshHostError}
@@ -1444,25 +1475,8 @@
           <Plus size={16} />{t("新建任务")}
         </button>
       </div>
-    {:else if !boardView}
-      <TaskTabs
-        tasks={terminalTasks}
-        {activeTaskId}
-        onOpen={openTask}
-        onRename={renameTask}
-        onStop={stopTask}
-        onArchive={archiveTask}
-        onRestart={restartTask}
-        onRestore={restoreTask}
-        onDelete={deleteTask}
-        onClose={closeTask}
-        onAdd={() => void startTask()}
-        onSplit={splitTask}
-        splitActive={layout !== "single"}
-        onUnsplit={() => changeLayout("single")}
-      />
     {/if}
-      <div class="workspace-content" class:panel-hidden={boardView || activeAgent !== "pi" || view !== "workspace" || terminalTasks.length === 0 || !selectedProject}>
+      <div class="workspace-content" style:grid-row={inlineSessionTabs ? "1 / -1" : undefined} class:panel-hidden={boardView || activeAgent !== "pi" || view !== "workspace" || terminalTasks.length === 0 || !selectedProject}>
         <div
           class:single={layout === "single"}
           class:split={layout === "split"}
@@ -1474,6 +1488,7 @@
             {#if task.interactionMode === "rpc"}
               <ChatPane
                 taskId={task.id} runId={task.runId} title={task.title}
+                tabs={inlineSessionTabs && task.id === activeTaskId ? sessionTabs : undefined}
                 autoName={/^(Pi Task \d+|Session [0-9a-f]{8})$/.test(task.title)}
                 onAutoRename={(title) => void autoRenameTask(task, title)}
                 switching={switchingTasks.has(task.id)}
@@ -1523,6 +1538,8 @@
           {/each}
         </div>
       </div>
+    <div class="file-preview-layer" class:panel-hidden={!inspectingFile}
+      style="position: absolute; inset: 0; min-width: 0; min-height: 0; z-index: 2;" style:grid-row={standaloneSessionTabs ? "2" : "1 / -1"}>
     {#if openedFile && editorModule}
       {#await editorModule then module}
         <module.default bind:this={fileEditor} documents={fileDocuments} controller={fileWorkspace}
@@ -1539,6 +1556,7 @@
     {#if openedDiff && openedDiff.projectId === selectedProjectId && activeAgent === "pi" && view === "workspace"}
       <GitDiffView selection={openedDiff} refreshToken={filesRefreshToken + gitWatchRefreshToken} onClose={() => { openedDiff = null; }} />
     {/if}
+    </div>
     {#if recoveryProject && recoveryModule}
       {#await recoveryModule then module}
         {#key recoveryProject.id}
@@ -1590,6 +1608,7 @@
     onClose={() => { gitVisible = false; }} />
 
   <AppDialog request={dialogRequest} onResolve={resolveDialog} />
+  <AppToasts />
   </div>
 <style>
   .recovery-error { position: absolute; inset: 0; z-index: 15; padding: 16px; background: var(--page-bg); overflow: auto; }

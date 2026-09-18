@@ -1,17 +1,25 @@
 # DeepPi 故障排查
 
-## 启动后窗口空白或无法连接
+## 启动后窗口空白或无法访问页面
 
 确认已安装 Microsoft Edge WebView2。正式安装包使用 WebView2 download bootstrapper；离线环境需要提前安装 Evergreen WebView2 Runtime，然后重新启动 DeepPi。
 
-开发环境先运行：
+开发环境的 debug 程序依赖 Vite 提供 `http://localhost:1420` 页面。裸启 `src-tauri/target/debug/deeppi.exe` 不会启动 Vite；若 1420 没有服务，就会显示无法访问页面或 localhost 连接错误。这与正式安装包不同。
+
+在 Windows 终端探活 1420（绕过代理）：
+
+```powershell
+curl.exe --noproxy "*" http://127.0.0.1:1420/
+```
+
+应返回前端 HTML；连接失败说明该地址没有可访问的前端服务。使用统一入口恢复开发环境（包括测试后恢复），并保持启动终端运行：
 
 ```powershell
 pnpm install --frozen-lockfile --ignore-scripts
-pnpm tauri dev
+pnpm dev:desktop
 ```
 
-如果只看到 localhost 连接错误，确认 Vite 监听 `127.0.0.1:1420`，并重启开发宿主。
+`pnpm dev:desktop` 通过 Tauri 同时启动 Vite 和桌面宿主；`pnpm dev` 仅启动前端。若 1420 已有服务，先在自己拥有的旧开发会话终端中按 Ctrl+C 结束该会话以避免端口冲突；不要随意结束未知进程，先确认服务归属。不要通过裸启 debug exe 恢复。
 
 ## Pi 无法启动
 

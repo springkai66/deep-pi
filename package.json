@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite dev",
+    "dev:desktop": "tauri dev",
     "build": "vite build",
     "release:check": "node scripts/release-check.mjs",
     "perf:smoke": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/perf-smoke.ps1 -DurationSeconds 60 -SampleSeconds 5",

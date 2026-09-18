@@ -15,8 +15,14 @@
 
 ```powershell
 pnpm install --frozen-lockfile --ignore-scripts
-pnpm tauri dev
+pnpm dev:desktop
 ```
+
+推荐统一使用 `pnpm dev:desktop` 启动桌面开发：Tauri 会通过 `beforeDevCommand: pnpm dev` 启动 Vite，再加载 `http://localhost:1420`。请保持启动终端运行。
+
+`pnpm dev` 仅启动前端，不启动桌面宿主；不能裸启 `src-tauri/target/debug/deeppi.exe`，debug 程序依赖正在运行的 Vite 服务，否则会显示无法访问页面。
+
+测试后恢复开发环境也须使用 `pnpm dev:desktop`，不要直接启动 debug exe。若 1420 已有服务，先在自己拥有的旧开发会话终端中按 Ctrl+C 结束该会话，避免端口冲突；不要随意结束未知进程，先确认服务归属。
 
 ## 检查
 

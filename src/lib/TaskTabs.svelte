@@ -54,6 +54,12 @@
   let contextMenuElement = $state<HTMLDivElement>();
   const activeStatuses = ["running", "waiting"];
 
+  // Inline headers clip overflow; keep viewport-positioned menus outside the pane.
+  function portalMenu(node: HTMLDivElement) {
+    document.body.appendChild(node);
+    return { destroy: () => node.remove() };
+  }
+
   onMount(() => {
     const dismiss = () => {
       contextMenu = null;
@@ -146,6 +152,7 @@
   {#if contextMenu}
     <div
       bind:this={contextMenuElement}
+      use:portalMenu
       class="context-menu"
       role="menu"
       tabindex="-1"
@@ -196,16 +203,17 @@
 <style>
   .task-tabs-shell {
     min-width: 0;
-    padding: 4px 8px;
+    padding: 0;
   }
 
   /* 药丸标签：胶囊式会话切换条，去掉了原先的整行直角标签。 */
   .task-tabs {
     display: flex;
     gap: 4px;
+    align-items: center;
     min-width: 0;
     height: auto;
-    padding: 3px;
+    padding: 2px;
     overflow-x: auto;
     border: 1px solid var(--border);
     border-radius: 9px;
@@ -219,7 +227,8 @@
     align-items: center;
     gap: 6px;
     min-width: 128px;
-    height: 28px;
+    height: 24px;
+    flex-shrink: 0;
     padding: 0 4px 0 9px;
     border: 0;
     border-radius: 6px;
@@ -270,6 +279,12 @@
     color: inherit;
     background: transparent;
     cursor: pointer;
+    opacity: 0;
+  }
+
+  .session-tab:hover .session-tab-close,
+  .session-tab:focus-within .session-tab-close {
+    opacity: 1;
   }
 
   .session-tab-close:hover {
@@ -281,8 +296,8 @@
     display: grid;
     place-items: center;
     flex-shrink: 0;
-    width: 28px;
-    height: 28px;
+    width: 22px;
+    height: 22px;
     padding: 0;
     border: 0;
     border-radius: 6px;
