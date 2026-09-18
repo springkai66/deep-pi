@@ -40,6 +40,10 @@ The managed runtimes (Node, Pi, DSH) are installed on demand from official distr
 - The DeepPi self-update pipeline is configured, but the pipeline currently ships v1.0.3; real cross-version self-update and rollback are being validated with the 1.0.3 release.
 - The 8-hour soak, very large repositories and parts of the native interaction acceptance are still open (see [NATIVE_ACCEPTANCE.md](./NATIVE_ACCEPTANCE.md)).
 
+## Next steps
+
+- Add macOS support: adapt desktop windows, managed runtimes, credential storage, and terminals; generate DMG installers for Apple Silicon and Intel Macs, integrate GitHub Actions builds and Release publishing, and complete code signing, notarization, and installation validation.
+
 ## Development
 
 Build, test, and release procedures are documented in [DEVELOPMENT.md](./DEVELOPMENT.md) and [RELEASING.md](./RELEASING.md).
