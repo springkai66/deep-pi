@@ -166,7 +166,8 @@ export function applyRpcEvent(previous: Conversation, event: RpcEvent): Conversa
   const state = { ...previous, sequence: event.sequence, lastEventAt: Date.now() };
   const payload = event.payload;
   const type = payload.type;
-  if (type === "agent_start") { state.busy = true; state.phase = "thinking"; }
+  // 新回合开始 = 会话已从上一次失败中恢复，清掉遗留错误，避免错误卡片一直钉在会话流底部。
+  if (type === "agent_start") { state.busy = true; state.phase = "thinking"; state.error = ""; }
   else if (type === "agent_end") { state.busy = true; state.phase = "generating"; }
   else if (type === "agent_settled") { state.busy = false; state.phase = "waiting"; }
   else if (type === "rpc_exit") {
@@ -206,7 +207,8 @@ export function applyRpcEvent(previous: Conversation, event: RpcEvent): Conversa
     state.queue = [...steering, ...followUp];
   } else if (type === "message_update" && payload.assistantMessageEvent) {
     const update = asAssistantUpdate(payload.assistantMessageEvent);
-    if (update) { state.phase = update.kind === "thinking" ? "thinking" : "generating"; state.messages = applyAssistantUpdate(previous.messages, update); }
+    // 流式输出恢复同样说明会话已恢复，清掉上一轮遗留的错误。
+    if (update) { state.error = ""; state.phase = update.kind === "thinking" ? "thinking" : "generating"; state.messages = applyAssistantUpdate(previous.messages, update); }
   } else if (type === "message_start" || type === "message_update" || type === "message_end") {
     const message = asMessage(payload.message);
     if (!message) return state;

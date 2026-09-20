@@ -172,6 +172,30 @@ describe("failed prompt cleanup", () => {
     expect(state.error).toBe("limit reached（rate_limit_error · HTTP 429）");
   });
 
+  it("clears the stale error once a new turn starts", () => {
+    let state = emptyConversation();
+    state = applyRpcEvent(state, { sequence: 1, payload: { type: "rpc_error", error: "fetch failed" } });
+    expect(state.error).toBe("fetch failed");
+    state = applyRpcEvent(state, { sequence: 2, payload: { type: "agent_start" } });
+    expect(state.error).toBe("");
+    expect(state.phase).toBe("thinking");
+  });
+
+  it("clears the stale error once assistant streaming resumes", () => {
+    let state = emptyConversation();
+    state = applyRpcEvent(state, { sequence: 1, payload: { type: "rpc_error", error: "fetch failed" } });
+    state = applyRpcEvent(state, { sequence: 2, payload: { type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "hi" } } });
+    expect(state.error).toBe("");
+  });
+
+  it("keeps the error while no recovery activity arrives", () => {
+    let state = emptyConversation();
+    state = applyRpcEvent(state, { sequence: 1, payload: { type: "rpc_error", error: "fetch failed" } });
+    state = applyRpcEvent(state, { sequence: 2, payload: { type: "agent_settled" } });
+    state = applyRpcEvent(state, { sequence: 3, payload: { type: "queue_update", steering: [], followUp: [] } });
+    expect(state.error).toBe("fetch failed");
+  });
+
   it("keeps assistant turns that already have content", () => {
     let state = emptyConversation();
     state = applyRpcEvent(state, { sequence: 1, payload: { type: "message_start", message: { role: "assistant", timestamp: 1, content: [{ type: "text", text: "partial" }] } } });
