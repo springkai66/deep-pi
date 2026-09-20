@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyRpcEvent, assistantMessageEmpty, emptyConversation, loadHistory, messageRenderable, readableRpcError } from "./rpc-state";
+import { applyRpcEvent, assistantMessageEmpty, canSubmitPrompt, emptyConversation, loadHistory, messageRenderable, readableRpcError } from "./rpc-state";
 
 describe("RPC conversation reducer", () => {
   it("replaces cumulative messages instead of appending duplicate tokens", () => {
@@ -189,3 +189,27 @@ describe("empty assistant turns", () => {
     expect(visible.map((message) => message.role)).toEqual(["user", "user", "assistant"]);
   });
 });
+describe("execution visibility and concurrency errors", () => {
+  it("tracks thinking, generation, tool execution and waiting phases", () => {
+    let state = emptyConversation();
+    state = applyRpcEvent(state, { sequence: 1, payload: { type: "agent_start" } });
+    expect(state.phase).toBe("thinking");
+    state = applyRpcEvent(state, { sequence: 2, payload: { type: "agent_end" } });
+    expect(state.phase).toBe("generating");
+    state = applyRpcEvent(state, { sequence: 3, payload: { type: "tool_execution_start", toolCallId: "x", toolName: "read" } });
+    expect(state.phase).toBe("tool");
+    state = applyRpcEvent(state, { sequence: 4, payload: { type: "agent_settled" } });
+    expect(state.phase).toBe("waiting");
+  });
+
+  it("turns account concurrency errors into one actionable message", () => {
+    const raw = '429: {"message":"Concurrency limit exceeded for account, please retry later","type":"rate_limit_error"}';
+    expect(readableRpcError(raw)).toBe("账户并发请求已达到上限，请稍后重试");
+    expect(readableRpcError("Concurrency limit exceeded for account, please retry later")).toBe("账户并发请求已达到上限，请稍后重试");
+  });
+});
+  it("blocks a second prompt while the first submission is in flight", () => {
+    expect(canSubmitPrompt(false, "hello")).toBe(true);
+    expect(canSubmitPrompt(true, "hello")).toBe(false);
+    expect(canSubmitPrompt(false, "   ")).toBe(false);
+  });

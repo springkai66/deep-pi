@@ -7,6 +7,7 @@ use std::{
 };
 
 const MAX_CAPTURE_BYTES: usize = 64 * 1024;
+const WINDOWS_HIDDEN_SUSPENDED_FLAGS: u32 = 0x0800_0004;
 
 #[derive(Debug)]
 pub struct ProcessOutput {
@@ -148,7 +149,7 @@ pub(crate) fn spawn_owned_detailed(
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        command.creation_flags(0x0800_0004);
+        command.creation_flags(WINDOWS_HIDDEN_SUSPENDED_FLAGS);
     }
     let mut child = command.spawn().map_err(|error| SpawnFailure {
         kind: match error.kind() {
@@ -274,6 +275,13 @@ impl ProcessTree {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn rpc_process_creation_flags_hide_the_console_and_start_suspended() {
+        assert_eq!(WINDOWS_HIDDEN_SUSPENDED_FLAGS & 0x0800_0000, 0x0800_0000);
+        assert_eq!(WINDOWS_HIDDEN_SUSPENDED_FLAGS & 0x0000_0004, 0x0000_0004);
+    }
 
     #[cfg(windows)]
     #[test]

@@ -3,7 +3,7 @@
   import { ArrowDown, ArrowUp, Bot, ChevronDown, History, RefreshCw, Sparkles, Square, Terminal, UserRound } from "@lucide/svelte";
   import { onMount, tick, untrack, type Snippet } from "svelte";
   import type { DialogRequest, DialogValue } from "./dialog";
-  import { applyRpcEvent, contentText, emptyConversation, loadHistory, messageRenderable, readableRpcError, record, type RpcEvent } from "./rpc-state";
+  import { applyRpcEvent, canSubmitPrompt, contentText, emptyConversation, loadHistory, messageRenderable, readableRpcError, record, type RpcEvent } from "./rpc-state";
   import { onModelsChanged } from "./model-config-sync";
   import { findSavedModel, parseModelKey, shouldApplySavedChoice, validSavedThinkingLevel, type SavedModelChoice } from "./model-memory";
   import { captureTranscriptAnchor, restoreTranscriptAnchor, messageWindowStart, transcriptPort } from "./transcript-scroll";
@@ -57,6 +57,7 @@
   let sending = $state(false);
   let stopping = $state(false);
   let error = $state("");
+  let promptActive = $state(false);
   let notice = $state("");
   let modelName = $state("");
   let models = $state<{ id: string; provider: string; name: string }[]>([]);
@@ -73,6 +74,8 @@
   let changingThinking = $state(false);
   let autoNamed = $state(false);
   let sessionStats = $state<SessionStats | null>(null);
+  let turnStartedAt = $state<number | null>(null);
+  let elapsedNow = $state(Date.now());
   let statsGeneration = 0;
 
   interface SessionStats {
@@ -283,13 +286,22 @@
   onMount(() => {
     document.addEventListener("pointerdown", closeTurnMenu, true);
     window.addEventListener("keydown", handleWindowKeydown);
+    const timer = window.setInterval(() => { elapsedNow = Date.now(); }, 250);
     return () => {
+      window.clearInterval(timer);
       document.removeEventListener("pointerdown", closeTurnMenu, true);
       window.removeEventListener("keydown", handleWindowKeydown);
       if (flashTimer) { clearTimeout(flashTimer); flashTimer = null; }
     };
   });
 
+  $effect(() => {
+    if (conversation.busy) {
+      if (turnStartedAt === null) turnStartedAt = Date.now();
+    } else {
+      turnStartedAt = null;
+    }
+  });
   /// 当前任务的项目路径：`list_tasks` 的记录里带 projectPath，用来顺带读取项目范围的工作流。
   /// 任务没有项目上下文（或查询失败）时返回 null，此时只读全局配置。
   async function taskProjectPath(): Promise<string | null> {
@@ -383,7 +395,7 @@
       if (current === generation) workflowBusy = false;
     }
   }
-  const canSend = $derived(!switching && connected && !initializing && !sending && !stopping && !conversation.closed && !!draft.trim());
+  const canSend = $derived(!switching && connected && !initializing && !stopping && !conversation.closed && canSubmitPrompt(sending || promptActive, draft));
   const groupedModels = $derived.by(() => {
     const groups = new Map<string, typeof models>();
     for (const model of models) {
@@ -413,14 +425,22 @@
   const canCompact = $derived(connected && !switching && !conversation.busy && !conversation.closed && !compacting);
   /// 只有“关闭”一档时说明该模型没有可调推理强度，此时不显示推理强度选择器。
   const reasoningLevels = $derived(thinkingLevels.filter((level) => level !== "off"));
+  const phaseText = $derived(
+    conversation.phase === "thinking" ? t("思考中")
+      : conversation.phase === "generating" ? t("生成回答")
+        : conversation.phase === "tool" ? t("正在执行工具")
+          : conversation.phase === "failed" ? t("执行失败")
+            : conversation.phase === "waiting" ? t("等待输入")
+              : "",
+  );
+  const elapsedText = $derived(turnStartedAt === null ? "" : `${Math.max(0, Math.floor((elapsedNow - turnStartedAt) / 1000))}s`);
   /// 空闲（等待输入）不显示状态文字，避免噪音；仅在异常/进行中状态提示。
   const statusText = $derived(
     switching ? t("正在切换模式")
       : conversation.closed ? t("已停止")
         : initializing ? t("连接中")
           : !connected ? t("未连接")
-            : conversation.busy ? t("运行中")
-              : "",
+            : `${phaseText}${elapsedText ? ` · ${elapsedText}` : ""}`,
   );
   const canEnhance = $derived(connected && !switching && !conversation.busy && !conversation.closed && !!draft.trim() && !enhancing);
 
@@ -490,6 +510,7 @@
     initializing = true;
     connected = false;
     sending = stopping = false;
+    promptActive = false;
     changingModel = false;
     changingThinking = false;
     thinkingLevels = [];
@@ -518,6 +539,7 @@
       }
       if (event.payload.type === "rpc_exit") {
         connected = false;
+        promptActive = false;
         onCancelDialogs(scope);
       }
       if (!ready) {
@@ -528,7 +550,7 @@
         conversation = applyRpcEvent(conversation, event);
         if (event.payload.type === "agent_start" || event.payload.type === "agent_settled") {
           onActivity(conversation.busy);
-          if (event.payload.type === "agent_settled") { void call({ type: "get_state" }).catch(() => {}); refreshStats(); }
+          if (event.payload.type === "agent_settled") { promptActive = false; void call({ type: "get_state" }).catch(() => {}); refreshStats(); }
         }
       }
     };
@@ -543,6 +565,7 @@
         if (overflow) throw new Error(t("初始化期间事件过多，请重新连接以读取完整会话"));
         let next = loadHistory(emptyConversation(), history.messages, history.eventSequence);
         next.busy = state.isStreaming === true || state.isCompacting === true;
+        next.phase = next.busy ? "generating" : "waiting";
         for (const event of buffered) next = applyRpcEvent(next, event);
         buffered = [];
         ready = true;
@@ -896,6 +919,7 @@
     const text = draft;
     const current = generation;
     sending = true;
+    promptActive = true;
     error = "";
     try {
       await call({ type: "prompt", message: text, streamingBehavior });
@@ -905,7 +929,7 @@
       pinnedMessageStart = null;
       refreshStats();
     } catch (cause) {
-      if (current === generation) commandError(cause);
+      if (current === generation) { promptActive = false; commandError(cause); }
     } finally {
       if (current === generation) sending = false;
     }

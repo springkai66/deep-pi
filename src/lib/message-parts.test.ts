@@ -24,3 +24,7 @@ describe("structured message display", () => {
     expect(messageParts("plain")).toEqual([{ kind: "text", content: "plain" }]);
   });
 });
+  it("removes only an outer thinking envelope", () => {
+    expect(messageParts([{ type: "thinking", thinking: "<thinking>\n检查\n</thinking>" }])[0]).toMatchObject({ kind: "thinking", content: "检查" });
+    expect(messageParts([{ type: "text", text: "<thinking>保留在普通文本中</thinking>" }])[0]).toMatchObject({ kind: "text", content: "<thinking>保留在普通文本中</thinking>" });
+  });

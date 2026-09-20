@@ -191,6 +191,7 @@ struct BridgeProcess {
     shared: Arc<BridgeShared>,
     stdin: Mutex<Option<ChildStdin>>,
     child: Arc<Mutex<Child>>,
+    _tree: crate::process_runner::ProcessTree,
 }
 
 impl Drop for BridgeProcess {
@@ -565,12 +566,8 @@ fn spawn_bridge(
     if let Some(inject) = inject {
         command.env("PI_AUTH_BRIDGE_TEST_INJECT", inject);
     }
-    let mut child = command.spawn().map_err(|error| {
-        msg_with(
-            "pi.auth.bridge_launch_failed",
-            &[("error", &error.to_string())],
-        )
-    })?;
+    let (mut child, tree) = crate::process_runner::spawn_owned(&mut command)
+        .map_err(|error| msg_with("pi.auth.bridge_launch_failed", &[("error", &error)]))?;
     let stdin = child
         .stdin
         .take()
@@ -603,6 +600,7 @@ fn spawn_bridge(
         shared,
         stdin: Mutex::new(Some(stdin)),
         child,
+        _tree: tree,
     })
 }
 
