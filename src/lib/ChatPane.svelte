@@ -1772,7 +1772,7 @@ import type { ChatDetailLevel } from "./settings";
     {#if liveStatusVisible}
       <p class="turn-total live-status" role="status" class:stalled={toolStalled}>
         {#if activeTool}<span class="activity-dot {outputActivity(activeTool, elapsedNow)}" aria-hidden="true"></span>{/if}
-        {statusText}
+        <span class="live-status-text" title={statusText}>{statusText}</span>
       </p>
     {/if}
     {#if initializing}<p role="status">{t("正在连接 Pi 会话…")}</p>{/if}
@@ -2105,7 +2105,9 @@ import type { ChatDetailLevel } from "./settings";
   select { min-width: 0; max-width: 130px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface-alt); padding: 4px; color: var(--text-muted); font-size: 11px; }
   .workflow-hint { flex: 0 1 auto; min-width: 0; max-width: 240px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--text-muted); font-size: 10px; }
   /* AI 行为状态与耗时：迁入对话流底部（turn-total 同位置），不再显示在输入框操作行。 */
-  .live-status { display: flex; align-items: center; gap: 6px; }
+  .live-status { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  /* 状态行文本限宽省略：长命令摘要 + 多段时间标签不会再顶出会话栏（悬停可看全文）。 */
+  .live-status-text { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   .live-status.stalled { color: #d8a04a; }
   .send-button { display: grid; place-items: center; width: 30px; height: 30px; padding: 0; flex-shrink: 0; border: 0; border-radius: 4px; background: var(--surface-hover); color: var(--text); }
   .send-button.stop-button { background: color-mix(in srgb, var(--status-failed) 18%, var(--surface-hover)); color: var(--status-failed); }
