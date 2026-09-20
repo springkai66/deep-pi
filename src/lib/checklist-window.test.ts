@@ -34,8 +34,11 @@ describe("standalone checklist window", () => {
     expect(mainPage).toContain("四象限清单");
     expect(checklist).toContain('pub const CHECKLIST_LABEL: &str = "checklist"');
     expect(checklist).toContain("open_checklist_window");
-    expect(checklist).toContain("cfg!(dev)");
-    expect(checklist).toContain("checklist.html");
+    // 独立窗口按无扩展名路由加载，让 SvelteKit 客户端路由命中；直接加载
+    // checklist.html 会因路径不匹配渲染 404 页（生产构建由 Tauri 资产解析器
+    // 的 {path}.html 回退命中预渲染页）。这里锁住回退到 *.html 的写法。
+    expect(checklist).toContain('WebviewUrl::App("checklist".into())');
+    expect(checklist).not.toContain('"checklist.html"');
     expect(checklist).toContain("quadrant INTEGER");
     expect(checklist).toContain("checklist.quadrant.invalid");
     expect(lib).toContain("mod checklist;");
