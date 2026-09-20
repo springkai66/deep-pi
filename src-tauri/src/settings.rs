@@ -393,6 +393,7 @@ fn validate(settings: &AppSettings) -> Result<(), String> {
     for (name, label) in [
         (&settings.app_font_name, "appFontName"),
         (&settings.session_font_name, "sessionFontName"),
+        (&settings.code_font, "codeFont"),
     ] {
         if name.len() > 128
             || name
@@ -409,12 +410,6 @@ fn validate(settings: &AppSettings) -> Result<(), String> {
         if !size.is_finite() || !(9.0..=32.0).contains(&size) {
             return Err(format!("{label} must be between 9 and 32"));
         }
-    }
-    if !matches!(
-        settings.code_font.as_str(),
-        "cascadia" | "consolas" | "jetbrains"
-    ) {
-        return Err("codeFont is invalid".into());
     }
     if !matches!(
         settings.close_behavior.as_str(),

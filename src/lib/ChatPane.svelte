@@ -1,9 +1,9 @@
 <script lang="ts">
   import { Channel, invoke } from "@tauri-apps/api/core";
-  import { ArrowDown, ArrowDownUp, ArrowUp, Bot, ChevronDown, History, Pencil, RefreshCw, Sparkles, Square, Terminal, Undo2, UserRound, X } from "@lucide/svelte";
+  import { ArrowDown, ArrowDownUp, ArrowUp, Bot, ChevronDown, CircleAlert, History, Pencil, RefreshCw, Shrink, Sparkles, Square, Terminal, Undo2, UserRound, X } from "@lucide/svelte";
   import { onMount, tick, untrack, type Snippet } from "svelte";
   import type { DialogRequest, DialogValue } from "./dialog";
-  import { applyRpcEvent, canSubmitPrompt, contentText, emptyConversation, loadHistory, messageRenderable, readableRpcError, record, type RpcEvent } from "./rpc-state";
+  import { applyRpcEvent, canSubmitPrompt, contentText, emptyConversation, loadHistory, messageRenderable, readableRpcError, record, type RpcEvent, type RpcMessage } from "./rpc-state";
   import { onModelsChanged } from "./model-config-sync";
   import { findSavedModel, parseModelKey, shouldApplySavedChoice, validSavedThinkingLevel, type SavedModelChoice } from "./model-memory";
 import type { ChatDetailLevel } from "./settings";
@@ -633,7 +633,8 @@ import type { ChatDetailLevel } from "./settings";
       ? t("上下文用量未知，点击压缩上下文")
       : t("上下文已用 {percent}%，点击压缩上下文", { percent: Math.round(contextPercent) }),
   );
-  const canCompact = $derived(connected && !switching && !conversation.busy && !conversation.closed && !compacting);
+  /// pi 原生 compact 会先中止当前回合再压缩，忙碌时也允许点击。
+  const canCompact = $derived(connected && !switching && !conversation.closed && !compacting);
   /// 只有“关闭”一档时说明该模型没有可调推理强度，此时不显示推理强度选择器。
   const reasoningLevels = $derived(thinkingLevels.filter((level) => level !== "off"));
   const phaseText = $derived(
@@ -647,7 +648,8 @@ import type { ChatDetailLevel } from "./settings";
   const elapsedText = $derived(turnStartedAt === null ? "" : `${Math.max(0, Math.floor((elapsedNow - turnStartedAt) / 1000))}s`);
   /// 空闲（等待输入）不显示状态文字，避免噪音；仅在异常/进行中状态提示。
   const statusText = $derived(
-    switching ? t("正在切换模式")
+    compacting ? t("正在压缩上下文")
+      : switching ? t("正在切换模式")
       : conversation.closed ? t("已停止")
         : initializing ? t("连接中")
           : !connected ? t("未连接")
@@ -711,7 +713,9 @@ import type { ChatDetailLevel } from "./settings";
     try {
       const accepted = await onDialog({
         scope, kind: "confirm", title: t("压缩上下文"),
-        message: t("压缩会把历史消息总结为摘要以释放上下文窗口。继续吗？"),
+        message: conversation.busy
+          ? t("压缩会先中止当前正在进行的回合，再把历史消息总结为摘要以释放上下文窗口。继续吗？")
+          : t("压缩会把历史消息总结为摘要以释放上下文窗口。继续吗？"),
         confirmLabel: t("压缩"),
       });
       if (!accepted || current !== generation) return;
@@ -826,6 +830,7 @@ import type { ChatDetailLevel } from "./settings";
         if (overflow) throw new Error(t("初始化期间事件过多，请重新连接以读取完整会话"));
         let next = loadHistory(emptyConversation(), history.messages, history.eventSequence);
         next.busy = state.isStreaming === true || state.isCompacting === true;
+        next.compacting = state.isCompacting === true;
         next.phase = next.busy ? "generating" : "waiting";
         for (const event of buffered) next = applyRpcEvent(next, event);
         buffered = [];
@@ -939,6 +944,14 @@ import type { ChatDetailLevel } from "./settings";
     });
   });
 
+  /// 错误卡片渲染在会话流末尾：出现时若正跟随滚动，则一并滚到底部让错误可见。
+  $effect(() => {
+    if (!(error || conversation.error) || !followScroll) return;
+    void tick().then(() => {
+      if (transcript && followScroll) transcript.scrollTop = transcript.scrollHeight;
+    });
+  });
+
   function call<T>(command: Record<string, unknown>): Promise<T> {
     return invoke<T>("rpc_command", { taskId, runId, command });
   }
@@ -974,6 +987,14 @@ import type { ChatDetailLevel } from "./settings";
     }).catch(() => {});
   }
 
+  /// 上下文用量轮询：pi 的估算 = 最近一次真实 usage + 其后消息的估算，轮询即可在回合进行中实时反映增长。
+  $effect(() => {
+    if (!connected || conversation.closed) return;
+    refreshStats();
+    const timer = window.setInterval(refreshStats, 2500);
+    return () => window.clearInterval(timer);
+  });
+
   const cacheHitRate = $derived.by(() => {
     const tokens = sessionStats?.tokens;
     if (!tokens) return null;
@@ -987,6 +1008,26 @@ import type { ChatDetailLevel } from "./settings";
     if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
     if (value >= 1_000) return `${(value / 1_000).toFixed(value >= 10_000 ? 0 : 1)}K`;
     return String(value);
+  }
+
+  /// 百分比最多保留两位小数并去掉尾随零（避免 5.490600000000001% 这类浮点残留）。
+  function formatPercent(value: number): string {
+    return `${Number(value.toFixed(2))}%`;
+  }
+
+  /// 压缩卡片徽标：live 事件带前后 tokens 显示「压缩前 → 压缩后 · 释放」，历史消息只有压缩前。
+  function compactionStatLabel(message: RpcMessage): string {
+    const before = message.tokensBefore;
+    const after = message.tokensAfter;
+    if (typeof before === "number" && before > 0 && typeof after === "number" && after > 0) {
+      const freed = before - after;
+      if (freed > 0) {
+        return t("压缩前 {before} → 压缩后 {after} · 释放 {freed}", { before: formatTokens(before), after: formatTokens(after), freed: formatTokens(freed) });
+      }
+      return t("压缩前 {before} → 压缩后 {after}", { before: formatTokens(before), after: formatTokens(after) });
+    }
+    if (typeof before === "number" && before > 0) return t("压缩前 {tokens}", { tokens: formatTokens(before) });
+    return "";
   }
 
   function formatCost(value: number | null): string {
@@ -1285,7 +1326,7 @@ import type { ChatDetailLevel } from "./settings";
             <dt>{t("缓存命中率")}</dt><dd>{cacheHitRate === null ? "-" : `${(cacheHitRate * 100).toFixed(1)}%`}</dd>
             <dt>{t("花费")}</dt><dd>{formatCost(sessionStats.cost)}</dd>
             {#if sessionStats.contextUsage?.percent !== null && sessionStats.contextUsage?.percent !== undefined}
-              <dt>{t("上下文占用")}</dt><dd>{sessionStats.contextUsage.percent}%{sessionStats.contextUsage.tokens ? ` · ${formatTokens(sessionStats.contextUsage.tokens)}` : ""}</dd>
+              <dt>{t("上下文占用")}</dt><dd>{formatPercent(sessionStats.contextUsage.percent)}{sessionStats.contextUsage.tokens ? ` · ${formatTokens(sessionStats.contextUsage.tokens)}` : ""}</dd>
             {/if}
           </dl>
         </div>
@@ -1313,9 +1354,13 @@ import type { ChatDetailLevel } from "./settings";
                   <button type="button" class:active={turn.number === activeTurn} title={turn.text || turn.summary}
                     onclick={() => void jumpToTurn(turn.index)}>
                     <span class="turn-no">#{turn.number}</span>
-                    <span class="turn-summary">{turn.summary}</span>
+                    <span class="turn-body">
+                      <span class="turn-summary">{turn.summary}</span>
+                      {#if turnDurationLabels.get(turn.number)}
+                        <span class="turn-duration">{t("耗时 {duration}", { duration: turnDurationLabels.get(turn.number) ?? "" })}</span>
+                      {/if}
+                    </span>
                     {#if turn.timeLabel}<span class="turn-time">{turn.timeLabel}</span>{/if}
-                    {#if turnDurationLabels.get(turn.number)}<span class="turn-time">{t("耗时 {duration}", { duration: turnDurationLabels.get(turn.number) ?? "" })}</span>{/if}
                   </button>
                 </li>
               {/each}
@@ -1339,11 +1384,15 @@ import type { ChatDetailLevel } from "./settings";
         <div class="message-label">
           {#if message.role === "user"}<UserRound size={14} />{t("你")}
             {#if turnDurationFor(entry.index)}<span class="turn-duration">{t("耗时 {duration}", { duration: turnDurationFor(entry.index) })}</span>{/if}
+          {:else if message.role === "compactionSummary"}<Shrink size={14} />{t("上下文压缩")}
+            {#if compactionStatLabel(message)}<span class="compaction-tokens">{compactionStatLabel(message)}</span>{/if}
           {:else if message.role === "toolResult"}<Terminal size={14} />{message.toolName ?? t("工具结果")}
             {#if message.toolStartedAt !== undefined}<span class="tool-took">{t("耗时 {duration}", { duration: formatDuration((message.toolEndedAt ?? Date.now()) - message.toolStartedAt) })}</span>{/if}
           {:else}<Bot size={14} />Pi{/if}
         </div>
-        {#if message.role === "toolResult"}
+        {#if message.role === "compactionSummary"}
+          <div class="compaction-summary">{typeof message.summary === "string" ? message.summary : contentText(message.content)}</div>
+        {:else if message.role === "toolResult"}
           <MessageDisclosure title={message.toolName ?? t("工具输出")} defaultOpen={chatDetailLevel === "verbose"}>
             {#if messageModule}
               {#await messageModule}
@@ -1370,6 +1419,19 @@ import type { ChatDetailLevel } from "./settings";
         <p class="turn-total">{turnTotalLabel(entry.index)}</p>
       {/if}
     {/each}
+    {#if conversation.compacting}
+      <article class="compaction-live">
+        <div class="message-label"><Shrink size={14} />{t("上下文压缩")}</div>
+        <p class="compaction-running"><span class="spin"><RefreshCw size={13} /></span>{t("正在压缩上下文，历史消息将被总结为摘要…")}</p>
+      </article>
+    {/if}
+    {#if error || conversation.error}
+      <article class="chat-error" role="alert">
+        <div class="message-label"><CircleAlert size={14} />{t("错误")}</div>
+        <p class="chat-error-text">{tm(error || conversation.error)}</p>
+        <button type="button" class="chat-error-retry" onclick={() => { reconnect++; }}><RefreshCw size={13} />{t("重新连接会话")}</button>
+      </article>
+    {/if}
     {#if chatDetailLevel !== "concise"}
       {#each liveTools as tool (tool.id)}
         <details class="tool-call" open={tool.running || chatDetailLevel === "verbose"}>
@@ -1400,11 +1462,6 @@ import type { ChatDetailLevel } from "./settings";
           aria-current={turn.number === activeTurn ? "true" : undefined}
           onclick={() => void jumpToTurn(turn.index)}></button>
       {/each}
-    </div>
-  {/if}
-  {#if error || conversation.error}
-    <div class="chat-error" role="alert"><span>{tm(error || conversation.error)}</span>
-      <button type="button" title={t("重新连接会话")} aria-label={t("重新连接会话")} onclick={() => { reconnect++; }}><RefreshCw size={15} /></button>
     </div>
   {/if}
   {#if notice}<p class="notice" role="status">{notice}</p>{/if}
@@ -1582,9 +1639,18 @@ import type { ChatDetailLevel } from "./settings";
   .stats-panel dt { color: var(--text-muted); }
   .stats-panel dd { margin: 0; text-align: right; font-family: var(--code-font); color: var(--text); }
   button { cursor: pointer; }
-  header button, .chat-error button { display: grid; place-items: center; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--text-muted); flex-shrink: 0; }
+  header button { display: grid; place-items: center; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--text-muted); flex-shrink: 0; }
   .transcript { flex: 1 1 0; min-height: 0; overflow: auto; padding: 16px 24px 8px; overflow-anchor: none; }
   article { max-width: 900px; margin: 0 auto 24px; outline: 2px solid transparent; outline-offset: 3px; transition: outline-color .3s ease; }
+  /* 压缩摘要卡片：与消息同宽（900px 居中），摘要默认全文展示、过长时内部滚动。 */
+  .compaction-summary {
+    max-height: 300px; overflow-y: auto; overflow-wrap: anywhere; white-space: pre-wrap;
+    font-size: 12.5px; line-height: 1.6; color: var(--text-muted);
+    border-left: 2px solid var(--border-strong); padding: 2px 0 2px 12px;
+  }
+  .compaction-tokens { font-size: 11px; color: var(--text-muted); opacity: .85; }
+  .compaction-live { max-width: 900px; margin: 0 auto 24px; }
+  .compaction-running { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 12.5px; color: var(--text-muted); }
   .message-label { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; font-size: 12px; color: var(--text-muted); }
   .turn-duration { padding: 1px 8px; border: 1px solid var(--border); border-radius: 999px; font-size: 11px; line-height: 1.4; color: var(--text-muted); font-family: var(--code-font); white-space: nowrap; }
   .tool-took { color: var(--text-muted); font-size: 11px; font-family: var(--code-font); white-space: nowrap; }
@@ -1594,7 +1660,7 @@ import type { ChatDetailLevel } from "./settings";
   .scroll-actions { height: 0; position: relative; display: flex; justify-content: center; z-index: 1; }
   .scroll-actions button { position: absolute; bottom: 10px; width: 30px; height: 30px; display: grid; place-items: center; padding: 0; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--surface); color: var(--text); }
   .user-message .message-content { padding: 12px; border-left: 2px solid var(--accent); background: var(--surface); }
-  .tool-call { border: 1px solid var(--border); border-radius: 4px; padding: 8px 12px; margin-bottom: 8px; font-size: 12px; }
+  .tool-call { max-width: 900px; border: 1px solid var(--border); border-radius: 4px; padding: 8px 12px; margin: 0 auto 8px; font-size: 12px; }
   summary { cursor: pointer; overflow-wrap: anywhere; display: flex; align-items: center; gap: 8px; }
   summary :global(svg) { flex-shrink: 0; }
   .tool-call-name { min-width: 0; font-weight: 700; color: var(--text); overflow-wrap: anywhere; }
@@ -1648,27 +1714,34 @@ import type { ChatDetailLevel } from "./settings";
   .send-button { display: grid; place-items: center; width: 30px; height: 30px; padding: 0; flex-shrink: 0; border: 0; border-radius: 4px; background: var(--surface-hover); color: var(--text); }
   .primary-send { background: var(--accent); color: var(--accent-ink); }
   button:disabled { opacity: .4; cursor: default; }
-  .chat-error { flex-shrink: 0; display: flex; align-items: center; gap: 8px; margin: 4px 16px 8px; padding: 8px; border: 1px solid #bd5147; border-radius: 4px; color: #d46b61; overflow-wrap: anywhere; }
-  .chat-error span { flex: 1; min-width: 0; }
+  /* 错误卡片：与其他内容同宽（900px 居中），显示在会话流内随内容滚动，不再常驻输入框上方。 */
+  .chat-error { max-width: 900px; margin: 0 auto 24px; padding: 10px 12px; border: 1px solid #bd5147; border-radius: 6px; background: rgb(189 81 71 / 8%); color: #d46b61; overflow-wrap: anywhere; }
+  .chat-error .message-label { margin-bottom: 6px; color: #d46b61; }
+  .chat-error-text { margin: 0 0 8px; font-size: 12.5px; line-height: 1.55; white-space: pre-wrap; }
+  .chat-error-retry { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border: 1px solid #bd5147; border-radius: 4px; background: transparent; color: #d46b61; font-size: 12px; cursor: pointer; }
+  .chat-error-retry:hover { background: rgb(189 81 71 / 15%); }
   .notice { flex-shrink: 0; margin: 4px 16px 8px; color: var(--text-muted); white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
   .model-hint { flex-shrink: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 16px 8px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); color: var(--text-muted); font-size: 12px; overflow-wrap: anywhere; }
   .model-hint-actions { display: inline-flex; gap: 6px; }
   .model-hint button { padding: 3px 8px; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--surface-raised); color: var(--text); font: inherit; font-size: 11px; cursor: pointer; }
   .model-hint button:hover { background: var(--surface-hover); }
-  .restore-draft, .more-history { flex-shrink: 0; padding: 6px 10px; margin: 4px 16px 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); color: var(--text); }
+  .restore-draft { flex-shrink: 0; padding: 6px 10px; margin: 4px 16px 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); color: var(--text); }
+  .more-history { display: block; width: max-content; padding: 6px 10px; margin: 4px auto 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); color: var(--text); }
   .turn-nav { position: relative; display: flex; align-items: center; min-width: 0; flex: 0 1 auto; }
   header .turn-trigger { display: flex; align-items: center; gap: 5px; width: auto; height: 24px; max-width: 240px; padding: 0 8px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-alt); color: var(--text-muted); font-size: 11px; }
   header .turn-trigger:hover, header .turn-trigger[aria-expanded="true"] { background: var(--surface-hover); border-color: var(--border-strong); color: var(--text); }
   .turn-label { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-  .turn-panel { position: absolute; top: calc(100% + 6px); right: 0; z-index: 14; width: 260px; max-height: 320px; overflow: auto; padding: 6px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--surface-raised); box-shadow: 0 10px 26px #0006; }
+  .turn-panel { position: absolute; top: calc(100% + 6px); right: 0; z-index: 14; width: 300px; max-width: min(320px, 90vw); max-height: 340px; overflow-y: auto; overflow-x: hidden; padding: 6px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--surface-raised); box-shadow: 0 10px 26px #0006; }
   .turn-panel-head { margin: 0; padding: 4px 8px 6px; color: var(--text-muted); font-size: 10px; }
   .turn-panel ul { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 0; list-style: none; }
-  header .turn-panel button { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 8px; width: 100%; height: auto; padding: 6px 8px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--text); font-size: 11px; text-align: left; }
+  header .turn-panel button { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; column-gap: 8px; row-gap: 1px; width: 100%; height: auto; padding: 6px 8px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--text); font-size: 11px; line-height: 1.4; text-align: left; }
   header .turn-panel button:hover { background: var(--surface-hover); }
   header .turn-panel button.active { border-color: var(--accent); background: var(--surface-alt); }
   .turn-no { color: var(--accent); font-family: var(--code-font); }
+  .turn-body { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
   .turn-summary { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--text-muted); }
   header .turn-panel button.active .turn-summary { color: var(--text-strong); }
+  .turn-duration { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--text-muted); opacity: .75; font-size: 10px; line-height: 1.2; }
   .turn-time { color: var(--text-muted); font-size: 10px; white-space: nowrap; }
   .turn-rail { position: absolute; top: 50%; right: 6px; transform: translateY(-50%); z-index: 3; display: flex; flex-direction: column; align-items: center; gap: 6px; max-height: calc(100% - 24px); overflow-y: auto; padding: 4px 2px; }
   .turn-dot { width: 8px; height: 8px; flex-shrink: 0; padding: 0; border: 0; border-radius: 999px; background: var(--border-strong); opacity: .75; transition: background .15s ease, height .15s ease, opacity .15s ease; }

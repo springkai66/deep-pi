@@ -14,6 +14,11 @@ export interface RpcMessage {
   /// 工具结果的执行起止时间（事件流内记的本地时钟），用于显示 Took；历史消息无此字段。
   toolStartedAt?: number;
   toolEndedAt?: number;
+  /// 上下文压缩摘要消息（role === "compactionSummary"）：pi 压缩后重建上下文时插入。
+  summary?: string;
+  tokensBefore?: number;
+  /// 压缩后估算 tokens：仅 live compaction_end 事件携带，历史重载的 pi 原生消息无此字段。
+  tokensAfter?: number;
 }
 
 export interface RpcTool {
@@ -40,6 +45,8 @@ export interface Conversation {
   /// 待发送提示词按投递模式分开：steering = 优先引导，followUp = 排队跟进；供输入框上方的待发送列表使用。
   queueSteering: string[];
   queueFollowUp: string[];
+  /// 上下文压缩进行中（pi 的 compaction_start/compaction_end 事件或 get_state 的 isCompacting）。
+  compacting: boolean;
 }
 
 export function record(value: unknown): Record<string, unknown> {
@@ -141,7 +148,7 @@ export function dropTrailingEmptyAssistant(messages: RpcMessage[]): RpcMessage[]
 }
 
 export function emptyConversation(): Conversation {
-  return { sequence: 0, messages: [], tools: {}, busy: false, phase: "idle", closed: false, error: "", queue: [], queueSteering: [], queueFollowUp: [] };
+  return { sequence: 0, messages: [], tools: {}, busy: false, phase: "idle", closed: false, error: "", queue: [], queueSteering: [], queueFollowUp: [], compacting: false };
 }
 
 export function loadHistory(state: Conversation, values: unknown[], sequence: number): Conversation {
@@ -162,6 +169,29 @@ export function applyRpcEvent(previous: Conversation, event: RpcEvent): Conversa
   } else if (type === "rpc_error" || type === "extension_error") {
     state.error = typeof payload.error === "string" ? readableRpcError(payload.error) : t("RPC 运行失败");
     state.phase = "failed"; state.busy = false; state.messages = dropTrailingEmptyAssistant(state.messages);
+  } else if (type === "compaction_start") {
+    // pi 压缩开始（手动 compact RPC 或上下文超出阈值自动触发）。
+    state.compacting = true;
+  } else if (type === "compaction_end") {
+    state.compacting = false;
+    // 成功结果里带 summary/tokensBefore：pi 重建上下文时不会为压缩摘要发 message_end 事件，
+    // 这里补一条 compactionSummary 消息（与 pi createCompactionSummaryMessage 同构），让会话流展示压缩结果。
+    const result = record(payload.result);
+    const summary = typeof result.summary === "string" ? result.summary : "";
+    if (summary && !previous.messages.some((message) => message.role === "compactionSummary" && message.summary === summary)) {
+      state.messages = [...previous.messages, {
+        role: "compactionSummary",
+        summary,
+        tokensBefore: typeof result.tokensBefore === "number" ? result.tokensBefore : undefined,
+        tokensAfter: typeof result.estimatedTokensAfter === "number" ? result.estimatedTokensAfter : undefined,
+        timestamp: Date.now(),
+      } as RpcMessage];
+    }
+    // 自动压缩失败没有 RPC 调用方接收错误，手动失败走 compact RPC 的 rejection 提示，这里只补自动路径。
+    const reason = payload.reason;
+    if (reason !== "manual" && typeof payload.errorMessage === "string" && payload.errorMessage) {
+      state.error = readableRpcError(payload.errorMessage);
+    }
   } else if (type === "queue_update") {
     const steering = Array.isArray(payload.steering) ? payload.steering.filter((item): item is string => typeof item === "string") : [];
     const followUp = Array.isArray(payload.followUp) ? payload.followUp.filter((item): item is string => typeof item === "string") : [];

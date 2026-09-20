@@ -4,7 +4,8 @@ import { DEFAULT_THEME_ID, type ThemePack } from "./theme";
 export type ColorMode = "system" | "light" | "dark";
 /** 主题 id：内置（command-flow）或导入主题的标识。 */
 export type Theme = string;
-export type CodeFont = "cascadia" | "consolas" | "jetbrains";
+/** 代码字体：空串 = 跟随主题；内置预设 cascadia / consolas / jetbrains；其余为本机字体族名。 */
+export type CodeFont = string;
 export type CloseBehavior = "ask" | "minimize" | "exit";
 export type TerminalShell = "powershell" | "pwsh" | "bash" | "cmd";
 /** AI 对话内容的显示详细程度：简洁（只看正文）/ 标准（过程内容折叠）/ 详细（过程内容默认展开）。 */
@@ -72,6 +73,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
 
 export const FONT_SIZE_RANGE = { min: 9, max: 32 } as const;
 
+/** 代码字体：设置页选项 = 空串（跟随主题）+ 内置预设 + 本机系统字体。 */
 export const CODE_FONT_OPTIONS: Array<{ value: CodeFont; label: string }> = [
   { value: "cascadia", label: "Cascadia Mono" },
   { value: "consolas", label: "Consolas" },
@@ -120,10 +122,23 @@ export function cssTerminalFontFamily(name: string, codeFont: CodeFont, themeFon
   return name.trim() ? fontFamilyStack(name, cssCodeFontFamily(codeFont, themeFont)) : cssCodeFontFamily(codeFont, themeFont);
 }
 
-/** 代码字体：默认项（cascadia）允许主题覆盖，用户显式选择时以用户为准。 */
+/** 代码字体：空串跟随主题（主题可覆盖 cascadia 档）；内置预设沿用固定字体栈；
+ *  其余值视为本机字体族名，末尾保证等宽回落。 */
 export function cssCodeFontFamily(font: CodeFont, themeFont?: string): string {
-  if (font === "cascadia") return ensureMonospaceFallback(themeFont?.trim() || CODE_FONT_FAMILIES.cascadia);
-  return CODE_FONT_FAMILIES[font];
+  const chosen = font.trim();
+  if (!chosen || chosen === "cascadia") return ensureMonospaceFallback(themeFont?.trim() || CODE_FONT_FAMILIES.cascadia);
+  if (chosen === "consolas" || chosen === "jetbrains") return CODE_FONT_FAMILIES[chosen];
+  return fontFamilyStack(chosen, MONOSPACE_CODE_FALLBACK);
+}
+
+/// 字体预览栈：指定族名 + 应用默认回落（应用程序/会话字体选项预览用）。
+export function appFontPreviewStack(name: string): string {
+  return fontFamilyStack(name, DEFAULT_APP_STACK);
+}
+
+/// 字体预览栈：指定族名 + 等宽回落（代码字体选项预览用）。
+export function codeFontPreviewStack(name: string): string {
+  return fontFamilyStack(name, MONOSPACE_CODE_FALLBACK);
 }
 
 export function isLightColorMode(mode: ColorMode): boolean {

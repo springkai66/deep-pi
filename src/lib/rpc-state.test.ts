@@ -205,6 +205,52 @@ describe("empty assistant turns", () => {
     expect(visible.map((message) => message.role)).toEqual(["user", "user", "assistant"]);
   });
 });
+describe("context compaction", () => {
+  it("marks compaction in progress and appends the summary as a compactionSummary message", () => {
+    let state = emptyConversation();
+    state = applyRpcEvent(state, { sequence: 1, payload: { type: "compaction_start", reason: "auto" } });
+    expect(state.compacting).toBe(true);
+    state = applyRpcEvent(state, {
+      sequence: 2,
+      payload: { type: "compaction_end", reason: "auto", aborted: false, willRetry: false,
+        result: { summary: "摘要内容", tokensBefore: 55_000, estimatedTokensAfter: 4_000 } },
+    });
+    expect(state.compacting).toBe(false);
+    expect(state.messages).toHaveLength(1);
+    expect(state.messages[0].role).toBe("compactionSummary");
+    expect(state.messages[0].summary).toBe("摘要内容");
+    expect(state.messages[0].tokensBefore).toBe(55_000);
+    expect(state.messages[0].tokensAfter).toBe(4_000);
+  });
+
+  it("does not duplicate the summary when it already exists in the history", () => {
+    let state = emptyConversation();
+    state = loadHistory(emptyConversation(), [{ role: "compactionSummary", summary: "摘要", timestamp: 1 }], 1);
+    state = applyRpcEvent(state, {
+      sequence: 2,
+      payload: { type: "compaction_end", reason: "manual", aborted: false, willRetry: false, result: { summary: "摘要", tokensBefore: 100 } },
+    });
+    expect(state.messages).toHaveLength(1);
+    expect(state.compacting).toBe(false);
+  });
+
+  it("surfaces auto-compaction failures but leaves manual ones to the compact RPC rejection", () => {
+    let state = emptyConversation();
+    state = applyRpcEvent(state, {
+      sequence: 1,
+      payload: { type: "compaction_end", reason: "auto", aborted: false, willRetry: false, errorMessage: "Compaction failed: boom" },
+    });
+    expect(state.compacting).toBe(false);
+    expect(state.error).toBe("Compaction failed: boom");
+    expect(state.messages).toHaveLength(0);
+    state = applyRpcEvent(state, {
+      sequence: 2,
+      payload: { type: "compaction_end", reason: "manual", aborted: false, willRetry: false, errorMessage: "Compaction failed: boom" },
+    });
+    expect(state.error).toBe("Compaction failed: boom");
+  });
+});
+
 describe("execution visibility and concurrency errors", () => {
   it("tracks thinking, generation, tool execution and waiting phases", () => {
     let state = emptyConversation();

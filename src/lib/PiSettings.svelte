@@ -3,7 +3,8 @@
   import type { Snippet } from "svelte";
   import { onMount } from "svelte";
   import { invoke as nativeInvoke } from "@tauri-apps/api/core";
-  import { CODE_FONT_OPTIONS, CHAT_DETAIL_LEVELS, FONT_SIZE_RANGE, type AppSettings, type ExternalEditor } from "./settings";
+  import { CODE_FONT_OPTIONS, CHAT_DETAIL_LEVELS, FONT_SIZE_RANGE, cssAppFontFamily, cssCodeFontFamily, appFontPreviewStack, codeFontPreviewStack, type AppSettings, type ExternalEditor } from "./settings";
+  import FontSelect from "./FontSelect.svelte";
   import {
     BUILT_IN_THEMES,
     DEFAULT_THEME_ID,
@@ -63,6 +64,19 @@
 
   const activeTheme = $derived(resolveTheme(runtime.settings.theme, runtime.settings.customThemes ?? []));
   const themeOptions = $derived([...BUILT_IN_THEMES, ...(runtime.settings.customThemes ?? [])]);
+  /** 字体选项：每个选项带预览字体栈，下拉里以对应字体渲染（原生 select 做不到）。 */
+  const appFontOptions = $derived([
+    { value: "", label: t("系统默认"), previewFamily: cssAppFontFamily("", activeTheme.typography?.appFont) },
+    ...systemFonts.map((font) => ({ value: font, label: font, previewFamily: appFontPreviewStack(font) })),
+  ]);
+  const codeFontOptions = $derived.by(() => {
+    const themeFont = activeTheme.typography?.codeFont;
+    return [
+      { value: "", label: t("跟随主题"), previewFamily: cssCodeFontFamily("", themeFont) },
+      ...CODE_FONT_OPTIONS.map((option) => ({ value: option.value, label: option.label, previewFamily: cssCodeFontFamily(option.value, themeFont) })),
+      ...systemFonts.map((font) => ({ value: font, label: font, previewFamily: codeFontPreviewStack(font) })),
+    ];
+  });
   /** 下拉中当前选中的主题；旧配置里的未知 id 由 resolveTheme 回落到默认主题。 */
   const selectedTheme = $derived(themeOptions.find((option) => option.id === runtime.settings.theme) ?? activeTheme);
   /** 选中的主题若是用户导入的，则允许删除。 */
@@ -290,35 +304,28 @@
               <option value="system">{t("跟随系统")}</option><option value="light">{t("浅色")}</option><option value="dark">{t("深色")}</option>
             </select>
           </label>
-          <label class="setting-control"><strong>{t("应用程序字体")}</strong>
-            <select value={runtime.settings.appFontName} aria-label={t("应用程序字体")}
-              onchange={(event) => updateSettings({ appFontName: event.currentTarget.value })}>
-              <option value="">{t("系统默认")}</option>
-              {#each systemFonts as font}<option value={font}>{font}</option>{/each}
-            </select>
-          </label>
+          <div class="setting-control"><strong>{t("应用程序字体")}</strong>
+            <FontSelect value={runtime.settings.appFontName} ariaLabel={t("应用程序字体")}
+              options={appFontOptions} onchange={(value) => updateSettings({ appFontName: value })} />
+          </div>
           <label class="setting-control"><strong>{t("应用字体大小（px）")}</strong>
             <input type="number" min={FONT_SIZE_RANGE.min} max={FONT_SIZE_RANGE.max} step="1" aria-label={t("应用字体大小")}
               value={runtime.settings.appFontSize}
               oninput={(event) => setFontSize("appFontSize", event.currentTarget.value)} />
           </label>
-          <label class="setting-control"><strong>{t("会话窗口字体")}</strong>
-            <select value={runtime.settings.sessionFontName} aria-label={t("会话窗口字体")}
-              onchange={(event) => updateSettings({ sessionFontName: event.currentTarget.value })}>
-              <option value="">{t("系统默认")}</option>
-              {#each systemFonts as font}<option value={font}>{font}</option>{/each}
-            </select>
-          </label>
+          <div class="setting-control"><strong>{t("会话窗口字体")}</strong>
+            <FontSelect value={runtime.settings.sessionFontName} ariaLabel={t("会话窗口字体")}
+              options={appFontOptions} onchange={(value) => updateSettings({ sessionFontName: value })} />
+          </div>
           <label class="setting-control"><strong>{t("会话字体大小（px）")}</strong>
             <input type="number" min={FONT_SIZE_RANGE.min} max={FONT_SIZE_RANGE.max} step="1" aria-label={t("会话字体大小")}
               value={runtime.settings.sessionFontSize}
               oninput={(event) => setFontSize("sessionFontSize", event.currentTarget.value)} />
           </label>
-          <label class="setting-control"><strong>{t("代码字体")}</strong>
-            <select value={runtime.settings.codeFont} aria-label={t("代码字体")} onchange={(event) => updateSettings({ codeFont: event.currentTarget.value as AppSettings["codeFont"] })}>
-              {#each CODE_FONT_OPTIONS as option}<option value={option.value}>{option.label}</option>{/each}
-            </select>
-          </label>
+          <div class="setting-control"><strong>{t("代码字体")}</strong>
+            <FontSelect value={runtime.settings.codeFont} ariaLabel={t("代码字体")}
+              options={codeFontOptions} onchange={(value) => updateSettings({ codeFont: value as AppSettings["codeFont"] })} />
+          </div>
         </section>
         <section class="settings-group" aria-labelledby="chat-detail-heading">
           <h3 id="chat-detail-heading">{t("会话内容")}</h3>
