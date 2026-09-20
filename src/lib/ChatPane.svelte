@@ -1,6 +1,6 @@
 <script lang="ts">
   import { Channel, invoke } from "@tauri-apps/api/core";
-  import { ArrowDown, ArrowDownUp, ArrowUp, Bot, ChevronDown, CircleAlert, History, Pencil, RefreshCw, Shrink, Sparkles, Square, Terminal, Undo2, UserRound, X } from "@lucide/svelte";
+  import { ArrowDown, ArrowDownUp, ArrowUp, Bot, ChevronDown, CircleAlert, History, Image as ImageIcon, Pencil, RefreshCw, Shrink, Sparkles, Square, Terminal, Undo2, UserRound, X } from "@lucide/svelte";
   import { onMount, tick, untrack, type Snippet } from "svelte";
   import type { DialogRequest, DialogValue } from "./dialog";
   import { applyRpcEvent, canSubmitPrompt, contentText, emptyConversation, loadHistory, messageRenderable, readableRpcError, record, type RpcEvent, type RpcMessage, type RpcTool } from "./rpc-state";
@@ -10,6 +10,7 @@ import type { ChatDetailLevel } from "./settings";
   import { captureTranscriptAnchor, restoreTranscriptAnchor, messageWindowStart, transcriptPort } from "./transcript-scroll";
   import MessageDisclosure from "./MessageDisclosure.svelte";
   import { messageSource } from "./message-parts";
+  import { hasQueuedImages, rekeyQueuedImages, takeQueuedImages, type QueuedImageEntry } from "./queued-images";
   import { formatDuration } from "./duration";
   import { createDormantHistorySession, createRpcHistorySession, prependRpcHistory } from "./rpc-history";
   import { deriveSessionTitle, isTruncatedTitleUpgrade } from "./session-title";
@@ -767,16 +768,47 @@ import type { ChatDetailLevel } from "./settings";
   const canEnhance = $derived(connected && !switching && !conversation.busy && !conversation.closed && !!draft.trim() && !enhancing);
 
   /// 待发送提示词（输入框上方）：引导/排队分开列出，支持编辑、撤回与切换投递方式。
-  interface PendingEntry { mode: "steer" | "followUp"; index: number; text: string; key: string; }
+  interface PendingEntry { mode: "steer" | "followUp"; index: number; text: string; hasImages: boolean; key: string; }
+
+  /// 排队中的提示词图片：pi 的 clear_queue 与队列事件只携带文本，DeepPi 本地记住，
+  /// 供「待发送」条目编辑/移动时恢复，以及在重建队列时随文本重新附加。
+  let queuedImages = $state<QueuedImageEntry<ChatImageAttachment>[]>([]);
+  /// 重建队列期间（clear_queue 与逐条重发之间）跳过图片记忆清理。
+  let queueRebuilding = false;
+
+  /// 把记忆中的图片恢复到输入框附件（重新分配 id，并遵守数量与总量上限）。
+  function restoreAttachments(images: ChatImageAttachment[]) {
+    for (const image of images) {
+      if (attachments.length >= MAX_IMAGE_ATTACHMENTS) {
+        attachmentError = t("最多附加 {count} 张图片", { count: MAX_IMAGE_ATTACHMENTS });
+        break;
+      }
+      if (attachmentsBase64Total + image.data.length > MAX_IMAGES_BASE64_TOTAL) {
+        attachmentError = t("图片总大小超出限制，请先移除部分图片");
+        break;
+      }
+      attachments = [...attachments, { ...image, id: ++attachmentSeq }];
+    }
+  }
+
   const pendingEntries = $derived([
-    ...conversation.queueSteering.map((text, index) => ({ mode: "steer" as const, index, text, key: `steer-${index}` })),
-    ...conversation.queueFollowUp.map((text, index) => ({ mode: "followUp" as const, index, text, key: `follow-up-${index}` })),
+    ...conversation.queueSteering.map((text, index) => ({ mode: "steer" as const, index, text, hasImages: hasQueuedImages(queuedImages, "steer", text), key: `steer-${index}` })),
+    ...conversation.queueFollowUp.map((text, index) => ({ mode: "followUp" as const, index, text, hasImages: hasQueuedImages(queuedImages, "followUp", text), key: `follow-up-${index}` })),
   ]);
 
-  /// 取回全部待发送文本（clear_queue），重建除目标之外的队列；返回被取下的文本。
-  /// 重建用 steer/follow_up 命令只带文本：pi 的 clear_queue 不返回图片附件，重建后图片会丢失。
-  async function takePending(entry: PendingEntry, retarget: "steer" | "followUp" | null): Promise<string | null> {
+  // 队列清空且不再执行时清掉图片记忆；重建队列期间跳过。
+  $effect(() => {
+    if (queueRebuilding || conversation.busy) return;
+    if (conversation.queueSteering.length || conversation.queueFollowUp.length) return;
+    if (queuedImages.length) queuedImages = [];
+  });
+
+  /// 取回全部待发送文本（clear_queue），重建除目标之外的队列；返回被取下条目的文本与图片。
+  /// pi 的 clear_queue 不返回图片附件：本地图片记忆（queuedImages）在重建时按条目重新附加；
+  /// 移动（retarget 非空）时图片留在队列一并重发，编辑/撤回（null）时图片返回给调用方。
+  async function takePending(entry: PendingEntry, retarget: "steer" | "followUp" | null): Promise<{ text: string; images: ChatImageAttachment[] } | null> {
     const current = generation;
+    queueRebuilding = true;
     try {
       const queue = await call<{ steering?: string[]; followUp?: string[] }>({ type: "clear_queue" });
       if (current !== generation) return null;
@@ -786,16 +818,40 @@ import type { ChatDetailLevel } from "./settings";
       const text = source[entry.index] ?? "";
       if (!text) return null;
       source.splice(entry.index, 1);
-      if (retarget) (retarget === "steer" ? steering : followUp).push(text);
-      for (const item of steering) await call({ type: "steer", message: item });
-      for (const item of followUp) await call({ type: "follow_up", message: item });
-      return text;
+      let taken: ChatImageAttachment[] = [];
+      if (retarget) {
+        // 移动：图片记忆改挂目标队列，随重建重发保留。
+        queuedImages = rekeyQueuedImages(queuedImages, entry.mode, retarget, text);
+        (retarget === "steer" ? steering : followUp).push(text);
+      } else {
+        // 编辑/撤回：取下该条目的图片并返回。
+        const takenEntry = takeQueuedImages(queuedImages, entry.mode, text);
+        queuedImages = takenEntry.entries;
+        taken = takenEntry.images;
+      }
+      const rebuilt: QueuedImageEntry<ChatImageAttachment>[] = [];
+      const replay = async (mode: "steer" | "followUp", items: string[]) => {
+        for (const item of items) {
+          const take = takeQueuedImages(queuedImages, mode, item);
+          queuedImages = take.entries;
+          if (take.images.length) rebuilt.push({ mode, text: item, images: take.images });
+          const payload = take.images.map(({ data, mimeType }) => ({ type: "image", data, mimeType }));
+          await call({ type: mode === "steer" ? "steer" : "follow_up", message: item, ...(payload.length ? { images: payload } : {}) });
+        }
+      };
+      await replay("steer", steering);
+      await replay("followUp", followUp);
+      queuedImages = rebuilt;
+      return { text, images: taken };
     } catch (cause) {
       if (current === generation) commandError(cause);
       return null;
+    } finally {
+      queueRebuilding = false;
     }
   }
 
+  /// 撤回：丢弃该条目（连同图片，与原有语义一致）。
   async function withdrawPending(entry: PendingEntry) {
     await takePending(entry, null);
   }
@@ -804,12 +860,14 @@ import type { ChatDetailLevel } from "./settings";
     await takePending(entry, entry.mode === "steer" ? "followUp" : "steer");
   }
 
-  /// 编辑：把待发送文本取回输入框；已有草稿先暂存（可用「恢复暂存文本」找回）。
+  /// 编辑：把待发送文本与图片取回输入框；已有草稿先暂存（可用「恢复暂存文本」找回）。
   async function editPending(entry: PendingEntry) {
-    const text = await takePending(entry, null);
-    if (!text || text === draft) return;
+    const taken = await takePending(entry, null);
+    if (!taken || !taken.text) return;
+    if (taken.images.length) restoreAttachments(taken.images);
+    if (taken.text === draft) return;
     if (draft) restoredDraft = draft;
-    draft = text;
+    draft = taken.text;
     await tick();
     input?.focus();
   }
@@ -897,6 +955,7 @@ import type { ChatDetailLevel } from "./settings";
     modelsLoadError = "";
     modelsStale = false;
     piCommands = [];
+    queuedImages = [];
     modelName = "";
     selectedModel = "";
     conversation = emptyConversation();
@@ -1507,12 +1566,18 @@ import type { ChatDetailLevel } from "./settings";
     }
     const text = draft;
     const images = attachments.map((file) => ({ type: "image", data: file.data, mimeType: file.mimeType }));
+    /// 发送时若 AI 正在执行，本条会被 pi 排队；本地记住图片，供待发送列表恢复。
+    const queuedByPi = conversation.busy;
+    const queuedAttachments = attachments.map((file) => ({ ...file }));
     const current = generation;
     sending = true;
     error = "";
     try {
       await call({ type: "prompt", message: text, streamingBehavior, ...(images.length ? { images } : {}) });
       if (current !== generation) return;
+      if (queuedByPi && queuedAttachments.length) {
+        queuedImages = [...queuedImages, { mode: streamingBehavior, text, images: queuedAttachments }];
+      }
       if (draft === text) { draft = ""; attachments = []; attachmentError = ""; }
       followScroll = true;
       pinnedMessageStart = null;
@@ -1842,6 +1907,7 @@ import type { ChatDetailLevel } from "./settings";
           <li class="pending-item">
             <span class="pending-mode" class:steer={entry.mode === "steer"} title={entry.mode === "steer" ? t("优先引导") : t("排队跟进")}>{entry.mode === "steer" ? t("引导") : t("排队")}</span>
             <span class="pending-text" title={entry.text}>{entry.text}</span>
+            {#if entry.hasImages}<span class="pending-images" title={t("含图片")} aria-label={t("含图片")}><ImageIcon size={11} /></span>{/if}
             <span class="pending-actions">
               <button type="button" title={t("编辑这条提示词")} aria-label={t("编辑这条提示词")} onclick={() => void editPending(entry)}><Pencil size={13} /></button>
               <button type="button" title={t("撤回这条提示词")} aria-label={t("撤回这条提示词")} onclick={() => void withdrawPending(entry)}><Undo2 size={13} /></button>
@@ -2090,6 +2156,7 @@ import type { ChatDetailLevel } from "./settings";
   .pending-mode { flex-shrink: 0; padding: 1px 8px; border: 1px solid var(--border); border-radius: 999px; font-size: 10px; color: var(--text-muted); white-space: nowrap; }
   .pending-mode.steer { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
   .pending-text { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--text); }
+  .pending-images { display: inline-flex; align-items: center; flex-shrink: 0; color: var(--text-muted); }
   .pending-actions { display: inline-flex; gap: 2px; flex-shrink: 0; }
   .pending-actions button { display: grid; place-items: center; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--text-muted); cursor: pointer; }
   .pending-actions button:hover { color: var(--text); background: var(--surface-hover); }
