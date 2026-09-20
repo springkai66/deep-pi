@@ -1644,6 +1644,10 @@ import type { ChatDetailLevel } from "./settings";
         if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void send(); }
       }}></textarea>
     <div class="composer-actions">
+      <button type="button" class="send-button" title={t("增强提示词（改写为更清晰的结构化提示）")} aria-label={t("增强提示词")}
+        disabled={!canEnhance} onclick={() => void enhanceDraft()}>
+        {#if enhancing}<span class="spin"><RefreshCw size={14} /></span>{:else}<Sparkles size={15} />{/if}
+      </button>
       {#if models.length}
         <select aria-label={t("对话模型")} value={selectedModel} disabled={switching || !connected || changingModel}
           title={conversation.busy ? t("当前回复生成中；改动对下一条消息生效") : undefined}
@@ -1716,12 +1720,8 @@ import type { ChatDetailLevel } from "./settings";
         {statusText}
       </span>
       {#if conversation.busy || conversation.queue.length}
-        <button type="button" class="send-button" class:stalled={toolStalled} disabled={switching || stopping} title={t("停止当前响应并清空队列")} aria-label={t("停止当前响应并清空队列")} onclick={() => void interrupt()}><Square size={16} /></button>
+        <button type="button" class="send-button stop-button" class:stalled={toolStalled} disabled={switching || stopping} title={t("停止当前响应并清空队列")} aria-label={t("停止当前响应并清空队列")} onclick={() => void interrupt()}><Square size={16} /></button>
       {/if}
-      <button type="button" class="send-button" title={t("增强提示词（改写为更清晰的结构化提示）")} aria-label={t("增强提示词")}
-        disabled={!canEnhance} onclick={() => void enhanceDraft()}>
-        {#if enhancing}<span class="spin"><RefreshCw size={14} /></span>{:else}<Sparkles size={15} />{/if}
-      </button>
       <button type="submit" class="send-button primary-send" disabled={!canSend} title={sendHint} aria-label={sendHint}><ArrowUp size={18} /></button>
     </div>
   </form>
@@ -1842,6 +1842,8 @@ import type { ChatDetailLevel } from "./settings";
   .connection-status { display: inline-flex; align-items: center; gap: 6px; flex: 1; min-width: 0; font-size: 11px; color: var(--text-muted); white-space: nowrap; overflow: hidden; }
   .connection-status.stalled { color: #d8a04a; }
   .send-button { display: grid; place-items: center; width: 30px; height: 30px; padding: 0; flex-shrink: 0; border: 0; border-radius: 4px; background: var(--surface-hover); color: var(--text); }
+  /* 停止按钮：红色醒目，与增强/发送按钮区分；紧跟在发送按钮左侧。 */
+  .send-button.stop-button { background: color-mix(in srgb, var(--status-failed) 18%, var(--surface-hover)); color: var(--status-failed); }
   /* 工具长时间无输出：停止按钮琥珀色呼吸，就近提示可中断。 */
   .send-button.stalled { background: color-mix(in srgb, #d8a04a 22%, var(--surface-hover)); color: #d8a04a; animation: activity-pulse 1.6s ease-in-out infinite; }
   .primary-send { background: var(--accent); color: var(--accent-ink); }
