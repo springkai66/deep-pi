@@ -1,14 +1,16 @@
 <script lang="ts">
   import { Channel, invoke } from "@tauri-apps/api/core";
-  import { ArrowDown, ArrowUp, Bot, ChevronDown, History, RefreshCw, Sparkles, Square, Terminal, UserRound } from "@lucide/svelte";
+  import { ArrowDown, ArrowDownUp, ArrowUp, Bot, ChevronDown, History, Pencil, RefreshCw, Sparkles, Square, Terminal, Undo2, UserRound, X } from "@lucide/svelte";
   import { onMount, tick, untrack, type Snippet } from "svelte";
   import type { DialogRequest, DialogValue } from "./dialog";
   import { applyRpcEvent, canSubmitPrompt, contentText, emptyConversation, loadHistory, messageRenderable, readableRpcError, record, type RpcEvent } from "./rpc-state";
   import { onModelsChanged } from "./model-config-sync";
   import { findSavedModel, parseModelKey, shouldApplySavedChoice, validSavedThinkingLevel, type SavedModelChoice } from "./model-memory";
+import type { ChatDetailLevel } from "./settings";
   import { captureTranscriptAnchor, restoreTranscriptAnchor, messageWindowStart, transcriptPort } from "./transcript-scroll";
   import MessageDisclosure from "./MessageDisclosure.svelte";
   import { messageSource } from "./message-parts";
+  import { formatDuration } from "./duration";
   import { createRpcHistorySession, prependRpcHistory } from "./rpc-history";
   import { shortcutAria } from "./shortcuts";
   import { t, tm } from "$lib/i18n.svelte";
@@ -47,8 +49,10 @@
     onAutoRename: (title: string) => void;
     onOpenModelSettings?: () => void;
     onReloadSession?: () => void;
+    /** AI 对话内容显示详细程度（简洁/标准/详细），来自全局设置。 */
+    chatDetailLevel?: ChatDetailLevel;
   }
-  let { taskId, runId, title, tabs, visible, active, switching, focusToken, autoName, onUseTerminal, onDialog, onCancelDialogs, onActivity, onAutoRename, onOpenModelSettings, onReloadSession }: Props = $props();
+  let { taskId, runId, title, tabs, visible, active, switching, focusToken, autoName, onUseTerminal, onDialog, onCancelDialogs, onActivity, onAutoRename, onOpenModelSettings, onReloadSession, chatDetailLevel = "standard" }: Props = $props();
   let conversation = $state(emptyConversation());
   let draft = $state("");
   let restoredDraft = $state("");
@@ -57,7 +61,6 @@
   let sending = $state(false);
   let stopping = $state(false);
   let error = $state("");
-  let promptActive = $state(false);
   let notice = $state("");
   let modelName = $state("");
   let models = $state<{ id: string; provider: string; name: string }[]>([]);
@@ -76,6 +79,10 @@
   let sessionStats = $state<SessionStats | null>(null);
   let turnStartedAt = $state<number | null>(null);
   let elapsedNow = $state(Date.now());
+  /// 每轮对话的执行耗时（毫秒），key = `${runId ?? ""}#${轮次号}`；轮次结束后冻结为固定值。
+  let turnDurations = $state<Record<string, number>>({});
+  /// 正在执行的轮次号：同一条 busy 周期内被排队消息开启新一轮时，会先结算上一轮再重新计时。
+  let runningTurn = $state<number | null>(null);
   let statsGeneration = 0;
 
   interface SessionStats {
@@ -111,6 +118,119 @@
   /// slug → 详情：重复选择同一个工作流时不再请求后端。
   const workflowDetails = new Map<string, WorkflowDetail>();
   let input = $state<HTMLTextAreaElement>();
+  /// 粘贴/拖入的图片附件：随 prompt 命令的 `images` 字段以 base64 发给 Pi（RPC 协议支持 prompt/steer/follow_up 携带图片）。
+  interface ChatImageAttachment {
+    id: number;
+    name: string;
+    mimeType: string;
+    data: string; /// base64，不含 `data:` 前缀
+    size: number; /// 原始字节数
+  }
+  /// Pi/Provider 对图片类型的支持范围与会话渲染校验保持一致；单个附件与总量都设上限，
+  /// 避免超出后端命令大小上限（8MB，含文本与 JSON 开销）。
+  const MAX_IMAGE_ATTACHMENTS = 6;
+  const MAX_IMAGE_FILE_BYTES = 4 * 1024 * 1024;
+  const MAX_IMAGES_BASE64_TOTAL = 6 * 1024 * 1024;
+  const SUPPORTED_IMAGE_MIME_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+  let attachments = $state<ChatImageAttachment[]>([]);
+  let attachmentError = $state("");
+  let attachmentSeq = 0;
+  let draggingFiles = $state(false);
+  const base64LengthOf = (bytes: number): number => Math.ceil(bytes / 3) * 4;
+  const attachmentsBase64Total = $derived(attachments.reduce((total, file) => total + file.data.length, 0));
+
+  function removeAttachment(id: number) {
+    attachments = attachments.filter((file) => file.id !== id);
+    attachmentError = "";
+  }
+
+  /// 把粘贴/拖入的图片文件加入附件列表；读取完成后异步追加。
+  function addImageFiles(incoming: Iterable<File>) {
+    attachmentError = "";
+    for (const file of incoming) {
+      if (!file.type.startsWith("image/")) continue;
+      if (attachments.length + pendingImageReads >= MAX_IMAGE_ATTACHMENTS) {
+        attachmentError = t("最多附加 {count} 张图片", { count: MAX_IMAGE_ATTACHMENTS });
+        return;
+      }
+      if (!SUPPORTED_IMAGE_MIME_TYPES.includes(file.type)) {
+        attachmentError = t("图片格式不支持：仅支持 PNG、JPEG、GIF、WebP");
+        continue;
+      }
+      if (file.size > MAX_IMAGE_FILE_BYTES) {
+        attachmentError = t("图片「{name}」超过 {max} 的大小限制", { name: file.name, max: formatBytes(MAX_IMAGE_FILE_BYTES) });
+        continue;
+      }
+      if (attachmentsBase64Total + pendingImageReadBytes + base64LengthOf(file.size) > MAX_IMAGES_BASE64_TOTAL) {
+        attachmentError = t("图片总大小超出限制，请先移除部分图片");
+        return;
+      }
+      const reader = new FileReader();
+      /// 同步预算：读取期间先把 pending 计入，完成后归还，避免连贴/连拖超额。
+      pendingImageReads += 1;
+      pendingImageReadBytes += base64LengthOf(file.size);
+      const settle = () => {
+        pendingImageReads -= 1;
+        pendingImageReadBytes -= base64LengthOf(file.size);
+      };
+      reader.onerror = () => {
+        settle();
+        attachmentError = t("图片读取失败：{name}", { name: file.name });
+      };
+      reader.onload = () => {
+        settle();
+        if (typeof reader.result !== "string") return;
+        const comma = reader.result.indexOf(",");
+        const header = reader.result.slice(0, comma >= 0 ? comma : 0).toLowerCase();
+        if (!reader.result.startsWith("data:") || comma < 0 || !header.includes("base64")) return;
+        const data = reader.result.slice(comma + 1);
+        if (!data) return;
+        attachments = [...attachments, { id: ++attachmentSeq, name: file.name, mimeType: file.type, data, size: file.size }];
+      };
+      reader.readAsDataURL(file);
+    }
+  }
+
+  /// 已开始读取、尚未完成的图片数量与预估 base64 字节数。
+  let pendingImageReads = 0;
+  let pendingImageReadBytes = 0;
+
+  function onComposerPaste(event: ClipboardEvent) {
+    const files = event.clipboardData?.files;
+    if (!files?.length) return;
+    const images = Array.from(files).filter((file) => file.type.startsWith("image/"));
+    if (!images.length) return;
+    event.preventDefault();
+    addImageFiles(images);
+  }
+
+  function hasDraggedFiles(event: DragEvent): boolean {
+    return Array.from(event.dataTransfer?.types ?? []).includes("Files");
+  }
+
+  function onComposerDragOver(event: DragEvent) {
+    if (!hasDraggedFiles(event)) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+    draggingFiles = true;
+  }
+
+  function onComposerDragLeave(event: DragEvent) {
+    if (event.currentTarget === event.target) draggingFiles = false;
+  }
+
+  function onComposerDrop(event: DragEvent) {
+    draggingFiles = false;
+    const files = event.dataTransfer?.files;
+    if (!files?.length) return;
+    event.preventDefault();
+    addImageFiles(files);
+  }
+
+  function formatBytes(size: number): string {
+    return size >= 1024 * 1024 ? `${(size / (1024 * 1024)).toFixed(1)} MB` : `${Math.max(1, Math.round(size / 1024))} KB`;
+  }
+
   let transcript = $state<HTMLDivElement>();
   let transcriptContent = $state<HTMLDivElement>();
   let messageModule = $state.raw<Promise<typeof import("./ChatMessage.svelte")> | null>(null);
@@ -181,6 +301,32 @@
     return `${date.getMonth() + 1}-${date.getDate()} ${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
   }
 
+  function turnDurationKey(turnNumber: number): string {
+    return `${runId ?? ""}#${turnNumber}`;
+  }
+
+  /// pi TUI 风格的工具标题：工具名 + 首个有意义参数摘要（command/file_path/pattern 等），单行截断。
+  const TOOL_SUMMARY_KEYS = ["command", "file_path", "path", "pattern", "query", "url", "skill", "name", "id"] as const;
+
+  function toolCallSummary(name: string, args: unknown): string {
+    const argsRecord = record(args);
+    for (const key of TOOL_SUMMARY_KEYS) {
+      const value = argsRecord[key];
+      if (typeof value === "string" && value.trim()) {
+        const line = value.split("\n", 1)[0].trim();
+        if (line) return `${name} ${line.length > 80 ? `${line.slice(0, 80)}…` : line}`;
+      }
+    }
+    return name;
+  }
+
+  /// 把正在计时的轮次耗时累加进 turnDurations（排队续跑时同一轮可能多次累加）。
+  function flushTurnDuration(turnNumber: number, startedAt: number | null) {
+    if (turnNumber < 1 || startedAt === null) return;
+    const key = turnDurationKey(turnNumber);
+    turnDurations = { ...turnDurations, [key]: (turnDurations[key] ?? 0) + Math.max(0, Date.now() - startedAt) };
+  }
+
   /// 用户轮次索引：遍历消息筛出 role === "user" 的消息并记录真实下标，派生而非手动同步。
   const turns = $derived.by(() => {
     const list: ChatTurn[] = [];
@@ -205,6 +351,53 @@
   const activeTurn = $derived(
     turnCount === 0 ? 0 : followScroll ? turnCount : Math.min(Math.max(currentTurn || 1, 1), turnCount),
   );
+  /// 消息下标 → 所属轮次号（用户消息即每轮起点，其后所有消息都归属该轮）。
+  const turnNumberByMessageIndex = $derived.by(() => {
+    const map = new Map<number, number>();
+    let current = 0;
+    conversation.messages.forEach((message, index) => {
+      if (message.role === "user") current += 1;
+      if (current > 0) map.set(index, current);
+    });
+    return map;
+  });
+  /// 每轮的执行时间文案：进行中的轮次用实时计时器，已完成的用冻结的记录值（pi formatDuration 格式）。
+  const turnDurationLabels = $derived.by(() => {
+    const labels = new Map<number, string>();
+    for (const turn of turns) {
+      if (turn.number === runningTurn && turnStartedAt !== null) {
+        labels.set(turn.number, formatDuration(elapsedNow - turnStartedAt));
+      } else {
+        const recorded = turnDurations[turnDurationKey(turn.number)];
+        if (recorded !== undefined) labels.set(turn.number, formatDuration(recorded));
+      }
+    }
+    return labels;
+  });
+
+  /// 取某条消息所在轮次的执行时间文案；非用户消息或尚未计时返回空串。
+  function turnDurationFor(messageIndex: number): string {
+    const number = turnNumberByMessageIndex.get(messageIndex);
+    if (number === undefined) return "";
+    return turnDurationLabels.get(number) ?? "";
+  }
+
+  /// 轮末判定：下一条消息不存在或是新用户消息，则当前条目是该轮末尾。
+  function isTurnBoundary(offset: number): boolean {
+    const next = visibleEntries[offset + 1];
+    return !next || next.message.role === "user";
+  }
+
+  /// 轮末总执行时间：进行中显示 Elapsed（已用时），结束显示 Took（耗时）；无计时的历史轮返回空串。
+  function turnTotalLabel(messageIndex: number): string {
+    const turnNumber = turnNumberByMessageIndex.get(messageIndex);
+    if (turnNumber === undefined) return "";
+    if (conversation.busy && turnNumber === runningTurn && turnStartedAt !== null) {
+      return t("已用时 {duration}", { duration: formatDuration(elapsedNow - turnStartedAt) });
+    }
+    const recorded = turnDurations[turnDurationKey(turnNumber)];
+    return recorded === undefined ? "" : t("耗时 {duration}", { duration: formatDuration(recorded) });
+  }
 
   /// 滚动时把当前轮次对齐到视口；跳转期间不做测量，由 jumpToTurn 断言结果。
   function syncCurrentTurn(container: HTMLDivElement, following: boolean) {
@@ -295,10 +488,22 @@
     };
   });
 
+  /// 每轮执行时间归属：busy 周期与轮次对齐；同一 busy 周期内出现新用户消息（排队/插话）
+  /// 时先结算上一轮耗时再重新计时，busy 结束把最后一轮耗时冻结进 turnDurations。
   $effect(() => {
+    const latestTurn = turns.length;
     if (conversation.busy) {
-      if (turnStartedAt === null) turnStartedAt = Date.now();
-    } else {
+      if (runningTurn === null) {
+        runningTurn = latestTurn;
+        turnStartedAt = Date.now();
+      } else if (latestTurn > runningTurn) {
+        flushTurnDuration(runningTurn, turnStartedAt);
+        runningTurn = latestTurn;
+        turnStartedAt = Date.now();
+      }
+    } else if (runningTurn !== null) {
+      flushTurnDuration(runningTurn, turnStartedAt);
+      runningTurn = null;
       turnStartedAt = null;
     }
   });
@@ -395,7 +600,13 @@
       if (current === generation) workflowBusy = false;
     }
   }
-  const canSend = $derived(!switching && connected && !initializing && !stopping && !conversation.closed && canSubmitPrompt(sending || promptActive, draft));
+  const canSend = $derived(!switching && connected && !initializing && !stopping && !conversation.closed && canSubmitPrompt(sending, draft));
+  /// 发送按钮提示：执行中说明本条消息将按所选方式引导/排队，而非开启新回复。
+  const sendHint = $derived(
+    conversation.busy
+      ? streamingBehavior === "steer" ? t("执行中：本条将在当前工具调用后优先引导") : t("执行中：本条将排队，本轮结束后执行")
+      : t("发送消息"),
+  );
   const groupedModels = $derived.by(() => {
     const groups = new Map<string, typeof models>();
     for (const model of models) {
@@ -443,6 +654,54 @@
             : `${phaseText}${elapsedText ? ` · ${elapsedText}` : ""}`,
   );
   const canEnhance = $derived(connected && !switching && !conversation.busy && !conversation.closed && !!draft.trim() && !enhancing);
+
+  /// 待发送提示词（输入框上方）：引导/排队分开列出，支持编辑、撤回与切换投递方式。
+  interface PendingEntry { mode: "steer" | "followUp"; index: number; text: string; key: string; }
+  const pendingEntries = $derived([
+    ...conversation.queueSteering.map((text, index) => ({ mode: "steer" as const, index, text, key: `steer-${index}` })),
+    ...conversation.queueFollowUp.map((text, index) => ({ mode: "followUp" as const, index, text, key: `follow-up-${index}` })),
+  ]);
+
+  /// 取回全部待发送文本（clear_queue），重建除目标之外的队列；返回被取下的文本。
+  /// 重建用 steer/follow_up 命令只带文本：pi 的 clear_queue 不返回图片附件，重建后图片会丢失。
+  async function takePending(entry: PendingEntry, retarget: "steer" | "followUp" | null): Promise<string | null> {
+    const current = generation;
+    try {
+      const queue = await call<{ steering?: string[]; followUp?: string[] }>({ type: "clear_queue" });
+      if (current !== generation) return null;
+      const steering = [...queue.steering ?? []];
+      const followUp = [...queue.followUp ?? []];
+      const source = entry.mode === "steer" ? steering : followUp;
+      const text = source[entry.index] ?? "";
+      if (!text) return null;
+      source.splice(entry.index, 1);
+      if (retarget) (retarget === "steer" ? steering : followUp).push(text);
+      for (const item of steering) await call({ type: "steer", message: item });
+      for (const item of followUp) await call({ type: "follow_up", message: item });
+      return text;
+    } catch (cause) {
+      if (current === generation) commandError(cause);
+      return null;
+    }
+  }
+
+  async function withdrawPending(entry: PendingEntry) {
+    await takePending(entry, null);
+  }
+
+  async function movePending(entry: PendingEntry) {
+    await takePending(entry, entry.mode === "steer" ? "followUp" : "steer");
+  }
+
+  /// 编辑：把待发送文本取回输入框；已有草稿先暂存（可用「恢复暂存文本」找回）。
+  async function editPending(entry: PendingEntry) {
+    const text = await takePending(entry, null);
+    if (!text || text === draft) return;
+    if (draft) restoredDraft = draft;
+    draft = text;
+    await tick();
+    input?.focus();
+  }
 
   /// 压缩上下文：调用 Pi 原生 `compact` RPC，把历史消息总结为摘要。
   async function compactContext() {
@@ -497,6 +756,10 @@
     const run = runId;
     const id = taskId;
     void reconnect;
+    // 会话重建（切换任务/重连/重启）时清空每轮计时，避免旧会话的耗时挂到新一轮。
+    turnDurations = {};
+    runningTurn = null;
+    turnStartedAt = null;
     const current = ++generation;
     const scope = `rpc:${id}:${run}`;
     historyLimit = 100;
@@ -510,7 +773,6 @@
     initializing = true;
     connected = false;
     sending = stopping = false;
-    promptActive = false;
     changingModel = false;
     changingThinking = false;
     thinkingLevels = [];
@@ -539,7 +801,6 @@
       }
       if (event.payload.type === "rpc_exit") {
         connected = false;
-        promptActive = false;
         onCancelDialogs(scope);
       }
       if (!ready) {
@@ -550,7 +811,7 @@
         conversation = applyRpcEvent(conversation, event);
         if (event.payload.type === "agent_start" || event.payload.type === "agent_settled") {
           onActivity(conversation.busy);
-          if (event.payload.type === "agent_settled") { promptActive = false; void call({ type: "get_state" }).catch(() => {}); refreshStats(); }
+          if (event.payload.type === "agent_settled") { void call({ type: "get_state" }).catch(() => {}); refreshStats(); }
         }
       }
     };
@@ -914,22 +1175,25 @@
     }
   }
 
+  /// 发送语义：空闲时作为新提示；AI 执行中由后端按 streamingBehavior 处理
+  /// （steer=当前工具调用后优先引导，followUp=本轮结束后排队执行），因此执行中也可连续发送。
+  /// 粘贴的图片附件以 RPC `images` 字段（ImageContent：base64 + mimeType）随消息一并发送。
   async function send() {
     if (!canSend) return;
     const text = draft;
+    const images = attachments.map((file) => ({ type: "image", data: file.data, mimeType: file.mimeType }));
     const current = generation;
     sending = true;
-    promptActive = true;
     error = "";
     try {
-      await call({ type: "prompt", message: text, streamingBehavior });
+      await call({ type: "prompt", message: text, streamingBehavior, ...(images.length ? { images } : {}) });
       if (current !== generation) return;
-      if (draft === text) draft = "";
+      if (draft === text) { draft = ""; attachments = []; attachmentError = ""; }
       followScroll = true;
       pinnedMessageStart = null;
       refreshStats();
     } catch (cause) {
-      if (current === generation) { promptActive = false; commandError(cause); }
+      if (current === generation) commandError(cause);
     } finally {
       if (current === generation) sending = false;
     }
@@ -1051,6 +1315,7 @@
                     <span class="turn-no">#{turn.number}</span>
                     <span class="turn-summary">{turn.summary}</span>
                     {#if turn.timeLabel}<span class="turn-time">{turn.timeLabel}</span>{/if}
+                    {#if turnDurationLabels.get(turn.number)}<span class="turn-time">{t("耗时 {duration}", { duration: turnDurationLabels.get(turn.number) ?? "" })}</span>{/if}
                   </button>
                 </li>
               {/each}
@@ -1067,21 +1332,23 @@
     {#if messageStart > 0 || historyOffset > 0}
       <button type="button" class="more-history" disabled={showingEarlier} onclick={showEarlier}>{t("显示更早的消息")}</button>
     {/if}
-    {#each visibleEntries as entry (historyOffset + entry.index)}
+    {#each visibleEntries as entry, offset (historyOffset + entry.index)}
       {@const message = entry.message}
       {@const messageIndex = historyOffset + entry.index}
       <article data-message-index={messageIndex} class:user-message={message.role === "user"} class:tool-message={message.role === "toolResult"} class:jump-flash={flashTurnIndex === messageIndex}>
         <div class="message-label">
           {#if message.role === "user"}<UserRound size={14} />{t("你")}
+            {#if turnDurationFor(entry.index)}<span class="turn-duration">{t("耗时 {duration}", { duration: turnDurationFor(entry.index) })}</span>{/if}
           {:else if message.role === "toolResult"}<Terminal size={14} />{message.toolName ?? t("工具结果")}
+            {#if message.toolStartedAt !== undefined}<span class="tool-took">{t("耗时 {duration}", { duration: formatDuration((message.toolEndedAt ?? Date.now()) - message.toolStartedAt) })}</span>{/if}
           {:else}<Bot size={14} />Pi{/if}
         </div>
         {#if message.role === "toolResult"}
-          <MessageDisclosure title={message.toolName ?? t("工具输出")}>
+          <MessageDisclosure title={message.toolName ?? t("工具输出")} defaultOpen={chatDetailLevel === "verbose"}>
             {#if messageModule}
               {#await messageModule}
                 <pre>{messageSource(message.content)}</pre>
-              {:then module}<module.default {message} onOpenLink={openMessageLink} />
+              {:then module}<module.default {message} onOpenLink={openMessageLink} detail={chatDetailLevel} />
               {:catch}<pre>{messageSource(message.content)}</pre>{/await}
             {/if}
           </MessageDisclosure>
@@ -1090,7 +1357,7 @@
             {#if messageModule}
               {#await messageModule}
                 <div class="plain-message">{messageSource(message.content)}</div>
-              {:then module}<module.default {message} onOpenLink={openMessageLink} />
+              {:then module}<module.default {message} onOpenLink={openMessageLink} detail={chatDetailLevel} />
               {:catch}
                 <div class="plain-message">{messageSource(message.content)}</div>
                 <button type="button" title={t("重新加载消息显示")} aria-label={t("重新加载消息显示")} onclick={() => { messageModule = null; }}><RefreshCw size={15} /></button>
@@ -1099,14 +1366,26 @@
           </div>
         {/if}
       </article>
+      {#if isTurnBoundary(offset) && turnTotalLabel(entry.index)}
+        <p class="turn-total">{turnTotalLabel(entry.index)}</p>
+      {/if}
     {/each}
-    {#each liveTools as tool (tool.id)}
-      <details class="tool-call" open={tool.running}>
-        <summary><Terminal size={14} />{tool.name}<span>{tool.running ? t("执行中") : tool.isError ? t("失败") : t("完成")}</span></summary>
-        <pre>{JSON.stringify(tool.args, null, 2)}</pre>
-        {#if tool.result}<pre>{contentText(record(tool.result).content)}</pre>{/if}
-      </details>
-    {/each}
+    {#if chatDetailLevel !== "concise"}
+      {#each liveTools as tool (tool.id)}
+        <details class="tool-call" open={tool.running || chatDetailLevel === "verbose"}>
+          <summary>
+            <Terminal size={14} /><span class="tool-call-name">{toolCallSummary(tool.name, tool.args)}</span>
+            <span class="tool-call-state">
+              {tool.running
+                ? tool.startedAt !== undefined ? `${t("执行中")} · ${formatDuration(elapsedNow - tool.startedAt)}` : t("执行中")
+                : tool.isError ? t("失败") : t("完成")}
+            </span>
+          </summary>
+          <pre>{JSON.stringify(tool.args, null, 2)}</pre>
+          {#if tool.result}<pre>{contentText(record(tool.result).content)}</pre>{/if}
+        </details>
+      {/each}
+    {/if}
     {#if initializing}<p role="status">{t("正在连接 Pi 会话…")}</p>{/if}
     {#if !initializing && !visibleEntries.length && !error}
       <div class="empty-conversation"><Bot size={28} /><h2>{title}</h2></div>
@@ -1129,7 +1408,6 @@
     </div>
   {/if}
   {#if notice}<p class="notice" role="status">{notice}</p>{/if}
-  {#if conversation.queue.length}<p class="notice" role="status">{t("{count} 条消息排队中", { count: conversation.queue.length })}</p>{/if}
   {#if restoredDraft}
     <button class="restore-draft" type="button" onclick={() => { draft = [draft, restoredDraft].filter(Boolean).join("\n\n"); restoredDraft = ""; }}>{t("恢复暂存文本")}</button>
   {/if}
@@ -1165,11 +1443,40 @@
     </div>
   {/if}
 
-  <form class="composer" onsubmit={(event) => { event.preventDefault(); void send(); }}>
+  <form class="composer" class:dragging={draggingFiles} onsubmit={(event) => { event.preventDefault(); void send(); }}
+    ondragover={onComposerDragOver} ondragleave={onComposerDragLeave} ondrop={onComposerDrop}>
+    {#if pendingEntries.length}
+      <ul class="pending" role="list" aria-label={t("待发送提示词")}>
+        {#each pendingEntries as entry (entry.key)}
+          <li class="pending-item">
+            <span class="pending-mode" class:steer={entry.mode === "steer"} title={entry.mode === "steer" ? t("优先引导") : t("排队跟进")}>{entry.mode === "steer" ? t("引导") : t("排队")}</span>
+            <span class="pending-text" title={entry.text}>{entry.text}</span>
+            <span class="pending-actions">
+              <button type="button" title={t("编辑这条提示词")} aria-label={t("编辑这条提示词")} onclick={() => void editPending(entry)}><Pencil size={13} /></button>
+              <button type="button" title={t("撤回这条提示词")} aria-label={t("撤回这条提示词")} onclick={() => void withdrawPending(entry)}><Undo2 size={13} /></button>
+              <button type="button" title={entry.mode === "steer" ? t("改为排队跟进") : t("改为优先引导")} aria-label={entry.mode === "steer" ? t("改为排队跟进") : t("改为优先引导")} onclick={() => void movePending(entry)}><ArrowDownUp size={13} /></button>
+            </span>
+          </li>
+        {/each}
+      </ul>
+    {/if}
+    {#if attachments.length}
+      <div class="attachments">
+        {#each attachments as file (file.id)}
+          <figure class="attachment">
+            <img src={`data:${file.mimeType};base64,${file.data}`} alt={file.name} loading="lazy" />
+            <button type="button" title={t("移除图片")} aria-label={t("移除图片 {name}", { name: file.name })} onclick={() => removeAttachment(file.id)}><X size={12} /></button>
+            <figcaption title={file.name}>{file.name}<small>{formatBytes(file.size)}</small></figcaption>
+          </figure>
+        {/each}
+      </div>
+    {/if}
+    {#if attachmentError}<p class="attachment-error" role="alert">{attachmentError}</p>{/if}
     <textarea bind:this={input} bind:value={draft} rows="3" maxlength="131072" aria-keyshortcuts={shortcutAria("composer")}
-      aria-label={t("发送给 Pi")} placeholder={conversation.closed ? t("会话已停止") : t("发送消息")}
+      aria-label={t("发送给 Pi")} placeholder={conversation.closed ? t("会话已停止") : conversation.busy ? t("AI 执行中，可继续发送新消息") : t("发送消息")}
       disabled={conversation.closed}
       oncompositionstart={() => { composing = true; }} oncompositionend={() => { composing = false; }}
+      onpaste={onComposerPaste}
       onkeydown={(event) => {
         if (event.isComposing || composing) return;
         if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void send(); }
@@ -1250,7 +1557,7 @@
         disabled={!canEnhance} onclick={() => void enhanceDraft()}>
         {#if enhancing}<span class="spin"><RefreshCw size={14} /></span>{:else}<Sparkles size={15} />{/if}
       </button>
-      <button type="submit" class="send-button primary-send" disabled={!canSend} title={t("发送消息")} aria-label={t("发送消息")}><ArrowUp size={18} /></button>
+      <button type="submit" class="send-button primary-send" disabled={!canSend} title={sendHint} aria-label={sendHint}><ArrowUp size={18} /></button>
     </div>
   </form>
 </section>
@@ -1279,15 +1586,19 @@
   .transcript { flex: 1 1 0; min-height: 0; overflow: auto; padding: 16px 24px 8px; overflow-anchor: none; }
   article { max-width: 900px; margin: 0 auto 24px; outline: 2px solid transparent; outline-offset: 3px; transition: outline-color .3s ease; }
   .message-label { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; font-size: 12px; color: var(--text-muted); }
+  .turn-duration { padding: 1px 8px; border: 1px solid var(--border); border-radius: 999px; font-size: 11px; line-height: 1.4; color: var(--text-muted); font-family: var(--code-font); white-space: nowrap; }
+  .tool-took { color: var(--text-muted); font-size: 11px; font-family: var(--code-font); white-space: nowrap; }
+  .turn-total { max-width: 900px; margin: -14px auto 24px; padding-left: 2px; color: var(--text-muted); font-size: 11px; font-family: var(--code-font); }
   .message-content { min-width: 0; overflow-wrap: anywhere; line-height: 1.7; color: var(--text); font-family: var(--session-font, var(--text-font)); font-size: var(--session-font-size, 13px); }
   .plain-message { white-space: pre-wrap; }
   .scroll-actions { height: 0; position: relative; display: flex; justify-content: center; z-index: 1; }
   .scroll-actions button { position: absolute; bottom: 10px; width: 30px; height: 30px; display: grid; place-items: center; padding: 0; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--surface); color: var(--text); }
   .user-message .message-content { padding: 12px; border-left: 2px solid var(--accent); background: var(--surface); }
   .tool-call { border: 1px solid var(--border); border-radius: 4px; padding: 8px 12px; margin-bottom: 8px; font-size: 12px; }
-  summary { cursor: pointer; overflow-wrap: anywhere; }
-  summary :global(svg) { vertical-align: middle; margin-right: 6px; }
-  summary span { margin-left: 12px; color: var(--text-muted); }
+  summary { cursor: pointer; overflow-wrap: anywhere; display: flex; align-items: center; gap: 8px; }
+  summary :global(svg) { flex-shrink: 0; }
+  .tool-call-name { min-width: 0; font-weight: 700; color: var(--text); overflow-wrap: anywhere; }
+  .tool-call-state { margin-left: auto; flex-shrink: 0; color: var(--text-muted); font-family: var(--code-font); font-size: 11px; white-space: nowrap; }
   pre { overflow: auto; max-height: 280px; font: 12px/1.5 var(--code-font); tab-size: 4; }
   .empty-conversation { display: grid; place-content: center; justify-items: center; min-height: 180px; color: var(--text-muted); }
   h2 { font-size: 16px; font-weight: 500; overflow-wrap: anywhere; }
@@ -1303,6 +1614,25 @@
     box-shadow: 0 10px 30px #0006;
   }
   .composer-actions { display: flex; align-items: center; gap: 8px; margin-top: 4px; padding: 6px 2px 2px; border-top: 1px solid color-mix(in srgb, var(--text) 8%, transparent); }
+  /* 粘贴/拖入的图片附件：缩略图胶囊；拖拽悬停时输入框高亮。 */
+  .composer.dragging { border-color: var(--accent); box-shadow: 0 10px 30px #0006, 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent); }
+  .attachments { display: flex; flex-wrap: wrap; gap: 8px; padding: 2px 2px 6px; }
+  .attachment { position: relative; display: flex; align-items: center; gap: 6px; margin: 0; padding: 4px 26px 4px 4px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-alt); max-width: 220px; }
+  .attachment img { width: 32px; height: 32px; flex-shrink: 0; border-radius: 5px; object-fit: cover; border: 1px solid var(--border); }
+  .attachment figcaption { min-width: 0; display: grid; line-height: 1.3; font-size: 11px; color: var(--text); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .attachment small { color: var(--text-muted); font-family: var(--code-font); font-size: 10px; }
+  .attachment button { position: absolute; top: 2px; right: 2px; display: grid; place-items: center; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--text-muted); cursor: pointer; }
+  .attachment button:hover { color: var(--text); background: var(--surface-hover); }
+  .attachment-error { margin: 0 2px 4px; color: #d46b61; font-size: 11px; overflow-wrap: anywhere; }
+  /* 待发送提示词：输入框上方的引导/排队列表，每条右侧可编辑、撤回、切换投递方式。 */
+  .pending { display: flex; flex-direction: column; gap: 4px; margin: 0 0 6px; padding: 0; list-style: none; }
+  .pending-item { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-alt); font-size: 12px; }
+  .pending-mode { flex-shrink: 0; padding: 1px 8px; border: 1px solid var(--border); border-radius: 999px; font-size: 10px; color: var(--text-muted); white-space: nowrap; }
+  .pending-mode.steer { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+  .pending-text { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--text); }
+  .pending-actions { display: inline-flex; gap: 2px; flex-shrink: 0; }
+  .pending-actions button { display: grid; place-items: center; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--text-muted); cursor: pointer; }
+  .pending-actions button:hover { color: var(--text); background: var(--surface-hover); }
   textarea { display: block; width: 100%; min-height: 56px; max-height: 240px; resize: vertical; padding: 8px 6px; border: 0; background: transparent; color: var(--text); font: 13px/1.5 var(--session-font, var(--text-font)); }
   .spin { display: inline-grid; animation: chat-spin 0.8s linear infinite; }
   @keyframes chat-spin { to { transform: rotate(360deg); } }

@@ -7,6 +7,14 @@ export type Theme = string;
 export type CodeFont = "cascadia" | "consolas" | "jetbrains";
 export type CloseBehavior = "ask" | "minimize" | "exit";
 export type TerminalShell = "powershell" | "pwsh" | "bash" | "cmd";
+/** AI 对话内容的显示详细程度：简洁（只看正文）/ 标准（过程内容折叠）/ 详细（过程内容默认展开）。 */
+export type ChatDetailLevel = "concise" | "standard" | "verbose";
+
+export const CHAT_DETAIL_LEVELS: Array<{ value: ChatDetailLevel; label: string }> = [
+  { value: "concise", label: "简洁" },
+  { value: "standard", label: "标准" },
+  { value: "verbose", label: "详细" },
+];
 export interface ExternalEditor {
   kind: "vscode" | "notepadPlusPlus";
   executable: string;
@@ -36,6 +44,8 @@ export interface AppSettings {
   /** 新建命令终端使用的 Shell；Pi TUI 终端不受此设置影响。 */
   terminalShell: TerminalShell;
   piEnvironment: "managed";
+  /** AI 对话内容的显示详细程度（思考/工具调用等过程内容的展示方式）。 */
+  chatDetailLevel: ChatDetailLevel;
 }
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
@@ -56,6 +66,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   externalEditor: null,
   terminalShell: "powershell",
   piEnvironment: "managed",
+  chatDetailLevel: "standard",
   customThemes: [],
 };
 

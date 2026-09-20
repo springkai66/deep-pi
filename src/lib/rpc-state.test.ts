@@ -50,7 +50,23 @@ describe("RPC conversation reducer", () => {
     state = applyRpcEvent(state, { sequence: 1, payload: { type: "tool_execution_start", toolCallId: "tool" } });
     state = applyRpcEvent(state, { sequence: 2, payload: { type: "rpc_exit" } });
     expect(state.queue).toEqual([]);
+    expect(state.queueSteering).toEqual([]);
+    expect(state.queueFollowUp).toEqual([]);
     expect(state.tools.tool.running).toBe(false);
+  });
+  it("splits queued prompts by delivery mode for the pending list", () => {
+    let state = applyRpcEvent(emptyConversation(), { sequence: 1, payload: {
+      type: "queue_update", steering: ["引导一", "引导二"], followUp: ["跟进一"],
+    } });
+    expect(state.queueSteering).toEqual(["引导一", "引导二"]);
+    expect(state.queueFollowUp).toEqual(["跟进一"]);
+    expect(state.queue).toEqual(["引导一", "引导二", "跟进一"]);
+    state = applyRpcEvent(state, { sequence: 2, payload: { type: "queue_update", steering: [], followUp: [] } });
+    expect(state.queue).toEqual([]);
+    // 兼容非字符串条目：直接过滤，不抛错。
+    state = applyRpcEvent(state, { sequence: 3, payload: { type: "queue_update", steering: ["ok", 42], followUp: [null, "ok2"] } });
+    expect(state.queueSteering).toEqual(["ok"]);
+    expect(state.queueFollowUp).toEqual(["ok2"]);
   });
 });
 

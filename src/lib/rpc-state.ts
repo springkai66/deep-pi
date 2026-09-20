@@ -11,6 +11,9 @@ export interface RpcMessage {
   toolCallId?: string;
   toolName?: string;
   errorMessage?: string;
+  /// 工具结果的执行起止时间（事件流内记的本地时钟），用于显示 Took；历史消息无此字段。
+  toolStartedAt?: number;
+  toolEndedAt?: number;
 }
 
 export interface RpcTool {
@@ -20,6 +23,9 @@ export interface RpcTool {
   result: unknown;
   running: boolean;
   isError: boolean;
+  /// 执行起止时间：进行中的工具用 startedAt 显示 Elapsed 实时耗时。
+  startedAt?: number;
+  endedAt?: number;
 }
 
 export interface Conversation {
@@ -31,6 +37,9 @@ export interface Conversation {
   closed: boolean;
   error: string;
   queue: string[];
+  /// 待发送提示词按投递模式分开：steering = 优先引导，followUp = 排队跟进；供输入框上方的待发送列表使用。
+  queueSteering: string[];
+  queueFollowUp: string[];
 }
 
 export function record(value: unknown): Record<string, unknown> {
@@ -132,7 +141,7 @@ export function dropTrailingEmptyAssistant(messages: RpcMessage[]): RpcMessage[]
 }
 
 export function emptyConversation(): Conversation {
-  return { sequence: 0, messages: [], tools: {}, busy: false, phase: "idle", closed: false, error: "", queue: [] };
+  return { sequence: 0, messages: [], tools: {}, busy: false, phase: "idle", closed: false, error: "", queue: [], queueSteering: [], queueFollowUp: [] };
 }
 
 export function loadHistory(state: Conversation, values: unknown[], sequence: number): Conversation {
@@ -148,13 +157,17 @@ export function applyRpcEvent(previous: Conversation, event: RpcEvent): Conversa
   else if (type === "agent_end") { state.busy = true; state.phase = "generating"; }
   else if (type === "agent_settled") { state.busy = false; state.phase = "waiting"; }
   else if (type === "rpc_exit") {
-    state.closed = true; state.busy = false; state.phase = "waiting"; state.queue = [];
+    state.closed = true; state.busy = false; state.phase = "waiting"; state.queue = []; state.queueSteering = []; state.queueFollowUp = [];
     state.tools = Object.fromEntries(Object.entries(previous.tools).map(([id, tool]) => [id, { ...tool, running: false, isError: tool.isError || tool.running }]));
   } else if (type === "rpc_error" || type === "extension_error") {
     state.error = typeof payload.error === "string" ? readableRpcError(payload.error) : t("RPC 运行失败");
     state.phase = "failed"; state.busy = false; state.messages = dropTrailingEmptyAssistant(state.messages);
   } else if (type === "queue_update") {
-    state.queue = [...(Array.isArray(payload.steering) ? payload.steering : []), ...(Array.isArray(payload.followUp) ? payload.followUp : [])].filter((item): item is string => typeof item === "string");
+    const steering = Array.isArray(payload.steering) ? payload.steering.filter((item): item is string => typeof item === "string") : [];
+    const followUp = Array.isArray(payload.followUp) ? payload.followUp.filter((item): item is string => typeof item === "string") : [];
+    state.queueSteering = steering;
+    state.queueFollowUp = followUp;
+    state.queue = [...steering, ...followUp];
   } else if (type === "message_update" && payload.assistantMessageEvent) {
     const update = asAssistantUpdate(payload.assistantMessageEvent);
     if (update) { state.phase = update.kind === "thinking" ? "thinking" : "generating"; state.messages = applyAssistantUpdate(previous.messages, update); }
@@ -165,14 +178,26 @@ export function applyRpcEvent(previous: Conversation, event: RpcEvent): Conversa
     const same = last && last.role === message.role && (message.timestamp !== undefined && last.timestamp === message.timestamp || message.toolCallId !== undefined && last.toolCallId === message.toolCallId);
     state.messages = same ? [...previous.messages.slice(0, -1), message] : [...previous.messages, message];
     if (message.role === "assistant") state.phase = "generating";
-    if (type === "message_end" && message.role === "toolResult" && message.toolCallId) { state.tools = { ...previous.tools }; delete state.tools[message.toolCallId]; }
+    if (type === "message_end" && message.role === "toolResult" && message.toolCallId) {
+      state.tools = { ...previous.tools };
+      // 把工具执行的起止时间附到结果消息上，供 UI 显示 Took；随后清理运行态记录。
+      const finishedTool = state.tools[message.toolCallId];
+      if (finishedTool?.startedAt !== undefined) {
+        message.toolStartedAt = finishedTool.startedAt;
+        message.toolEndedAt = finishedTool.endedAt ?? Date.now();
+      }
+      delete state.tools[message.toolCallId];
+    }
     if (message.errorMessage) { state.error = readableRpcError(message.errorMessage); state.phase = "failed"; }
   } else if (type === "tool_execution_start" || type === "tool_execution_update" || type === "tool_execution_end") {
     const id = typeof payload.toolCallId === "string" ? payload.toolCallId : "";
     if (!id) return state;
     const existing = previous.tools[id] ?? { id, name: String(payload.toolName ?? t("工具")), args: payload.args, result: null, running: true, isError: false };
     state.phase = "tool";
-    state.tools = { ...previous.tools, [id]: { ...existing, result: type === "tool_execution_update" ? payload.partialResult : type === "tool_execution_end" ? payload.result : existing.result, running: type !== "tool_execution_end", isError: payload.isError === true } };
+    // 记录执行起止时间（pi TUI 同款 Elapsed / Took 的数据源）；事件间隔即本地时钟差。
+    const startedAt = existing.startedAt ?? Date.now();
+    const endedAt = type === "tool_execution_end" ? Date.now() : existing.endedAt;
+    state.tools = { ...previous.tools, [id]: { ...existing, result: type === "tool_execution_update" ? payload.partialResult : type === "tool_execution_end" ? payload.result : existing.result, running: type !== "tool_execution_end", isError: payload.isError === true, startedAt, endedAt } };
   }
   return state;
 }

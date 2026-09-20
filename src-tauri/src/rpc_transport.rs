@@ -18,7 +18,9 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
-const MAX_COMMAND_BYTES: usize = 1024 * 1024;
+/// 命令上限与帧上限对齐（8MB）：prompt 命令的 `images` 字段携带 base64 图片，
+/// 粘贴的截图（数 MB）以 base64 计入后会超过早期 1MB 限制。
+const MAX_COMMAND_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PENDING: usize = 32;
 struct Reply {
     sender: mpsc::SyncSender<Result<RpcReply, String>>,

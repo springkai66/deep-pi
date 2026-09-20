@@ -1491,6 +1491,7 @@
                 }}
               onOpenModelSettings={() => openSettingsCategory("models")}
               onReloadSession={() => void restartTask(task, "rpc")}
+              chatDetailLevel={settings.chatDetailLevel}
               />
             {:else if terminalModule}
               {#await terminalModule}

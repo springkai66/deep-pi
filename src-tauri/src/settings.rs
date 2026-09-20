@@ -48,6 +48,24 @@ fn default_terminal_shell() -> String {
     }
 }
 
+fn default_chat_detail_level() -> String {
+    "standard".into()
+}
+
+/// AI 对话内容显示详细程度：只允许 concise / standard / verbose，其余收敛为默认值。
+fn deserialize_chat_detail_level<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<String, D::Error> {
+    let value = String::deserialize(deserializer)?;
+    Ok(
+        if matches!(value.as_str(), "concise" | "standard" | "verbose") {
+            value
+        } else {
+            default_chat_detail_level()
+        },
+    )
+}
+
 fn default_pi_environment() -> String {
     "managed".into()
 }
@@ -161,6 +179,12 @@ pub struct AppSettings {
         deserialize_with = "deserialize_pi_environment"
     )]
     pub pi_environment: String,
+    /// AI 对话内容的显示详细程度：concise / standard / verbose。
+    #[serde(
+        default = "default_chat_detail_level",
+        deserialize_with = "deserialize_chat_detail_level"
+    )]
+    pub chat_detail_level: String,
     /// 界面语言：zh-CN / zh-TW / en。
     #[serde(
         default = "default_language",
@@ -191,6 +215,7 @@ impl Default for AppSettings {
             external_editor: None,
             terminal_shell: default_terminal_shell(),
             pi_environment: default_pi_environment(),
+            chat_detail_level: default_chat_detail_level(),
             custom_themes: Vec::new(),
             language: default_language(),
         }
@@ -328,6 +353,12 @@ fn validate(settings: &AppSettings) -> Result<(), String> {
         "powershell" | "pwsh" | "bash" | "cmd"
     ) {
         return Err("terminalShell is invalid".into());
+    }
+    if !matches!(
+        settings.chat_detail_level.as_str(),
+        "concise" | "standard" | "verbose"
+    ) {
+        return Err("chatDetailLevel is invalid".into());
     }
     if let Some(editor) = &settings.external_editor {
         editor.validate()?;
@@ -481,6 +512,33 @@ mod tests {
             let settings: AppSettings = serde_json::from_value(value).unwrap();
             assert_eq!(settings.pi_environment, "managed");
         }
+    }
+
+    #[test]
+    /// chatDetailLevel：缺省回落 standard，未知值收敛，合法值原样保留。
+    #[test]
+    fn chat_detail_level_defaults_and_rejects_unknown_values() {
+        let base = serde_json::json!({
+            "schemaVersion": 1, "maxConcurrentTasks": 3, "lastProject": null,
+        });
+        let settings: AppSettings = serde_json::from_value(base).unwrap();
+        assert_eq!(settings.chat_detail_level, "standard");
+
+        for stored in ["concise", "standard", "verbose"] {
+            let value = serde_json::json!({
+                "schemaVersion": 1, "maxConcurrentTasks": 3, "lastProject": null,
+                "chatDetailLevel": stored,
+            });
+            let settings: AppSettings = serde_json::from_value(value).unwrap();
+            assert_eq!(settings.chat_detail_level, stored);
+        }
+
+        let value = serde_json::json!({
+            "schemaVersion": 1, "maxConcurrentTasks": 3, "lastProject": null,
+            "chatDetailLevel": "ultra",
+        });
+        let settings: AppSettings = serde_json::from_value(value).unwrap();
+        assert_eq!(settings.chat_detail_level, "standard");
     }
 
     #[test]
