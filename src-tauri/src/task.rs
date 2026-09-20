@@ -886,6 +886,23 @@ impl TaskStore {
             .map_err(|error| format!("failed to update active task status: {error}"))
     }
 
+    /// 正在执行 AI 任务的 RPC 会话数（status = running）。
+    /// get_state bridge 随 isStreaming/isCompacting 维护该状态，是「同时运行任务数」额度的统计口径：
+    /// 空闲打开的会话（waiting）不占额度，避免多开几个会话后就再也无法新建。
+    pub fn count_running_rpc(&self) -> Result<usize, String> {
+        self.connection
+            .lock()
+            .map_err(|_| "task database lock is poisoned".to_string())?
+            .query_row(
+                "SELECT COUNT(*) FROM tasks
+                 WHERE agent = 'pi' AND status = 'running' AND interaction_mode = 'rpc'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|count| usize::try_from(count).unwrap_or(0))
+            .map_err(|error| format!("failed to count running rpc tasks: {error}"))
+    }
+
     pub fn finish_if_active(&self, id: &str, status: TaskStatus) -> Result<(), String> {
         if !status.is_terminal() {
             return Err(msg("task.finish_status_invalid"));
@@ -1384,6 +1401,38 @@ mod tests {
             store.list().expect("tasks should list")[0].status,
             TaskStatus::Cancelled
         );
+    }
+
+    #[test]
+    /// 并发额度统计口径：只数 status = running 且 interaction_mode = rpc 的任务；
+    /// TUI 会话与空闲（waiting）的 RPC 会话不计入。
+    fn counts_only_running_rpc_tasks_for_capacity() {
+        let store = TaskStore::in_memory().expect("in-memory store should open");
+        let rpc = store
+            .create_pi_task("RPC task", "F:/project")
+            .expect("task should be created");
+        let tui = store
+            .create_pi_task("TUI task", "F:/project")
+            .expect("task should be created");
+        // 新建任务初始 status = running，但 interaction_mode 默认 tui，不占 RPC 额度。
+        assert_eq!(store.count_running_rpc().unwrap(), 0);
+
+        store
+            .set_interaction_mode(&rpc.id, "rpc")
+            .expect("mode should be set");
+        assert_eq!(store.count_running_rpc().unwrap(), 1);
+
+        // get_state bridge 把空闲会话标为 waiting：不占额度。
+        store
+            .set_active_status(&rpc.id, TaskStatus::Waiting)
+            .expect("rpc task should wait");
+        assert_eq!(store.count_running_rpc().unwrap(), 0);
+
+        // 恢复执行后重新计入。
+        store
+            .set_active_status(&rpc.id, TaskStatus::Running)
+            .expect("rpc task should run");
+        assert_eq!(store.count_running_rpc().unwrap(), 1);
     }
 
     #[test]

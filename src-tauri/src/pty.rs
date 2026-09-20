@@ -314,7 +314,7 @@ fn start_pi_task_inner(
 ) -> Result<TaskRecord, String> {
     let _lifecycle = lifecycle.acquire()?;
     crate::snapshot::Snapshot::ensure_ready(&paths.backups)?;
-    ensure_capacity(&manager, &app.state::<crate::rpc::RpcManager>(), &settings)?;
+    ensure_capacity(&manager, &store, &settings)?;
     let environment = paths.new_pi_environment(&settings.get()?.pi_environment)?;
     let home = paths.pi_environment_home(environment)?;
     let mut record = store.create_pi_task_for_project(&request.project_id, &request.title)?;
@@ -360,7 +360,7 @@ fn restart_pi_task_inner(
 ) -> Result<TaskRecord, String> {
     let _lifecycle = lifecycle.acquire()?;
     crate::snapshot::Snapshot::ensure_ready(&paths.backups)?;
-    ensure_capacity(&manager, &app.state::<crate::rpc::RpcManager>(), &settings)?;
+    ensure_capacity(&manager, &store, &settings)?;
     if manager
         .tasks
         .lock()
@@ -388,10 +388,13 @@ fn restart_pi_task_inner(
 
 fn ensure_capacity(
     manager: &PtyManager,
-    rpc_manager: &crate::rpc::RpcManager,
+    store: &crate::task::TaskStore,
     settings: &SettingsStore,
 ) -> Result<(), String> {
-    if manager.count()? + rpc_manager.count()? >= usize::from(settings.get()?.max_concurrent_tasks)
+    // 与 rpc::start 同一口径：TUI 会话存活即占额度（宿主无法感知其内部忙闲）；
+    // RPC 会话只统计 AI 正在执行（status = Running）的，空闲打开的会话不占额度。
+    if manager.count()? + store.count_running_rpc()?
+        >= usize::from(settings.get()?.max_concurrent_tasks)
     {
         return Err("maximum concurrent Pi tasks reached".into());
     }

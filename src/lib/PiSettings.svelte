@@ -242,6 +242,7 @@
               aria-describedby={taskLimitError ? "task-limit-error" : undefined}
               value={runtime.settings.maxConcurrentTasks} oninput={(event) => changeLimit(event.currentTarget)} />
           </label>
+          <p class="muted">{t("仅统计 AI 正在执行任务的会话；空闲打开的会话不占额度，TUI 终端会话始终计入。")}</p>
           {#if taskLimitError}<p id="task-limit-error" role="alert">{taskLimitError}</p>{/if}
         </section>
         <section class="settings-group" aria-labelledby="terminal-heading">

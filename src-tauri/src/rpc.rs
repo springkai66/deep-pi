@@ -25,6 +25,9 @@ struct RpcRun {
     transport: Arc<RpcTransport>,
 }
 
+/// RPC 会话进程数硬上限：空闲会话不占并发额度后，仍需防止无限开会话撑爆内存。
+const MAX_OPEN_RPC_RUNS: usize = 32;
+
 #[derive(Default)]
 pub struct RpcManager {
     runs: Mutex<HashMap<String, RpcRun>>,
@@ -138,12 +141,17 @@ fn start(app: &AppHandle, request: StartRpcRequest) -> Result<TaskRecord, String
     crate::snapshot::Snapshot::ensure_ready(&paths.backups)?;
     let manager = app.state::<RpcManager>();
     let pty = app.state::<PtyManager>();
+    let store = app.state::<TaskStore>();
     let maximum = app.state::<SettingsStore>().get()?.max_concurrent_tasks;
-    if manager.count()? + pty.count()? >= usize::from(maximum) {
+    // 并发额度只统计 AI 正在执行任务的会话：RPC 会话以 status = Running 为准
+    //（get_state bridge 随 isStreaming/isCompacting 维护），空闲打开的会话不占额度；
+    // TUI 会话无法感知内部忙闲，存活即占额度。额度外另设进程数硬上限。
+    if manager.count()? >= MAX_OPEN_RPC_RUNS
+        || pty.count()? + store.count_running_rpc()? >= usize::from(maximum)
+    {
         return Err("maximum concurrent Pi tasks reached".into());
     }
     let cli = paths.required_pi_cli()?;
-    let store = app.state::<TaskStore>();
     store.project_path(&request.project_id)?;
     let mut record = if let Some(task_id) = request.task_id {
         if pty.contains(&task_id)? || manager.contains(&task_id)? {

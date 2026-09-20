@@ -161,6 +161,10 @@ export const EN_CHAT: Record<string, string> = {
   "退出应用": "Quit app",
   "同时运行任务数": "Concurrent tasks",
   "同时运行任务数必须为 1 到 16 的整数": "Concurrent tasks must be an integer from 1 to 16",
+  "最多同时运行 {limit} 个任务，请等待部分任务完成，或在设置中调大「同时运行任务数」":
+    "At most {limit} tasks can run at once; wait for one to finish, or raise Concurrent tasks in Settings",
+  "仅统计 AI 正在执行任务的会话；空闲打开的会话不占额度，TUI 终端会话始终计入。":
+    "Only sessions actively running AI tasks count toward the limit; idle open sessions are free. TUI terminal sessions always count.",
   "命令终端": "Command terminal",
   "默认 Shell": "Default shell",
   "命令提示符": "Command Prompt",

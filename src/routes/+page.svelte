@@ -395,9 +395,9 @@
   const selectedProject = $derived(
     projects.find((project) => project.id === selectedProjectId),
   );
-  const runningCount = $derived(
-    piTasks.filter((task) => ["running", "waiting"].includes(task.status)).length,
-  );
+  /// 同时运行任务数：只统计 AI 正在执行任务的会话（Running）。
+  /// 空闲打开的会话（Waiting）不占额度，否则多开几个会话后就再也无法新建。
+  const runningCount = $derived(piTasks.filter((task) => task.status === "running").length);
   const allTerminalTasks = $derived(
     terminalTaskIds
       .map((id) => tasks.find((task) => task.id === id))
@@ -1034,12 +1034,19 @@
       showError(t("请先添加并选择一个 Pi 项目目录"));
       return;
     }
-    if (isStarting || runningCount >= settings.maxConcurrentTasks) return;
+    if (isStarting) return;
+    if (runningCount >= settings.maxConcurrentTasks) {
+      showError(t("最多同时运行 {limit} 个任务，请等待部分任务完成，或在设置中调大「同时运行任务数」", { limit: settings.maxConcurrentTasks }));
+      return;
+    }
     isStarting = true;
     errorMessage = "";
     try {
       if (selectedProjectId !== project.id) selectProject(project);
-      if (runningCount >= settings.maxConcurrentTasks) return;
+      if (runningCount >= settings.maxConcurrentTasks) {
+        showError(t("最多同时运行 {limit} 个任务，请等待部分任务完成，或在设置中调大「同时运行任务数」", { limit: settings.maxConcurrentTasks }));
+        return;
+      }
       const task = await invoke<Task>(mode === "rpc" ? "start_rpc_task" : "start_pi_task", {
         request: { projectId: project.id, title: "", rows: 32, cols: 100 },
       });
