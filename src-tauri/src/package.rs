@@ -188,6 +188,8 @@ fn package_command(
         .pi_cli()?
         .ok_or_else(|| "managed Pi runtime is not installed".to_string())?;
     let mut command = Command::new(paths.node_runtime()?);
+    // 全局代理注入：npm/pi 包管理下载也走代理。
+    crate::proxy::apply_to_command(&mut command);
     command
         .arg(pi_cli)
         .env("PI_CODING_AGENT_DIR", &paths.pi_home)

@@ -70,6 +70,18 @@ fn default_pi_environment() -> String {
     "managed".into()
 }
 
+fn default_proxy_mode() -> String {
+    "system".into()
+}
+
+/// 未知代理模式回落 system（旧设置文件与手改配置容错）。
+fn deserialize_proxy_mode<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<String, D::Error> {
+    let value = String::deserialize(deserializer)?;
+    Ok(crate::proxy::normalize_mode(&value).to_owned())
+}
+
 fn deserialize_pi_environment<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<String, D::Error> {
@@ -194,6 +206,18 @@ pub struct AppSettings {
     /// 用户导入的主题包（内置主题之外），原样保存 JSON 以便未来字段兼容。
     #[serde(default)]
     pub custom_themes: Vec<serde_json::Value>,
+    /// 全局网络代理：system（跟随系统/环境变量）/ direct（直连）/ manual（手动地址）。
+    #[serde(
+        default = "default_proxy_mode",
+        deserialize_with = "deserialize_proxy_mode"
+    )]
+    pub proxy_mode: String,
+    /// 手动模式的代理地址，如 `http://127.0.0.1:7890`。
+    #[serde(default)]
+    pub proxy_url: String,
+    /// 不走代理的地址列表（NO_PROXY，逗号分隔）。
+    #[serde(default)]
+    pub proxy_no_proxy: String,
 }
 
 impl Default for AppSettings {
@@ -218,6 +242,9 @@ impl Default for AppSettings {
             chat_detail_level: default_chat_detail_level(),
             custom_themes: Vec::new(),
             language: default_language(),
+            proxy_mode: default_proxy_mode(),
+            proxy_url: String::new(),
+            proxy_no_proxy: String::new(),
         }
     }
 }
@@ -363,6 +390,7 @@ fn validate(settings: &AppSettings) -> Result<(), String> {
     if let Some(editor) = &settings.external_editor {
         editor.validate()?;
     }
+    crate::proxy::validate(settings)?;
     if settings.schema_version != 1 {
         return Err(format!(
             "unsupported settings schema: {}",
@@ -468,9 +496,15 @@ pub async fn get_settings(app: AppHandle) -> Result<AppSettings, String> {
 
 #[tauri::command]
 pub async fn save_settings(app: AppHandle, settings: AppSettings) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || app.state::<SettingsStore>().save(settings))
-        .await
-        .map_err(|error| error.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = app.state::<SettingsStore>();
+        store.save(settings)?;
+        // 保存成功后立即应用：新启动的任务/会话就用新代理（已运行的会话需重启任务）。
+        crate::proxy::configure(&store.get()?);
+        Ok(())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[cfg(test)]
@@ -619,6 +653,49 @@ mod tests {
         )
         .unwrap();
         assert_eq!(reopened.get().unwrap().pi_environment, "managed");
+    }
+
+    /// 代理设置持久化与校验：手动模式必须有合法地址；未知模式回落 system。
+    #[test]
+    fn proxy_settings_persist_and_validate() {
+        let root =
+            std::env::temp_dir().join(format!("deeppi-proxy-settings-{}", uuid::Uuid::new_v4()));
+        let path = root.join("settings.json");
+        let backups = root.join("backups");
+        let store = SettingsStore::open(path.clone(), backups.clone()).unwrap();
+        assert_eq!(store.get().unwrap().proxy_mode, "system");
+
+        // 手动模式缺地址：保存被拒绝，不会写入无效配置。
+        assert!(store
+            .save(AppSettings {
+                proxy_mode: "manual".into(),
+                ..AppSettings::default()
+            })
+            .is_err());
+
+        store
+            .save(AppSettings {
+                proxy_mode: "manual".into(),
+                proxy_url: "http://127.0.0.1:7890".into(),
+                proxy_no_proxy: "localhost".into(),
+                ..AppSettings::default()
+            })
+            .expect("manual proxy settings should save");
+
+        let reopened = SettingsStore::open(path.clone(), backups.clone()).unwrap();
+        let saved = reopened.get().unwrap();
+        assert_eq!(saved.proxy_mode, "manual");
+        assert_eq!(saved.proxy_url, "http://127.0.0.1:7890");
+        assert_eq!(saved.proxy_no_proxy, "localhost");
+
+        // 旧版/手改配置里的未知模式：加载时归一化为 system。
+        let mut value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        value["proxyMode"] = serde_json::Value::String("bogus".into());
+        std::fs::write(&path, serde_json::to_string(&value).unwrap()).unwrap();
+        let normalized = SettingsStore::open(path, backups).unwrap();
+        assert_eq!(normalized.get().unwrap().proxy_mode, "system");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

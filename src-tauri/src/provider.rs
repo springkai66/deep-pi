@@ -873,6 +873,9 @@ pub(crate) fn provider_agent(provider: &ProviderRecord) -> Result<ureq::Agent, S
             )
         })?;
         config = config.proxy(Some(proxy));
+    } else {
+        // Provider 未单独配置代理时使用全局代理设置。
+        config = config.proxy(crate::proxy::ureq_proxy());
     }
     Ok(config.build().new_agent())
 }
@@ -929,6 +932,8 @@ fn chat_agent(provider: &ProviderRecord, timeout: Duration) -> Result<ureq::Agen
             )
         })?;
         config = config.proxy(Some(proxy));
+    } else {
+        config = config.proxy(crate::proxy::ureq_proxy());
     }
     Ok(config.build().new_agent())
 }

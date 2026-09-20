@@ -5,6 +5,12 @@ describe("managed workspace defaults", () => {
   it("uses only the DeepPi environment for new tasks", () => {
     expect(DEFAULT_APP_SETTINGS.piEnvironment).toBe("managed");
   });
+
+  it("defaults the global proxy to follow the system environment", () => {
+    expect(DEFAULT_APP_SETTINGS.proxyMode).toBe("system");
+    expect(DEFAULT_APP_SETTINGS.proxyUrl).toBe("");
+    expect(DEFAULT_APP_SETTINGS.proxyNoProxy).toBe("");
+  });
 });
 
 describe("terminal font stacks", () => {

@@ -454,6 +454,7 @@ fn launch_pi(
     // 旧 native 任务已在 task_pi_home 中明确拒绝。
     command.env("PI_CODING_AGENT_DIR", paths.task_pi_home(record)?);
     command.env_remove("PI_CODING_AGENT_SESSION_DIR");
+    crate::proxy::apply_to_pty(&mut command);
     command.env("DEEPPI_TASK_ID", &record.id);
     let state_file = bridge::state_file(paths, &run_id)?;
     let pipe_name = bridge::pipe_name(paths, &run_id)?;

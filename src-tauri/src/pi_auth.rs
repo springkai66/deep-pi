@@ -543,6 +543,8 @@ fn spawn_bridge(
     let script = install_bridge(paths)?;
     let sdk = pi_sdk_index(paths)?;
     let mut command = Command::new(paths.node_runtime()?);
+    // 登录/刷新 token 的请求也要走代理。
+    crate::proxy::apply_to_command(&mut command);
     command
         .arg(&script)
         .env("PI_AUTH_PI_SDK", &sdk)

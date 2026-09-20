@@ -600,6 +600,8 @@ fn start_dsh_inner(
         .env("DSH_HOME", &paths.dsh_home)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // 全局代理注入（DSH 的模型/网络请求同样经过代理）。
+    crate::proxy::apply_to_command(&mut command);
 
     // 由 Job Object 托管，应用异常结束时系统会一起结束 DSH。
     let (mut child, tree) = crate::process_runner::spawn_owned(&mut command)

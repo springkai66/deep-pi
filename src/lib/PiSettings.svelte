@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ArrowLeft, Monitor, Palette, Server, Download, PackageOpen, Puzzle, Sparkles, Workflow, Wrench, Globe, Upload, Trash2 } from "@lucide/svelte";
+  import { ArrowLeft, Monitor, Palette, Server, Download, PackageOpen, Puzzle, Sparkles, Workflow, Wrench, Globe, Network, Upload, Trash2 } from "@lucide/svelte";
   import type { Snippet } from "svelte";
   import { onMount } from "svelte";
   import { invoke as nativeInvoke } from "@tauri-apps/api/core";
@@ -43,7 +43,7 @@
     confirmDiagnosticsClear: () => Promise<boolean>;
   }
   let { category, onCategoryChange, onChangeSettings, onEditorSaved, onClose, models, extensions, mcp, skills, workflows, dsh, closeBlocked = false, saving = false, onDiagnosticsBusy, confirmDiagnosticsClear, ...runtime }: Props = $props();
-  const icons = { general: Monitor, appearance: Palette, models: Server, extensions: PackageOpen, mcp: Puzzle, skills: Sparkles, workflows: Workflow, dsh: Globe, runtime: Download, advanced: Wrench };
+  const icons = { general: Monitor, appearance: Palette, models: Server, extensions: PackageOpen, mcp: Puzzle, skills: Sparkles, workflows: Workflow, dsh: Globe, runtime: Download, network: Network, advanced: Wrench };
   let modelsVisited = $state(false);
   let extensionsVisited = $state(false);
   let mcpVisited = $state(false);
@@ -55,6 +55,26 @@
   let workflowsBusy = $state(false);
   let workflowsError = $state("");
   let taskLimitError = $state("");
+  /// 代理连通性测试结果（设置页内展示；不依赖保存防抖）。
+  let proxyTesting = $state(false);
+  let proxyTestResult = $state("");
+
+  async function testProxy() {
+    if (proxyTesting) return;
+    proxyTesting = true;
+    proxyTestResult = "";
+    try {
+      const result = await nativeInvoke<string>("proxy_test", {
+        mode: runtime.settings.proxyMode,
+        url: runtime.settings.proxyUrl,
+      });
+      proxyTestResult = t("连接成功（{result}）", { result });
+    } catch (cause) {
+      proxyTestResult = t("连接失败：{error}", { error: String(cause) });
+    } finally {
+      proxyTesting = false;
+    }
+  }
   let systemFonts = $state<string[]>([]);
   onMount(() => {
     void nativeInvoke<string[]>("list_system_fonts")
@@ -360,6 +380,41 @@
           {/if}
         {/if}
       </div>
+      <div class="settings-panel" hidden={category !== "network"}>
+        <section class="settings-group" aria-labelledby="proxy-heading">
+          <h3 id="proxy-heading">{t("网络代理")}</h3>
+          <label class="setting-control"><strong>{t("代理模式")}</strong>
+            <select value={runtime.settings.proxyMode} aria-label={t("代理模式")}
+              onchange={(event) => updateSettings({ proxyMode: event.currentTarget.value as AppSettings["proxyMode"] })}>
+              <option value="system">{t("跟随系统")}</option>
+              <option value="direct">{t("直连（不使用代理）")}</option>
+              <option value="manual">{t("手动设置")}</option>
+            </select>
+          </label>
+          {#if runtime.settings.proxyMode === "manual"}
+            <label class="setting-control"><strong>{t("代理地址")}</strong>
+              <input type="text" value={runtime.settings.proxyUrl} placeholder="http://127.0.0.1:7890"
+                autocomplete="off" spellcheck="false" aria-label={t("代理地址")}
+                oninput={(event) => updateSettings({ proxyUrl: event.currentTarget.value })} />
+            </label>
+            <label class="setting-control"><strong>{t("例外地址")}</strong>
+              <input type="text" value={runtime.settings.proxyNoProxy} placeholder="localhost,127.0.0.1"
+                autocomplete="off" spellcheck="false" aria-label={t("例外地址")}
+                oninput={(event) => updateSettings({ proxyNoProxy: event.currentTarget.value })} />
+            </label>
+          {/if}
+          <div class="setting-control">
+            <strong>{t("连通性测试")}</strong>
+            <div class="proxy-test">
+              <button type="button" class="quiet-button" disabled={proxyTesting} onclick={() => void testProxy()}>
+                {#if proxyTesting}{t("测试中…")}{:else}{t("测试连接")}{/if}
+              </button>
+              {#if proxyTestResult}<span class="proxy-state" role="status">{proxyTestResult}</span>{/if}
+            </div>
+          </div>
+          <p class="muted">{t("代理作用于 Pi / DSH 子进程（含模型请求与 Advisor）、运行时下载、扩展市场与 DeepPi 自身的模型调用；Provider 单独配置的代理优先。已打开的会话需重启任务后生效，应用内更新检查需重启应用。")}</p>
+        </section>
+      </div>
       <div class="settings-panel" hidden={category !== "advanced"}>
         <ExternalEditorSettings editor={runtime.settings.externalEditor} onSaved={onEditorSaved} />
         {#if advancedVisited}<DiagnosticsPanel onBusyChange={onDiagnosticsBusy} confirmClear={confirmDiagnosticsClear} />{/if}
@@ -418,4 +473,6 @@
   .theme-status { margin: 8px 0 0; font-size: 12px; color: var(--accent); overflow-wrap: anywhere; }
   .theme-error { margin: 8px 0 0; font-size: 12px; color: var(--status-failed); overflow-wrap: anywhere; }
   .panel-error { margin: 8px 0 0; font-size: 12px; color: var(--status-failed); overflow-wrap: anywhere; }
+  .proxy-test { display: flex; align-items: center; justify-content: flex-end; gap: 10px; min-width: 0; }
+  .proxy-state { min-width: 0; overflow-wrap: anywhere; color: var(--text-muted); font-size: 12px; }
 </style>

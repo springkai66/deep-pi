@@ -204,6 +204,7 @@ fn http_agent_with_timeout(timeout: Duration) -> ureq::Agent {
     ureq::Agent::config_builder()
         .timeout_global(Some(timeout))
         .https_only(true)
+        .proxy(crate::proxy::ureq_proxy())
         .build()
         .new_agent()
 }

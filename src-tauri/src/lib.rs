@@ -38,6 +38,7 @@ mod project_files;
 mod project_watch;
 mod prompt_enhance;
 mod provider;
+mod proxy;
 mod pty;
 mod recovery;
 mod rpc;
@@ -151,6 +152,10 @@ pub fn run() {
                         paths.settings.clone(),
                         paths.backups.clone(),
                     )?;
+                    // 全局代理最早在这里生效：后续创建的 HTTP 客户端与子进程都会读到。
+                    if let Ok(current) = settings.get() {
+                        crate::proxy::configure(&current);
+                    }
                     worker_app.manage(paths);
                     worker_app.manage(store);
                     worker_app.manage(file_recovery);
@@ -293,6 +298,7 @@ pub fn run() {
                 agentic_translate::translate_agentic_texts,
                 settings::get_settings,
                 settings::save_settings,
+                proxy::proxy_test,
                 theme::theme_export,
                 theme::theme_import,
                 task::add_project,

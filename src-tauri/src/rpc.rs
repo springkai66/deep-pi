@@ -197,6 +197,8 @@ fn start(app: &AppHandle, request: StartRpcRequest) -> Result<TaskRecord, String
         .current_dir(&record.project_path)
         .env("PI_CODING_AGENT_DIR", home);
     command.env_remove("PI_CODING_AGENT_SESSION_DIR");
+    // 全局代理注入；手动模式附带 NODE_USE_ENV_PROXY=1，pi 的 fetch 才会走代理。
+    crate::proxy::apply_to_command(&mut command);
     let task_id = record.id.clone();
     let exit_app = app.clone();
     let exit_run = run_id.clone();

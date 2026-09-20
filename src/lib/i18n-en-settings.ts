@@ -262,4 +262,18 @@ export const EN_SETTINGS: Record<string, string> = {
   "清除外部编辑器配置": "Clear external editor settings",
   "选择外部编辑器": "Choose external editor",
   "请选择桌面应用中的编辑器路径": "Choose the editor path from within the desktop app",
+  // —— 网络代理 ——
+  "网络代理": "Network proxy",
+  "代理模式": "Proxy mode",
+  "跟随系统": "Follow system",
+  "直连（不使用代理）": "Direct (no proxy)",
+  "手动设置": "Manual",
+  "代理地址": "Proxy address",
+  "例外地址": "No-proxy list",
+  "连通性测试": "Connectivity test",
+  "测试中…": "Testing…",
+  "连接成功（{result}）": "Connected ({result})",
+  "连接失败：{error}": "Connection failed: {error}",
+  "代理作用于 Pi / DSH 子进程（含模型请求与 Advisor）、运行时下载、扩展市场与 DeepPi 自身的模型调用；Provider 单独配置的代理优先。已打开的会话需重启任务后生效，应用内更新检查需重启应用。":
+    "The proxy applies to Pi/DSH child processes (model requests and Advisor included), runtime downloads, the extension marketplace, and DeepPi's own model calls; a provider's own proxy takes precedence. Restart a task for open sessions and restart the app for in-app update checks.",
 };

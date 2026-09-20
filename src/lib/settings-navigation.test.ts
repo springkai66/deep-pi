@@ -4,9 +4,9 @@ import { SETTINGS_CATEGORIES, nextSettingsCategory, parseTaskLimit, settingsGrou
 describe("settings navigation", () => {
   it("provides the planned categories with stable unique identifiers", () => {
     expect(SETTINGS_CATEGORIES.map((category) => category.id)).toEqual([
-      "general", "appearance", "models", "extensions", "mcp", "skills", "workflows", "dsh", "runtime", "advanced",
+      "general", "appearance", "models", "extensions", "mcp", "skills", "workflows", "dsh", "runtime", "network", "advanced",
     ]);
-    expect(new Set(SETTINGS_CATEGORIES.map((category) => category.id)).size).toBe(10);
+    expect(new Set(SETTINGS_CATEGORIES.map((category) => category.id)).size).toBe(11);
   });
 
   it("separates Pi and DSH categories into their own navigation groups", () => {

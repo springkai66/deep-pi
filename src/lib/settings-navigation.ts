@@ -8,6 +8,7 @@ export const SETTINGS_CATEGORIES = [
   { id: "workflows", label: "工作流", group: "Pi Coding Agent" },
   { id: "dsh", label: "DSH 服务", group: "DSH (DeepSeek Harness)" },
   { id: "runtime", label: "运行时与更新", group: "系统" },
+  { id: "network", label: "网络代理", group: "系统" },
   { id: "advanced", label: "高级与诊断", group: "系统" },
 ] as const;
 

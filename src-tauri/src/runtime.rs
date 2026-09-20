@@ -19,7 +19,7 @@ use crate::{
     dsh::DshManager,
     message::{msg, msg_with},
     operation::{Cancellation, OperationManager},
-    process_runner, provider,
+    process_runner,
     recovery::activate_directory,
     task::{TaskStatus, TaskStore},
 };
@@ -317,18 +317,8 @@ fn valid_package_version(version: &str) -> bool {
 }
 
 fn configured_update_proxy() -> Result<Option<String>, String> {
-    for variable in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
-        let Some(value) = std::env::var_os(variable) else {
-            continue;
-        };
-        let value = value.to_string_lossy().trim().to_owned();
-        if value.is_empty() {
-            continue;
-        }
-        provider::validate_proxy(Some(&value))?;
-        return Ok(Some(value));
-    }
-    Ok(None)
+    // 全局代理设置（手动模式）、或跟随系统时读环境变量；直连模式返回 None。
+    Ok(crate::proxy::current_url())
 }
 
 /// 按顺序尝试的 npm registry。npmmirror（阿里 CDN）国内最快、最稳，作为主源；

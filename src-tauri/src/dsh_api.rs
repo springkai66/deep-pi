@@ -10,6 +10,7 @@ fn dsh_agent() -> ureq::Agent {
         // cookie 交换依赖 303 响应的 Set-Cookie 头，禁止跟随重定向。
         .max_redirects(0)
         .max_redirects_will_error(false)
+        .proxy(crate::proxy::ureq_proxy())
         .build()
         .new_agent()
 }
