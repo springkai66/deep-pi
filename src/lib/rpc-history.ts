@@ -86,3 +86,51 @@ export function createRpcHistorySession(
   }
   return { open, older, dispose };
 }
+
+/**
+ * 休眠会话历史：进程未启动时直接读 pi 会话文件（rpc_dormant_history，无状态分页）。
+ * 与 createRpcHistorySession 同接口（open/older/dispose），可互换使用。
+ */
+export function createDormantHistorySession(
+  invoke: <T>(command: string, args: Record<string, unknown>) => Promise<T>,
+  taskId: string,
+  limit = 100,
+) {
+  let closed = false;
+  let current: RpcHistoryPage | null = null;
+  let opening: Promise<RpcHistoryPage | null> | null = null;
+  let loadingOlder = false;
+  function open(): Promise<RpcHistoryPage | null> {
+    if (closed) return Promise.resolve(null);
+    if (opening) return opening;
+    opening = (async () => {
+      const page = validateHistoryPage(await invoke<unknown>("rpc_dormant_history", { taskId, before: null, limit }));
+      if (closed) return null;
+      current = page;
+      return page;
+    })();
+    return opening;
+  }
+  async function older(): Promise<RpcHistoryPage | null> {
+    if (closed || loadingOlder || !current || current.start === 0) return null;
+    const expected = current;
+    loadingOlder = true;
+    try {
+      const page = validateHistoryPage(await invoke<unknown>("rpc_dormant_history", {
+        taskId, before: expected.start, limit,
+      }));
+      if (closed) return null;
+      if (page.snapshotId !== expected.snapshotId || page.total !== expected.total
+        || page.end !== expected.start || page.start >= page.end) {
+        throw new Error(t("历史分页与当前快照不一致"));
+      }
+      current = page;
+      return page;
+    } finally { loadingOlder = false; }
+  }
+  async function dispose() {
+    closed = true;
+    current = null;
+  }
+  return { open, older, dispose };
+}

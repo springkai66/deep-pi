@@ -1411,7 +1411,7 @@ mod tests {
         let rpc = store
             .create_pi_task("RPC task", "F:/project")
             .expect("task should be created");
-        let tui = store
+        let _tui = store
             .create_pi_task("TUI task", "F:/project")
             .expect("task should be created");
         // 新建任务初始 status = running，但 interaction_mode 默认 tui，不占 RPC 额度。

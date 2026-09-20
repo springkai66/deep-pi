@@ -417,6 +417,60 @@ pub async fn rpc_history_close(
     .map_err(|error| error.to_string())?
 }
 
+/// 休眠会话历史：进程未启动时直接读 pi 会话文件展示历史（分页与 HistoryPage 同构）。
+#[tauri::command]
+pub async fn rpc_dormant_history(
+    webview: tauri::Webview,
+    app: AppHandle,
+    task_id: String,
+    before: Option<usize>,
+    limit: Option<usize>,
+) -> Result<crate::rpc_history::HistoryPage, String> {
+    require_main(&webview)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        if app.state::<RpcManager>().contains(&task_id)? {
+            return Err("Task is still running; live history is loaded on connect".into());
+        }
+        let record = app
+            .state::<TaskStore>()
+            .get(&task_id)?
+            .ok_or("Task not found")?;
+        if record.agent != "pi" || record.interaction_mode != "rpc" {
+            return Err("Dormant history is only available for RPC Pi tasks".into());
+        }
+        let file = resolve_session_file(&record)?;
+        let messages = crate::native_pi::read_session_messages(&file, &record.session_id)?;
+        let (start, end) = crate::native_pi::page_bounds(messages.len(), before, limit);
+        Ok(crate::rpc_history::HistoryPage {
+            snapshot_id: format!("dormant:{task_id}"),
+            event_sequence: 0,
+            start,
+            end,
+            total: messages.len(),
+            messages: messages[start..end].to_vec(),
+        })
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// 解析休眠会话的 pi 会话文件路径：优先用 pi 上报并持久化的 session_file，
+/// 缺失或已删除时回退到 pi 主目录 sessions 下按 session_id 搜索。
+fn resolve_session_file(record: &TaskRecord) -> Result<std::path::PathBuf, String> {
+    if let Some(file) = &record.session_file {
+        let path = std::path::Path::new(file);
+        if path.is_file() {
+            return Ok(path.to_path_buf());
+        }
+    }
+    let home = record
+        .pi_agent_dir
+        .as_deref()
+        .ok_or("Pi session file is not recorded yet")?;
+    crate::native_pi::find_session_file(std::path::Path::new(home), &record.session_id)?
+        .ok_or_else(|| "Pi session file not found".into())
+}
+
 #[tauri::command]
 pub async fn stop_rpc_task(
     webview: tauri::Webview,

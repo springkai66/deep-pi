@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createRpcHistorySession, prependRpcHistory, validateHistoryPage, type RpcHistoryPage } from "./rpc-history";
+import { createDormantHistorySession, createRpcHistorySession, prependRpcHistory, validateHistoryPage, type RpcHistoryPage } from "./rpc-history";
 import { emptyConversation } from "./rpc-state";
 
 const page: RpcHistoryPage = { snapshotId: "snapshot", eventSequence: 5, start: 2, end: 4, total: 4,
@@ -83,5 +83,48 @@ describe("RPC history snapshots", () => {
       { ...page, messages: [{ content: "no role" }, { role: "user" }] },
       { ...page, messages: [] },
     ]) expect(() => validateHistoryPage(invalid)).toThrow();
+  });
+
+  describe("dormant history sessions", () => {
+    function dormantFixture() {
+      const invoke = vi.fn(async (_command: string, _args: Record<string, unknown>): Promise<unknown> => page);
+      const session = createDormantHistorySession(<T,>(command: string, args: Record<string, unknown>) =>
+        invoke(command, args) as Promise<T>, "task");
+      return { invoke, session };
+    }
+
+    it("opens with a backend-less read and pages backwards by start offset", async () => {
+      const f = dormantFixture();
+      await f.session.open();
+      expect(f.invoke).toHaveBeenLastCalledWith("rpc_dormant_history", { taskId: "task", before: null, limit: 100 });
+      f.invoke.mockResolvedValueOnce({ ...page, start: 0, end: 2 });
+      expect((await f.session.older())?.start).toBe(0);
+      expect(f.invoke).toHaveBeenLastCalledWith("rpc_dormant_history", { taskId: "task", before: 2, limit: 100 });
+    });
+
+    it("rejects a noncontiguous older response and stops paging at the start", async () => {
+      const f = dormantFixture();
+      await f.session.open();
+      f.invoke.mockResolvedValueOnce({ ...page, start: 0, end: 3 });
+      await expect(f.session.older()).rejects.toThrow();
+      f.invoke.mockResolvedValueOnce({ ...page, start: 0, end: 2, messages: [{ role: "user", content: "0" }, { role: "assistant", content: "1" }] });
+      expect((await f.session.older())?.start).toBe(0);
+      f.invoke.mockClear();
+      await expect(f.session.older()).resolves.toBeNull();
+      expect(f.invoke).not.toHaveBeenCalled();
+    });
+
+    it("ignores a late initial open after disposal and deduplicates initial opens", async () => {
+      const f = dormantFixture();
+      await Promise.all([f.session.open(), f.session.open()]);
+      expect(f.invoke).toHaveBeenCalledTimes(1);
+      let finish!: (value: RpcHistoryPage) => void;
+      f.invoke.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+      const request = f.session.older();
+      await f.session.dispose();
+      finish({ ...page, start: 0, end: 2 });
+      expect(await request).toBeNull();
+      expect(f.invoke.mock.calls.filter(([command]) => command === "rpc_history_close")).toHaveLength(0);
+    });
   });
 });

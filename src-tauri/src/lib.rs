@@ -196,6 +196,7 @@ pub fn run() {
                 rpc::rpc_history_open,
                 rpc::rpc_history_page,
                 rpc::rpc_history_close,
+                rpc::rpc_dormant_history,
                 rpc::stop_rpc_task,
                 rpc::save_last_model_choice,
                 rpc::get_last_model_choice,

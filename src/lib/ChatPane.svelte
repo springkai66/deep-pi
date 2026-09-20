@@ -11,7 +11,7 @@ import type { ChatDetailLevel } from "./settings";
   import MessageDisclosure from "./MessageDisclosure.svelte";
   import { messageSource } from "./message-parts";
   import { formatDuration } from "./duration";
-  import { createRpcHistorySession, prependRpcHistory } from "./rpc-history";
+  import { createDormantHistorySession, createRpcHistorySession, prependRpcHistory } from "./rpc-history";
   import { shortcutAria } from "./shortcuts";
   import { t, tm } from "$lib/i18n.svelte";
 
@@ -882,12 +882,28 @@ import type { ChatDetailLevel } from "./settings";
     historyOffset = 0;
     error = "";
     if (!run) {
-      // 未启动的休眠会话：不连进程、不加载历史（快照由 pi 进程提供），
-      // 输入框保持可用；回车发送时才启动。
+      // 未启动的休眠会话：不连进程、不占额度，直接读 pi 会话文件展示历史；
+      // 输入框保持可用，回车发送时才启动。文件不可读（从未启动或已删除）时保持空白。
       initializing = false;
       dormant = true;
-      conversation = emptyConversation();
-      return;
+      const reader = createDormantHistorySession(invoke, id);
+      historySession = reader;
+      void (async () => {
+        try {
+          const history = await reader.open();
+          if (!alive || current !== generation || !history) return;
+          conversation = loadHistory(emptyConversation(), history.messages, 0);
+          historyOffset = history.start;
+        } catch {
+          // 保持空白会话：输入提示词并回车仍可启动。
+        }
+      })();
+      return () => {
+        alive = false;
+        void reader.dispose();
+        if (current === generation) generation++;
+        untrack(() => { if (historySession === reader) historySession = null; });
+      };
     }
     dormant = false;
     const historyReader = createRpcHistorySession(invoke, id, run);
@@ -1152,7 +1168,8 @@ import type { ChatDetailLevel } from "./settings";
     const next = deriveTitle();
     if (!next) return;
     autoNamed = true;
-    void call({ type: "set_session_name", name: next }).catch(() => {});
+    // 休眠态没有进程可同步名称；pi 启动时会经 --name 带上新标题。
+    if (connected) void call({ type: "set_session_name", name: next }).catch(() => {});
     onAutoRename(next);
   });
 

@@ -1,19 +1,19 @@
 use std::{
+    collections::{HashMap, HashSet},
     fs::{self, File},
-    io::{Read, Seek, SeekFrom},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(test)]
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 #[cfg(test)]
-use std::{
-    collections::{BTreeMap, HashSet},
-    time::Instant,
-};
+use std::collections::BTreeMap;
+#[cfg(test)]
+use std::time::Instant;
 
 #[cfg(test)]
 use crate::task::TaskStore;
@@ -441,6 +441,304 @@ pub fn session_arguments(record: &crate::task::TaskRecord) -> Result<Vec<String>
     Ok(arguments)
 }
 
+/// 休眠会话历史：单文件读取字节上限（与 pi MAX_HISTORY_BYTES 同量级）。
+const MAX_SESSION_LOG_BYTES: u64 = 192 * 1024 * 1024;
+/// 休眠会话历史：单行（单条消息）字节上限。
+const MAX_SESSION_LOG_LINE: usize = 32 * 1024 * 1024;
+/// 休眠会话历史：条目数上限，防止异常文件撑爆内存。
+const MAX_SESSION_LOG_ENTRIES: usize = 200_000;
+/// 会话目录搜索的目录数上限（sessions/<cwd 目录>/<文件> 只有两层，留足余量）。
+const MAX_SESSION_SCAN_DIRS: usize = 512;
+const MAX_SESSION_SCAN_FILES: usize = 20_000;
+
+/// 把 pi 记录的 ISO 时间戳（`new Date().toISOString()` 产物，恒为 `Z` 结尾）转成毫秒。
+/// 只接受 UTC 形式；解析失败返回 None，与 pi 对缺失时间的容错一致。
+fn iso_to_epoch_ms(value: Option<&Value>) -> Option<i64> {
+    let text = value?.as_str()?;
+    let body = text.strip_suffix('Z').unwrap_or(text);
+    let (date, time) = body.split_once('T')?;
+    let (year, month, day) = parse_date(date)?;
+    let (hour, minute, second, millis) = parse_time(time)?;
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 60
+    {
+        return None;
+    }
+    let days = days_from_civil(year, month, day);
+    Some((days * 86_400 + hour * 3_600 + minute * 60 + second) * 1_000 + millis)
+}
+
+fn parse_date(date: &str) -> Option<(i64, i64, i64)> {
+    let mut parts = date.split('-');
+    let year = parts.next()?.parse::<i64>().ok()?;
+    let month = parts.next()?.parse::<i64>().ok()?;
+    let day = parts.next()?.parse::<i64>().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((year, month, day))
+}
+
+fn parse_time(time: &str) -> Option<(i64, i64, i64, i64)> {
+    let (clock, fraction) = match time.split_once('.') {
+        Some((clock, fraction)) => (clock, fraction),
+        None => (time, ""),
+    };
+    let mut parts = clock.split(':');
+    let hour = parts.next()?.parse::<i64>().ok()?;
+    let minute = parts.next()?.parse::<i64>().ok()?;
+    let second = parts.next()?.parse::<i64>().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    let mut millis = 0i64;
+    if !fraction.is_empty() {
+        // 只取前三位毫秒；更长的精度直接截断（与 JS Date 一致）。
+        let digits: String = fraction.chars().take(3).collect();
+        let padded = format!("{digits:0<3}");
+        millis = padded.parse::<i64>().ok()?;
+    }
+    Some((hour, minute, second, millis))
+}
+
+/// Howard Hinnant 的 days_from_civil：公历日期 → 自 1970-01-01 的天数。
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let month_index = if month > 2 { month - 3 } else { month + 9 };
+    let day_of_year = (153 * month_index + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+/// 把一条会话条目投影为与 RPC `get_messages` 相同结构的消息；非消息条目返回 None。
+fn project_session_entry(entry: &Value) -> Option<Value> {
+    match entry["type"].as_str()? {
+        "message" => {
+            let mut message = entry["message"].as_object()?.clone();
+            // pi 对旧文件里 content 缺失的 user/assistant/toolResult 消息补空数组。
+            let role = message.get("role").and_then(Value::as_str).unwrap_or("");
+            let content_missing = message.get("content").is_none_or(Value::is_null);
+            if content_missing && matches!(role, "user" | "assistant" | "toolResult") {
+                message.insert("content".into(), Value::Array(Vec::new()));
+            }
+            Some(Value::Object(message))
+        }
+        "custom_message" => Some(json!({
+            "role": "custom",
+            "customType": entry["customType"],
+            "content": entry.get("content").cloned().unwrap_or_else(|| Value::Array(Vec::new())),
+            "display": entry["display"],
+            "details": entry["details"],
+            "timestamp": iso_to_epoch_ms(entry.get("timestamp")),
+        })),
+        "branch_summary" => Some(json!({
+            "role": "branchSummary",
+            "summary": entry["summary"],
+            "fromId": entry["fromId"],
+            "timestamp": iso_to_epoch_ms(entry.get("timestamp")),
+        })),
+        "compaction" => Some(json!({
+            "role": "compactionSummary",
+            "summary": entry["summary"],
+            "tokensBefore": entry["tokensBefore"],
+            "timestamp": iso_to_epoch_ms(entry.get("timestamp")),
+        })),
+        _ => None,
+    }
+}
+
+/// 与 pi `buildSessionPath` + `buildContextEntries` 等价的投影：
+/// 从叶子沿 parentId 走到根；若路径上存在压缩条目，则只保留压缩摘要、
+/// firstKeptEntryId 起的被保留条目与压缩之后的条目。
+fn project_session_messages(entries: &[Value]) -> Vec<Value> {
+    // 归一化：v1 文件没有 id/parentId，按线性顺序补齐（与 pi 的 migrate 等价）；
+    // 已有 id 的条目保留文件里的 id 与 parentId（null 表示分支根）。
+    let mut nodes: Vec<(String, Option<String>, &Value)> = Vec::with_capacity(entries.len());
+    let mut previous: Option<String> = None;
+    for entry in &entries[1..] {
+        if entry["type"] == "session" {
+            continue;
+        }
+        let (id, parent) = match entry["id"].as_str() {
+            Some(existing) => (
+                existing.to_owned(),
+                entry["parentId"].as_str().map(str::to_owned),
+            ),
+            None => {
+                let id = format!("#{}", nodes.len());
+                (id.clone(), previous.clone())
+            }
+        };
+        previous = Some(id.clone());
+        nodes.push((id, parent, entry));
+    }
+    if nodes.is_empty() {
+        return Vec::new();
+    }
+    let by_id: HashMap<&str, usize> = nodes
+        .iter()
+        .enumerate()
+        .map(|(index, (id, _, _))| (id.as_str(), index))
+        .collect();
+    // 叶子 = 最后一个条目；沿 parentId 上溯到根（带访问集防环）。
+    let mut path: Vec<usize> = Vec::new();
+    let mut visited: HashSet<usize> = HashSet::new();
+    let mut cursor = Some(nodes.len() - 1);
+    while let Some(index) = cursor {
+        if !visited.insert(index) {
+            break;
+        }
+        path.push(index);
+        cursor = nodes[index]
+            .1
+            .as_deref()
+            .and_then(|parent| by_id.get(parent).copied());
+    }
+    path.reverse();
+    // 压缩感知的上下文截取。
+    let context: Vec<usize> = match path
+        .iter()
+        .rposition(|&index| nodes[index].2["type"] == "compaction")
+    {
+        Some(compaction_position) => {
+            let compaction = path[compaction_position];
+            let kept_id = nodes[compaction].2["firstKeptEntryId"].as_str();
+            let mut context = vec![compaction];
+            let mut kept_found = false;
+            for &index in &path[..compaction_position] {
+                if kept_id.is_some_and(|kept| nodes[index].0 == kept) {
+                    kept_found = true;
+                }
+                if kept_found {
+                    context.push(index);
+                }
+            }
+            context.extend_from_slice(&path[compaction_position + 1..]);
+            context
+        }
+        None => path,
+    };
+    context
+        .iter()
+        .filter_map(|&index| project_session_entry(nodes[index].2))
+        .collect()
+}
+
+/// 读取 pi 会话 JSONL 并投影为消息列表（供休眠会话直接展示历史，无需启动进程）。
+/// 文件首行必须是 `type: session` 的头部且 id 与任务一致；损坏行按 pi 的行为跳过。
+pub fn read_session_messages(file: &Path, expected_id: &str) -> Result<Vec<Value>, String> {
+    let handle =
+        File::open(file).map_err(|error| format!("failed to open Pi session file: {error}"))?;
+    if handle.metadata().map_err(|error| error.to_string())?.len() > MAX_SESSION_LOG_BYTES {
+        return Err("Pi session file is too large".into());
+    }
+    let mut reader = BufReader::new(handle);
+    let mut entries: Vec<Value> = Vec::new();
+    let mut total = 0u64;
+    let mut buffer: Vec<u8> = Vec::with_capacity(64 * 1024);
+    loop {
+        buffer.clear();
+        let read = reader
+            .read_until(b'\n', &mut buffer)
+            .map_err(|error| format!("failed to read Pi session file: {error}"))?;
+        if read == 0 {
+            break;
+        }
+        total += read as u64;
+        if total > MAX_SESSION_LOG_BYTES {
+            return Err("Pi session file is too large".into());
+        }
+        if buffer.len() > MAX_SESSION_LOG_LINE {
+            return Err("Pi session message is too large".into());
+        }
+        if entries.len() >= MAX_SESSION_LOG_ENTRIES {
+            return Err("Pi session has too many entries".into());
+        }
+        let line = String::from_utf8_lossy(&buffer);
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(entry) = serde_json::from_str::<Value>(trimmed) {
+            entries.push(entry);
+        }
+    }
+    let header = entries.first().ok_or("Pi session file is empty")?;
+    if header["type"] != "session" {
+        return Err(msg("native.session.not_a_session_file"));
+    }
+    if header["id"].as_str() != Some(expected_id) {
+        return Err(msg("native.session.id_mismatch"));
+    }
+    Ok(project_session_messages(&entries))
+}
+
+/// 在 pi 主目录的 sessions 下按 `<时间戳>_<session_id>.jsonl` 命名规则定位会话文件；
+/// 多个匹配（分支/恢复产生的同名文件）取修改时间最新的一个。
+pub fn find_session_file(agent_dir: &Path, session_id: &str) -> Result<Option<PathBuf>, String> {
+    if !valid_session_id(session_id) {
+        return Ok(None);
+    }
+    let suffix = format!("_{session_id}.jsonl");
+    let mut directories = vec![agent_dir.join("sessions")];
+    let mut scanned = 0usize;
+    let mut matches: Vec<PathBuf> = Vec::new();
+    while let Some(directory) = directories.pop() {
+        scanned += 1;
+        if scanned > MAX_SESSION_SCAN_DIRS {
+            break;
+        }
+        let read = match fs::read_dir(&directory) {
+            Ok(read) => read,
+            Err(_) => continue,
+        };
+        for entry in read.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if directories.len() < MAX_SESSION_SCAN_DIRS {
+                    directories.push(path);
+                }
+                continue;
+            }
+            if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(&suffix))
+            {
+                if reject_link(&path).is_err() {
+                    continue;
+                }
+                matches.push(path);
+                if matches.len() >= MAX_SESSION_SCAN_FILES {
+                    break;
+                }
+            }
+        }
+    }
+    let latest = matches.into_iter().max_by_key(|path| {
+        fs::metadata(path)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0)
+    });
+    Ok(latest)
+}
+
+/// 休眠历史的无状态分页：`before` 为 None 时取最后一页，否则取 `before` 之前的一页。
+pub fn page_bounds(total: usize, before: Option<usize>, limit: Option<usize>) -> (usize, usize) {
+    let limit = limit.unwrap_or(100).clamp(1, 100);
+    let end = before.unwrap_or(total).min(total);
+    let start = end.saturating_sub(limit);
+    (start, end)
+}
+
 pub fn validate_reported_session(
     paths: &AppPaths,
     task: &crate::task::TaskRecord,
@@ -780,5 +1078,212 @@ mod tests {
             paths.task_pi_home(&task).unwrap(),
             fs::canonicalize(&paths.pi_home).unwrap()
         );
+    }
+
+    fn write_session(path: &Path, lines: &[Value]) {
+        fs::write(
+            path,
+            lines
+                .iter()
+                .map(|line| line.to_string())
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n",
+        )
+        .unwrap();
+    }
+
+    fn header(id: &str) -> Value {
+        json!({"type":"session","version":3,"id":id,"cwd":"C:\\proj"})
+    }
+
+    fn message_entry(id: &str, parent: Option<&str>, role: &str, content: &str) -> Value {
+        let mut entry = json!({
+            "type":"message","id":id,"parentId":parent,
+            "timestamp":"2026-09-20T10:00:00.000Z",
+            "message":{"role":role,"content":content},
+        });
+        if parent.is_none() {
+            entry["parentId"] = Value::Null;
+        }
+        entry
+    }
+
+    #[test]
+    fn dormant_history_projects_a_linear_session_into_messages() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("s.jsonl");
+        write_session(
+            &file,
+            &[
+                header("session-1"),
+                message_entry("a1", None, "user", "你好"),
+                message_entry("a2", Some("a1"), "assistant", "你好！"),
+                message_entry("a3", Some("a2"), "toolResult", "ok"),
+                json!({"type":"model_change","id":"a4","parentId":"a3","provider":"p","modelId":"m"}),
+            ],
+        );
+        let messages = read_session_messages(&file, "session-1").unwrap();
+        let roles: Vec<&str> = messages
+            .iter()
+            .map(|message| message["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(roles, ["user", "assistant", "toolResult"]);
+        assert_eq!(messages[0]["content"], "你好");
+    }
+
+    #[test]
+    fn dormant_history_keeps_only_the_compaction_aware_context() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("s.jsonl");
+        write_session(
+            &file,
+            &[
+                header("session-1"),
+                message_entry("a1", None, "user", "one"),
+                message_entry("a2", Some("a1"), "assistant", "two"),
+                json!({
+                    "type":"compaction","id":"a3","parentId":"a2","firstKeptEntryId":"a2",
+                    "summary":"sum","tokensBefore":1000,"timestamp":"2026-09-20T10:00:01.000Z",
+                }),
+                message_entry("a4", Some("a3"), "user", "three"),
+            ],
+        );
+        let messages = read_session_messages(&file, "session-1").unwrap();
+        let roles: Vec<&str> = messages
+            .iter()
+            .map(|message| message["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(roles, ["compactionSummary", "assistant", "user"]);
+        assert_eq!(messages[0]["summary"], "sum");
+        assert_eq!(messages[0]["tokensBefore"], 1000);
+        assert_eq!(messages[0]["timestamp"], 1_789_898_401_000i64);
+        assert_eq!(messages[1]["content"], "two");
+        assert_eq!(messages[2]["content"], "three");
+    }
+
+    #[test]
+    fn dormant_history_synthesizes_custom_and_branch_messages() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("s.jsonl");
+        write_session(
+            &file,
+            &[
+                header("session-1"),
+                message_entry("a1", None, "user", "hi"),
+                json!({
+                    "type":"custom_message","id":"a2","parentId":"a1",
+                    "customType":"bash","content":"ls","display":"$ ls",
+                    "timestamp":"2026-09-20T10:00:02.500Z",
+                }),
+                json!({
+                    "type":"branch_summary","id":"a3","parentId":"a2","summary":"br",
+                    "fromId":"a1","timestamp":"2026-09-20T10:00:03.000Z",
+                }),
+            ],
+        );
+        let messages = read_session_messages(&file, "session-1").unwrap();
+        let roles: Vec<&str> = messages
+            .iter()
+            .map(|message| message["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(roles, ["user", "custom", "branchSummary"]);
+        assert_eq!(messages[1]["customType"], "bash");
+        assert_eq!(messages[1]["timestamp"], 1_789_898_402_500i64);
+        assert_eq!(messages[2]["fromId"], "a1");
+    }
+
+    #[test]
+    fn dormant_history_chains_v1_entries_without_ids() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("s.jsonl");
+        write_session(
+            &file,
+            &[
+                json!({"type":"session","version":1,"id":"session-1","cwd":"C:\\proj"}),
+                json!({"type":"message","timestamp":"2026-09-20T10:00:00.000Z","message":{"role":"user","content":"old"}}),
+                json!({"type":"message","timestamp":"2026-09-20T10:00:01.000Z","message":{"role":"assistant","content":"older"}}),
+            ],
+        );
+        let messages = read_session_messages(&file, "session-1").unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["content"], "old");
+        assert_eq!(messages[1]["content"], "older");
+    }
+
+    #[test]
+    fn dormant_history_rejects_foreign_session_ids_and_bad_headers() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("s.jsonl");
+        write_session(
+            &file,
+            &[header("session-1"), message_entry("a1", None, "user", "hi")],
+        );
+        assert!(read_session_messages(&file, "session-2").is_err());
+        fs::write(&file, "not json\n").unwrap();
+        assert!(read_session_messages(&file, "session-1").is_err());
+    }
+
+    #[test]
+    fn dormant_history_tolerates_partial_trailing_lines_and_skips_corrupt_rows() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("s.jsonl");
+        write_session(
+            &file,
+            &[
+                header("session-1"),
+                message_entry("a1", None, "user", "kept"),
+            ],
+        );
+        let mut handle = fs::OpenOptions::new().append(true).open(&file).unwrap();
+        writeln!(handle, "{{\"type\":\"message\"").unwrap(); // 损坏行被跳过
+        write!(handle, "{{\"partial\"").unwrap(); // 未写完的行被跳过
+        drop(handle);
+        let messages = read_session_messages(&file, "session-1").unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["content"], "kept");
+    }
+
+    #[test]
+    fn dormant_history_pages_backwards_without_crossing_the_start() {
+        assert_eq!(page_bounds(250, None, None), (150, 250));
+        assert_eq!(page_bounds(250, Some(150), None), (50, 150));
+        assert_eq!(page_bounds(250, Some(30), None), (0, 30));
+        assert_eq!(page_bounds(250, Some(30), Some(50)), (0, 30));
+        assert_eq!(page_bounds(0, None, Some(400)), (0, 0));
+    }
+
+    #[test]
+    fn find_session_file_locates_by_id_suffix_and_prefers_the_latest() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("sessions").join("--C---proj--");
+        fs::create_dir_all(&directory).unwrap();
+        let old = directory.join("2026-09-20T10-00-00-000Z_abc12345.jsonl");
+        fs::write(&old, "{}").unwrap();
+        assert_eq!(
+            find_session_file(root.path(), "abc12345").unwrap(),
+            Some(old.clone())
+        );
+        let newer = directory.join("2026-09-20T11-00-00-000Z_abc12345.jsonl");
+        fs::write(&newer, "{}").unwrap();
+        // 多个同 id 文件时返回修改时间最新的一个（与搜索内部同一套时间源）。
+        let latest = [old.clone(), newer]
+            .into_iter()
+            .max_by_key(|path| {
+                fs::metadata(path)
+                    .and_then(|meta| meta.modified())
+                    .ok()
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|duration| duration.as_secs())
+                    .unwrap_or(0)
+            })
+            .unwrap();
+        assert_eq!(
+            find_session_file(root.path(), "abc12345").unwrap(),
+            Some(latest)
+        );
+        assert_eq!(find_session_file(root.path(), "ffffffff").unwrap(), None);
+        // 非法 session_id 直接返回 None，不做目录扫描。
+        assert_eq!(find_session_file(root.path(), "..").unwrap(), None);
     }
 }
