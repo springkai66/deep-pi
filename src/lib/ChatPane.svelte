@@ -3,7 +3,7 @@
   import { ArrowDown, ArrowDownUp, ArrowUp, Bot, ChevronDown, CircleAlert, History, Pencil, RefreshCw, Shrink, Sparkles, Square, Terminal, Undo2, UserRound, X } from "@lucide/svelte";
   import { onMount, tick, untrack, type Snippet } from "svelte";
   import type { DialogRequest, DialogValue } from "./dialog";
-  import { applyRpcEvent, canSubmitPrompt, contentText, emptyConversation, loadHistory, messageRenderable, readableRpcError, record, type RpcEvent, type RpcMessage } from "./rpc-state";
+  import { applyRpcEvent, canSubmitPrompt, contentText, emptyConversation, loadHistory, messageRenderable, readableRpcError, record, type RpcEvent, type RpcMessage, type RpcTool } from "./rpc-state";
   import { onModelsChanged } from "./model-config-sync";
   import { findSavedModel, parseModelKey, shouldApplySavedChoice, validSavedThinkingLevel, type SavedModelChoice } from "./model-memory";
 import type { ChatDetailLevel } from "./settings";
@@ -256,6 +256,10 @@ import type { ChatDetailLevel } from "./settings";
   );
   const toolResults = $derived(new Set(conversation.messages.map((message) => message.toolCallId).filter(Boolean)));
   const liveTools = $derived(Object.values(conversation.tools).filter((tool) => !toolResults.has(tool.id)));
+  /// 正在执行的工具：工具卡与状态栏共用；通常只有一个，多个时展示最新的一个。
+  const runningTools = $derived(liveTools.filter((tool) => tool.running));
+  const finishedLiveTools = $derived(liveTools.filter((tool) => !tool.running));
+  const activeTool = $derived(runningTools.length ? runningTools[runningTools.length - 1] : null);
 
   interface ChatTurn {
     /// 该 user 消息在 conversation.messages 中的下标
@@ -318,6 +322,68 @@ import type { ChatDetailLevel } from "./settings";
       }
     }
     return name;
+  }
+
+  /// —— 输出活跃度分档 ——
+  /// tool_execution_update 事件即心跳：< 10s 视为输出更新中；< 2min 静默；再久提示疑似停滞。
+  /// 注意措辞：长静默 ≠ 卡住（npm install、sleep 等本来就长时间无输出），只客观陈述无输出多久。
+  const FRESH_OUTPUT_MS = 10_000;
+  const STALE_OUTPUT_MS = 120_000;
+  /// 思考/生成阶段：流式增量超过 30s 未到才提示无响应，避免正常停顿误报。
+  const SILENT_MODEL_MS = 30_000;
+  /// 工具总耗时超过 5 分钟标记「长时间运行」徽标。
+  const LONG_TOOL_MS = 300_000;
+  /// 实时输出预览保留的尾部行数。
+  const LIVE_OUTPUT_LINES = 10;
+
+  type OutputActivity = "fresh" | "quiet" | "stale";
+
+  /// 距上次输出事件的静默时长；从未更新过（如等待首个输出的 bash / 不产出的工具）按开始时间算。
+  function toolSilenceMs(tool: RpcTool, now: number): number {
+    return Math.max(0, now - (tool.lastUpdateAt ?? tool.startedAt ?? now));
+  }
+
+  function outputActivity(tool: RpcTool, now: number): OutputActivity {
+    const silence = toolSilenceMs(tool, now);
+    return silence < FRESH_OUTPUT_MS ? "fresh" : silence < STALE_OUTPUT_MS ? "quiet" : "stale";
+  }
+
+  function silenceLabel(tool: RpcTool, now: number): string {
+    const silence = toolSilenceMs(tool, now);
+    return silence < FRESH_OUTPUT_MS ? "" : ` · ${t("无输出 {duration}", { duration: formatDuration(silence) })}`;
+  }
+
+  /// 累计输出取尾部若干行做实时预览（partialResult 是累计值，直接替换展示即可）；无输出返回空串。
+  function liveOutputTail(tool: RpcTool): string {
+    const text = contentText(typeof tool.result === "string" ? tool.result : record(tool.result).content);
+    if (!text) return "";
+    const lines = text.replace(/\s+$/, "").split("\n");
+    return lines.slice(-LIVE_OUTPUT_LINES).join("\n");
+  }
+
+  function liveOutputLastLine(tool: RpcTool): string {
+    const tail = liveOutputTail(tool);
+    return tail ? tail.split("\n").pop() ?? "" : "";
+  }
+
+  /// 把实时输出滚动钉在底部（tail -f 效果）；依赖的文本变化时触发，rAF 等 DOM 更新后再定位。
+  function pinOutputBottom(node: HTMLPreElement, _text: string) {
+    const scrollToEnd = () => { requestAnimationFrame(() => { node.scrollTop = node.scrollHeight; }); };
+    scrollToEnd();
+    return { update: scrollToEnd };
+  }
+
+  /// 上滚时悬浮胶囊的文案：工具摘要 + 已运行 + 静默时长。
+  function activeToolChipLabel(tool: RpcTool): string {
+    const elapsed = tool.startedAt !== undefined ? formatDuration(elapsedNow - tool.startedAt) : "";
+    return `${t("{name} 执行中", { name: toolCallSummary(tool.name, tool.args) })}${elapsed ? ` · ${elapsed}` : ""}${silenceLabel(tool, elapsedNow)}`;
+  }
+
+  /// 回到最新消息并恢复自动跟随；悬浮胶囊与回底按钮共用。
+  function returnToLatest() {
+    followScroll = true;
+    pinnedMessageStart = null;
+    if (transcript) transcript.scrollTop = transcript.scrollHeight;
   }
 
   /// 把正在计时的轮次耗时累加进 turnDurations（排队续跑时同一轮可能多次累加）。
@@ -645,16 +711,30 @@ import type { ChatDetailLevel } from "./settings";
             : conversation.phase === "waiting" ? t("等待输入")
               : "",
   );
-  const elapsedText = $derived(turnStartedAt === null ? "" : `${Math.max(0, Math.floor((elapsedNow - turnStartedAt) / 1000))}s`);
-  /// 空闲（等待输入）不显示状态文字，避免噪音；仅在异常/进行中状态提示。
-  const statusText = $derived(
-    compacting ? t("正在压缩上下文")
-      : switching ? t("正在切换模式")
-      : conversation.closed ? t("已停止")
-        : initializing ? t("连接中")
-          : !connected ? t("未连接")
-            : `${phaseText}${elapsedText ? ` · ${elapsedText}` : ""}`,
-  );
+  /// 状态栏：具体到正在执行的工具（名称 + 参数摘要）而不是笼统的「正在执行工具」。
+  /// 工具耗时与本轮耗时分开展示，消除「960s 到底是谁的耗时」的歧义；静默超阈适时提示。
+  const statusText = $derived.by(() => {
+    if (compacting) return t("正在压缩上下文");
+    if (switching) return t("正在切换模式");
+    if (conversation.closed) return t("已停止");
+    if (initializing) return t("连接中");
+    if (!connected) return t("未连接");
+    const turnPart = turnStartedAt !== null ? ` · ${t("本轮 {duration}", { duration: formatDuration(elapsedNow - turnStartedAt) })}` : "";
+    if (conversation.phase === "tool" && activeTool) {
+      const summary = toolCallSummary(activeTool.name, activeTool.args);
+      const toolPart = activeTool.startedAt !== undefined ? formatDuration(elapsedNow - activeTool.startedAt) : "";
+      return `${summary}${toolPart ? ` · ${toolPart}` : ""}${silenceLabel(activeTool, elapsedNow)}${turnPart}`;
+    }
+    let text = phaseText;
+    if (conversation.busy && conversation.lastEventAt !== undefined
+      && (conversation.phase === "thinking" || conversation.phase === "generating")) {
+      const silentFor = Math.max(0, elapsedNow - conversation.lastEventAt);
+      if (silentFor >= SILENT_MODEL_MS) text += ` · ${t("已 {duration} 无响应", { duration: formatDuration(silentFor) })}`;
+    }
+    return `${text}${turnPart}`;
+  });
+  /// 工具长时间无输出：状态栏文字转琥珀色 + 停止按钮高亮，提示用户可中断。
+  const toolStalled = $derived(activeTool !== null && outputActivity(activeTool, elapsedNow) === "stale");
   const canEnhance = $derived(connected && !switching && !conversation.busy && !conversation.closed && !!draft.trim() && !enhancing);
 
   /// 待发送提示词（输入框上方）：引导/排队分开列出，支持编辑、撤回与切换投递方式。
@@ -1432,16 +1512,36 @@ import type { ChatDetailLevel } from "./settings";
         <button type="button" class="chat-error-retry" onclick={() => { reconnect++; }}><RefreshCw size={13} />{t("重新连接会话")}</button>
       </article>
     {/if}
+    {#each runningTools as tool (tool.id)}
+      <div class="tool-call live">
+        <div class="tool-call-head">
+          <span class="activity-dot {outputActivity(tool, elapsedNow)}" aria-hidden="true"></span>
+          <Terminal size={14} />
+          <span class="tool-call-name">{toolCallSummary(tool.name, tool.args)}</span>
+          {#if tool.startedAt !== undefined && elapsedNow - tool.startedAt >= LONG_TOOL_MS}
+            <span class="tool-call-badge">{t("长时间运行")}</span>
+          {/if}
+          <span class="tool-call-state">
+            {#if tool.startedAt !== undefined}{formatDuration(elapsedNow - tool.startedAt)}{/if}{silenceLabel(tool, elapsedNow)}
+          </span>
+          <button type="button" class="tool-call-interrupt" disabled={stopping} title={t("中断当前执行")} aria-label={t("中断当前执行")}
+            onclick={() => void interrupt()}><Square size={11} />{t("中断")}</button>
+        </div>
+        {#if chatDetailLevel === "concise"}
+          {#if liveOutputLastLine(tool)}<p class="tool-call-preview">{liveOutputLastLine(tool)}</p>{/if}
+        {:else if liveOutputTail(tool)}
+          <pre class="tool-call-live-output" use:pinOutputBottom={liveOutputTail(tool)}>{liveOutputTail(tool)}</pre>
+        {:else}
+          <p class="tool-call-waiting">{t("等待工具输出…")}</p>
+        {/if}
+      </div>
+    {/each}
     {#if chatDetailLevel !== "concise"}
-      {#each liveTools as tool (tool.id)}
-        <details class="tool-call" open={tool.running || chatDetailLevel === "verbose"}>
+      {#each finishedLiveTools as tool (tool.id)}
+        <details class="tool-call" open={chatDetailLevel === "verbose"}>
           <summary>
             <Terminal size={14} /><span class="tool-call-name">{toolCallSummary(tool.name, tool.args)}</span>
-            <span class="tool-call-state">
-              {tool.running
-                ? tool.startedAt !== undefined ? `${t("执行中")} · ${formatDuration(elapsedNow - tool.startedAt)}` : t("执行中")
-                : tool.isError ? t("失败") : t("完成")}
-            </span>
+            <span class="tool-call-state">{tool.isError ? t("失败") : t("完成")}</span>
           </summary>
           <pre>{JSON.stringify(tool.args, null, 2)}</pre>
           {#if tool.result}<pre>{contentText(record(tool.result).content)}</pre>{/if}
@@ -1492,11 +1592,16 @@ import type { ChatDetailLevel } from "./settings";
   {/if}
   {#if !followScroll && conversation.messages.length}
     <div class="scroll-actions">
-      <button type="button" title={t("回到最新消息")} aria-label={t("回到最新消息")} onclick={() => {
-        followScroll = true;
-        pinnedMessageStart = null;
-        if (transcript) transcript.scrollTop = transcript.scrollHeight;
-      }}><ArrowDown size={16} /></button>
+      <div class="scroll-actions-row">
+        <button type="button" title={t("回到最新消息")} aria-label={t("回到最新消息")} onclick={returnToLatest}><ArrowDown size={16} /></button>
+        {#if activeTool}
+          <button type="button" class="live-chip" title={t("回到实时输出")} aria-label={t("回到实时输出")} onclick={returnToLatest}>
+            <span class="activity-dot {outputActivity(activeTool, elapsedNow)}" aria-hidden="true"></span>
+            {activeToolChipLabel(activeTool)}
+            <ArrowDown size={13} />
+          </button>
+        {/if}
+      </div>
     </div>
   {/if}
 
@@ -1606,9 +1711,12 @@ import type { ChatDetailLevel } from "./settings";
         </select>
         <small class="workflow-hint" title={t("技能安装后按任务自动激活；选中工作流只把站点的起手提示填进输入框")}>{t("技能安装后按任务自动激活；选中工作流只把站点的起手提示填进输入框")}</small>
       {/if}
-      <span class="connection-status" role="status">{statusText}</span>
+      <span class="connection-status" role="status" class:stalled={toolStalled}>
+        {#if activeTool}<span class="activity-dot {outputActivity(activeTool, elapsedNow)}" aria-hidden="true"></span>{/if}
+        {statusText}
+      </span>
       {#if conversation.busy || conversation.queue.length}
-        <button type="button" class="send-button" disabled={switching || stopping} title={t("停止当前响应并清空队列")} aria-label={t("停止当前响应并清空队列")} onclick={() => void interrupt()}><Square size={16} /></button>
+        <button type="button" class="send-button" class:stalled={toolStalled} disabled={switching || stopping} title={t("停止当前响应并清空队列")} aria-label={t("停止当前响应并清空队列")} onclick={() => void interrupt()}><Square size={16} /></button>
       {/if}
       <button type="button" class="send-button" title={t("增强提示词（改写为更清晰的结构化提示）")} aria-label={t("增强提示词")}
         disabled={!canEnhance} onclick={() => void enhanceDraft()}>
@@ -1658,9 +1766,30 @@ import type { ChatDetailLevel } from "./settings";
   .message-content { min-width: 0; overflow-wrap: anywhere; line-height: 1.7; color: var(--text); font-family: var(--session-font, var(--text-font)); font-size: var(--session-font-size, 13px); }
   .plain-message { white-space: pre-wrap; }
   .scroll-actions { height: 0; position: relative; display: flex; justify-content: center; z-index: 1; }
-  .scroll-actions button { position: absolute; bottom: 10px; width: 30px; height: 30px; display: grid; place-items: center; padding: 0; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--surface); color: var(--text); }
+  .scroll-actions-row { position: absolute; bottom: 10px; display: flex; align-items: center; gap: 8px; }
+  .scroll-actions-row button { display: grid; place-items: center; padding: 0; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--surface); color: var(--text); }
+  .scroll-actions-row > button:first-child { width: 30px; height: 30px; flex-shrink: 0; }
+  /* 上滚时的实时胶囊：正在执行的工具 + 耗时 + 活跃点，点击回到底部。 */
+  .live-chip { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 12px; border-radius: 999px !important; font-size: 11px; font-family: var(--code-font); max-width: min(560px, 80vw); }
+  .live-chip > span:last-child { flex-shrink: 0; color: var(--text-muted); }
+  .live-chip { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  /* 输出活跃度点：绿=输出更新中，灰=静默，琥珀=长时间无输出（疑似停滞）。 */
+  .activity-dot { width: 7px; height: 7px; flex-shrink: 0; border-radius: 50%; background: var(--text-muted); }
+  .activity-dot.fresh { background: #58a661; animation: activity-pulse 1.6s ease-in-out infinite; }
+  .activity-dot.stale { background: #d8a04a; animation: activity-pulse 1.6s ease-in-out infinite; }
+  @keyframes activity-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
   .user-message .message-content { padding: 12px; border-left: 2px solid var(--accent); background: var(--surface); }
   .tool-call { max-width: 900px; border: 1px solid var(--border); border-radius: 4px; padding: 8px 12px; margin: 0 auto 8px; font-size: 12px; }
+  /* 运行中的工具卡：具体参数摘要 + 活跃点 + 实时输出尾部，让「AI 在做什么」可见。 */
+  .tool-call.live { border-color: color-mix(in srgb, var(--accent) 30%, var(--border)); }
+  .tool-call-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .tool-call-badge { flex-shrink: 0; padding: 1px 8px; border: 1px solid color-mix(in srgb, #d8a04a 55%, transparent); border-radius: 999px; font-size: 10px; color: #d8a04a; white-space: nowrap; }
+  .tool-call-interrupt { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; padding: 2px 8px; border: 1px solid var(--border); border-radius: 4px; background: transparent; color: var(--text-muted); font-size: 11px; }
+  .tool-call-interrupt:hover:not(:disabled) { color: var(--text); background: var(--surface-hover); }
+  .tool-call-live-output { max-height: 200px; margin: 6px 0 0; padding: 6px 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--page-bg); color: var(--text-muted); white-space: pre-wrap; overflow-wrap: anywhere; }
+  .tool-call-preview { margin: 6px 0 0; color: var(--text-muted); font: 11px/1.5 var(--code-font); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tool-call-waiting { margin: 6px 0 0; font-size: 11px; color: var(--text-muted); }
   summary { cursor: pointer; overflow-wrap: anywhere; display: flex; align-items: center; gap: 8px; }
   summary :global(svg) { flex-shrink: 0; }
   .tool-call-name { min-width: 0; font-weight: 700; color: var(--text); overflow-wrap: anywhere; }
@@ -1710,8 +1839,11 @@ import type { ChatDetailLevel } from "./settings";
   .context-ring:hover:not(:disabled) .ring-fg { stroke: var(--accent); filter: brightness(1.15); }
   select { min-width: 0; max-width: 130px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface-alt); padding: 4px; color: var(--text-muted); font-size: 11px; }
   .workflow-hint { flex: 0 1 auto; min-width: 0; max-width: 240px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--text-muted); font-size: 10px; }
-  .connection-status { flex: 1; font-size: 11px; color: var(--text-muted); }
+  .connection-status { display: inline-flex; align-items: center; gap: 6px; flex: 1; min-width: 0; font-size: 11px; color: var(--text-muted); white-space: nowrap; overflow: hidden; }
+  .connection-status.stalled { color: #d8a04a; }
   .send-button { display: grid; place-items: center; width: 30px; height: 30px; padding: 0; flex-shrink: 0; border: 0; border-radius: 4px; background: var(--surface-hover); color: var(--text); }
+  /* 工具长时间无输出：停止按钮琥珀色呼吸，就近提示可中断。 */
+  .send-button.stalled { background: color-mix(in srgb, #d8a04a 22%, var(--surface-hover)); color: #d8a04a; animation: activity-pulse 1.6s ease-in-out infinite; }
   .primary-send { background: var(--accent); color: var(--accent-ink); }
   button:disabled { opacity: .4; cursor: default; }
   /* 错误卡片：与其他内容同宽（900px 居中），显示在会话流内随内容滚动，不再常驻输入框上方。 */

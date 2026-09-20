@@ -31,6 +31,9 @@ export interface RpcTool {
   /// 执行起止时间：进行中的工具用 startedAt 显示 Elapsed 实时耗时。
   startedAt?: number;
   endedAt?: number;
+  /// 最近一次输出事件的本地时间戳：tool_execution_update 本身就是心跳，
+  /// 用于区分「输出仍在滚动」与「已 N 分钟无输出」。
+  lastUpdateAt?: number;
 }
 
 export interface Conversation {
@@ -47,6 +50,8 @@ export interface Conversation {
   queueFollowUp: string[];
   /// 上下文压缩进行中（pi 的 compaction_start/compaction_end 事件或 get_state 的 isCompacting）。
   compacting: boolean;
+  /// 最近一次收到任意 RPC 事件的本地时间戳：思考/生成阶段的事件流即心跳。
+  lastEventAt?: number;
 }
 
 export function record(value: unknown): Record<string, unknown> {
@@ -157,7 +162,8 @@ export function loadHistory(state: Conversation, values: unknown[], sequence: nu
 
 export function applyRpcEvent(previous: Conversation, event: RpcEvent): Conversation {
   if (event.sequence <= previous.sequence) return previous;
-  const state = { ...previous, sequence: event.sequence };
+  // 任意事件到达都刷新心跳；重放的历史事件（sequence 更小）在上面已提前返回，不会误刷新。
+  const state = { ...previous, sequence: event.sequence, lastEventAt: Date.now() };
   const payload = event.payload;
   const type = payload.type;
   if (type === "agent_start") { state.busy = true; state.phase = "thinking"; }
@@ -227,7 +233,7 @@ export function applyRpcEvent(previous: Conversation, event: RpcEvent): Conversa
     // 记录执行起止时间（pi TUI 同款 Elapsed / Took 的数据源）；事件间隔即本地时钟差。
     const startedAt = existing.startedAt ?? Date.now();
     const endedAt = type === "tool_execution_end" ? Date.now() : existing.endedAt;
-    state.tools = { ...previous.tools, [id]: { ...existing, result: type === "tool_execution_update" ? payload.partialResult : type === "tool_execution_end" ? payload.result : existing.result, running: type !== "tool_execution_end", isError: payload.isError === true, startedAt, endedAt } };
+    state.tools = { ...previous.tools, [id]: { ...existing, result: type === "tool_execution_update" ? payload.partialResult : type === "tool_execution_end" ? payload.result : existing.result, running: type !== "tool_execution_end", isError: payload.isError === true, startedAt, endedAt, lastUpdateAt: Date.now() } };
   }
   return state;
 }

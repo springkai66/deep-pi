@@ -28,6 +28,20 @@ describe("RPC conversation reducer", () => {
     state = applyRpcEvent(state, { sequence: 6, payload: { type: "agent_settled" } });
     expect(state.busy).toBe(false);
   });
+  it("stamps heartbeat timestamps on events and tool updates for activity display", () => {
+    let state = emptyConversation();
+    state = applyRpcEvent(state, { sequence: 1, payload: { type: "tool_execution_start", toolCallId: "t", toolName: "bash", args: { command: "sleep 600" } } });
+    expect(state.lastEventAt).toBeGreaterThan(0);
+    const firstStamp = state.tools.t.lastUpdateAt ?? 0;
+    expect(firstStamp).toBeGreaterThan(0);
+    state = applyRpcEvent(state, { sequence: 2, payload: { type: "tool_execution_update", toolCallId: "t", partialResult: { content: [{ type: "text", text: "out" }] } } });
+    // 本地时钟分辨率有限：两次打点时间可能相同，但绝不会倒退。
+    expect(state.tools.t.lastUpdateAt).toBeGreaterThanOrEqual(firstStamp);
+    // 重放的历史事件（sequence 更小）提前返回，不会误刷新心跳。
+    const before = state.lastEventAt;
+    state = applyRpcEvent(state, { sequence: 1, payload: { type: "tool_execution_update", toolCallId: "t", partialResult: { content: [{ type: "text", text: "replay" }] } } });
+    expect(state.lastEventAt).toBe(before);
+  });
   it("reports exits and rejects replayed events", () => {
     let state = applyRpcEvent(emptyConversation(), { sequence: 4, payload: { type: "rpc_exit", code: 1 } });
     state = applyRpcEvent(state, { sequence: 3, payload: { type: "agent_start" } });
