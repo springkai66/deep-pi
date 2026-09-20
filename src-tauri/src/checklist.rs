@@ -319,24 +319,22 @@ pub async fn open_checklist_window(app: AppHandle) -> Result<(), String> {
 fn build_checklist_window(app: &AppHandle) -> Result<(), String> {
     use tauri::{WebviewUrl, WebviewWindowBuilder};
 
-    let url_path: &str = if cfg!(dev) {
-        "checklist"
-    } else {
-        "checklist.html"
-    };
-    let window = WebviewWindowBuilder::new(app, CHECKLIST_LABEL, WebviewUrl::App(url_path.into()))
-        .title("DeepPi")
-        .decorations(false)
-        .resizable(true)
-        .minimizable(false)
-        .maximizable(false)
-        .closable(true)
-        .skip_taskbar(true)
-        .inner_size(760.0, 620.0)
-        .min_inner_size(560.0, 440.0)
-        .visible(false)
-        .build()
-        .map_err(|error| format!("failed to create checklist window: {error}"))?;
+    // 与看板同理：用无扩展名路由路径让 SvelteKit 客户端路由命中，
+    // Tauri 资产解析器会把 /checklist 回退到预渲染的 checklist.html。
+    let window =
+        WebviewWindowBuilder::new(app, CHECKLIST_LABEL, WebviewUrl::App("checklist".into()))
+            .title("DeepPi")
+            .decorations(false)
+            .resizable(true)
+            .minimizable(false)
+            .maximizable(false)
+            .closable(true)
+            .skip_taskbar(true)
+            .inner_size(760.0, 620.0)
+            .min_inner_size(560.0, 440.0)
+            .visible(false)
+            .build()
+            .map_err(|error| format!("failed to create checklist window: {error}"))?;
     let _ = window.show();
     let _ = window.set_focus();
     Ok(())

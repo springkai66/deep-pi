@@ -153,9 +153,10 @@ pub async fn open_board_window(app: AppHandle) -> Result<(), String> {
 }
 
 fn build_board_window(app: &AppHandle) -> Result<(), String> {
-    // dev 模式走 vite 开发服务器（/board 路由）；发布构建用预渲染出的 board.html。
-    let url_path: &str = if cfg!(dev) { "board" } else { "board.html" };
-    let board = WebviewWindowBuilder::new(app, BOARD_LABEL, WebviewUrl::App(url_path.into()))
+    // 必须用无扩展名路由路径：SvelteKit 客户端路由按 URL pathname 匹配，
+    // 加载 board.html 会因路径不匹配而渲染 404 页。Tauri 资产解析器对 /board
+    // 有 `{path}.html` 回退（tauri 2.x manager::get_asset），发布构建依然命中预渲染页。
+    let board = WebviewWindowBuilder::new(app, BOARD_LABEL, WebviewUrl::App("board".into()))
         .title("DeepPi")
         .decorations(false)
         .resizable(true)
