@@ -241,6 +241,10 @@ import type { ChatDetailLevel } from "./settings";
   let historyOffset = $state(0);
   let historySession = $state.raw<ReturnType<typeof createRpcHistorySession> | null>(null);
   let reconnect = $state(0);
+  /// 休眠会话：应用重启后直接点开的未启动 RPC 会话——不连进程、不占额度，
+  /// 输入提示词回车后才启动 pi；启动成功连接后自动发出草稿。
+  let dormant = $state(false);
+  let autoSendOnConnect = false;
   let generation = 0;
   let composing = false;
   /// 用户点过「重载会话」后，下一次模型列表加载成功时提示一次（非响应式标记）。
@@ -454,13 +458,11 @@ import type { ChatDetailLevel } from "./settings";
     return !next || next.message.role === "user";
   }
 
-  /// 轮末总执行时间：进行中显示 Elapsed（已用时），结束显示 Took（耗时）；无计时的历史轮返回空串。
+  /// 轮末总执行时间：结束后显示 Took（耗时）；进行中的当前轮由底部实时状态行
+  /// 显示行为状态与「本轮」耗时，不再重复显示「已用时」；无计时的历史轮返回空串。
   function turnTotalLabel(messageIndex: number): string {
     const turnNumber = turnNumberByMessageIndex.get(messageIndex);
     if (turnNumber === undefined) return "";
-    if (conversation.busy && turnNumber === runningTurn && turnStartedAt !== null) {
-      return t("已用时 {duration}", { duration: formatDuration(elapsedNow - turnStartedAt) });
-    }
     const recorded = turnDurations[turnDurationKey(turnNumber)];
     return recorded === undefined ? "" : t("耗时 {duration}", { duration: formatDuration(recorded) });
   }
@@ -666,10 +668,11 @@ import type { ChatDetailLevel } from "./settings";
       if (current === generation) workflowBusy = false;
     }
   }
-  const canSend = $derived(!switching && connected && !initializing && !stopping && !conversation.closed && canSubmitPrompt(sending, draft));
+  const canSend = $derived(!switching && (connected || dormant) && !initializing && !stopping && !conversation.closed && canSubmitPrompt(sending, draft));
   /// 发送按钮提示：执行中说明本条消息将按所选方式引导/排队，而非开启新回复。
   const sendHint = $derived(
-    conversation.busy
+    dormant ? t("启动会话并发送")
+      : conversation.busy
       ? streamingBehavior === "steer" ? t("执行中：本条将在当前工具调用后优先引导") : t("执行中：本条将排队，本轮结束后执行")
       : t("发送消息"),
   );
@@ -716,6 +719,7 @@ import type { ChatDetailLevel } from "./settings";
   const statusText = $derived.by(() => {
     if (compacting) return t("正在压缩上下文");
     if (switching) return t("正在切换模式");
+    if (dormant) return t("未启动");
     if (conversation.closed) return t("已停止");
     if (initializing) return t("连接中");
     if (!connected) return t("未连接");
@@ -733,6 +737,11 @@ import type { ChatDetailLevel } from "./settings";
     }
     return `${text}${turnPart}`;
   });
+  /// 对话底部的实时状态行：AI 行为状态 + 本轮耗时，原输入框操作行状态栏迁入此处；
+  /// 仅在 AI 实际忙硌（生成/执行工具/压缩）时显示，空闲与停止时不占位。
+  const liveStatusVisible = $derived(
+    connected && !initializing && !dormant && !conversation.closed && (conversation.busy || compacting),
+  );
   /// 工具长时间无输出：状态栏文字转琥珀色 + 停止按钮高亮，提示用户可中断。
   const toolStalled = $derived(activeTool !== null && outputActivity(activeTool, elapsedNow) === "stale");
   const canEnhance = $derived(connected && !switching && !conversation.busy && !conversation.closed && !!draft.trim() && !enhancing);
@@ -872,7 +881,15 @@ import type { ChatDetailLevel } from "./settings";
     conversation = emptyConversation();
     historyOffset = 0;
     error = "";
-    if (!run) { initializing = false; conversation = { ...emptyConversation(), closed: true }; return; }
+    if (!run) {
+      // 未启动的休眠会话：不连进程、不加载历史（快照由 pi 进程提供），
+      // 输入框保持可用；回车发送时才启动。
+      initializing = false;
+      dormant = true;
+      conversation = emptyConversation();
+      return;
+    }
+    dormant = false;
     const historyReader = createRpcHistorySession(invoke, id, run);
     historySession = historyReader;
     const call = <T,>(command: Record<string, unknown>) =>
@@ -924,6 +941,8 @@ import type { ChatDetailLevel } from "./settings";
         onActivity(next.busy);
         refreshStats();
         void applySavedModelChoice(history.messages.length, next.busy, () => alive);
+        // 回车启动的休眠会话：连接就绪（含历史加载与模型恢复）后自动发出草稿。
+        if (autoSendOnConnect && alive) { autoSendOnConnect = false; void send(); }
       } catch (cause) {
         if (alive) error = tm(String(cause));
       } finally {
@@ -1301,6 +1320,14 @@ import type { ChatDetailLevel } from "./settings";
   /// 粘贴的图片附件以 RPC `images` 字段（ImageContent：base64 + mimeType）随消息一并发送。
   async function send() {
     if (!canSend) return;
+    if (dormant) {
+      // 第一条提示词即启动信号：保留草稿，交父组件启动 pi，连接就绪后自动发送。
+      // 启动失败时草稿留在输入框、错误提示可见，可直接重试。
+      if (!onReloadSession) return;
+      autoSendOnConnect = true;
+      onReloadSession();
+      return;
+    }
     const text = draft;
     const images = attachments.map((file) => ({ type: "image", data: file.data, mimeType: file.mimeType }));
     const current = generation;
@@ -1548,9 +1575,17 @@ import type { ChatDetailLevel } from "./settings";
         </details>
       {/each}
     {/if}
+    {#if liveStatusVisible}
+      <p class="turn-total live-status" role="status" class:stalled={toolStalled}>
+        {#if activeTool}<span class="activity-dot {outputActivity(activeTool, elapsedNow)}" aria-hidden="true"></span>{/if}
+        {statusText}
+      </p>
+    {/if}
     {#if initializing}<p role="status">{t("正在连接 Pi 会话…")}</p>{/if}
     {#if !initializing && !visibleEntries.length && !error}
-      <div class="empty-conversation"><Bot size={28} /><h2>{title}</h2></div>
+      <div class="empty-conversation"><Bot size={28} /><h2>{title}</h2>
+        {#if dormant}<p class="empty-hint">{t("输入提示词并回车，启动会话")}</p>{/if}
+      </div>
     {/if}
     </div>
   </div>
@@ -1635,7 +1670,7 @@ import type { ChatDetailLevel } from "./settings";
     {/if}
     {#if attachmentError}<p class="attachment-error" role="alert">{attachmentError}</p>{/if}
     <textarea bind:this={input} bind:value={draft} rows="3" maxlength="131072" aria-keyshortcuts={shortcutAria("composer")}
-      aria-label={t("发送给 Pi")} placeholder={conversation.closed ? t("会话已停止") : conversation.busy ? t("AI 执行中，可继续发送新消息") : t("发送消息")}
+      aria-label={t("发送给 Pi")} placeholder={dormant ? t("输入提示词并回车，启动会话") : conversation.closed ? t("会话已停止") : conversation.busy ? t("AI 执行中，可继续发送新消息") : t("发送消息")}
       disabled={conversation.closed}
       oncompositionstart={() => { composing = true; }} oncompositionend={() => { composing = false; }}
       onpaste={onComposerPaste}
@@ -1644,10 +1679,6 @@ import type { ChatDetailLevel } from "./settings";
         if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void send(); }
       }}></textarea>
     <div class="composer-actions">
-      <button type="button" class="send-button" title={t("增强提示词（改写为更清晰的结构化提示）")} aria-label={t("增强提示词")}
-        disabled={!canEnhance} onclick={() => void enhanceDraft()}>
-        {#if enhancing}<span class="spin"><RefreshCw size={14} /></span>{:else}<Sparkles size={15} />{/if}
-      </button>
       {#if models.length}
         <select aria-label={t("对话模型")} value={selectedModel} disabled={switching || !connected || changingModel}
           title={conversation.busy ? t("当前回复生成中；改动对下一条消息生效") : undefined}
@@ -1715,10 +1746,10 @@ import type { ChatDetailLevel } from "./settings";
         </select>
         <small class="workflow-hint" title={t("技能安装后按任务自动激活；选中工作流只把站点的起手提示填进输入框")}>{t("技能安装后按任务自动激活；选中工作流只把站点的起手提示填进输入框")}</small>
       {/if}
-      <span class="connection-status" role="status" class:stalled={toolStalled}>
-        {#if activeTool}<span class="activity-dot {outputActivity(activeTool, elapsedNow)}" aria-hidden="true"></span>{/if}
-        {statusText}
-      </span>
+      <button type="button" class="send-button" title={t("增强提示词（改写为更清晰的结构化提示）")} aria-label={t("增强提示词")}
+        disabled={!canEnhance} onclick={() => void enhanceDraft()}>
+        {#if enhancing}<span class="spin"><RefreshCw size={14} /></span>{:else}<Sparkles size={15} />{/if}
+      </button>
       {#if conversation.busy || conversation.queue.length}
         <button type="button" class="send-button stop-button" class:stalled={toolStalled} disabled={switching || stopping} title={t("停止当前响应并清空队列")} aria-label={t("停止当前响应并清空队列")} onclick={() => void interrupt()}><Square size={16} /></button>
       {/if}
@@ -1796,6 +1827,7 @@ import type { ChatDetailLevel } from "./settings";
   .tool-call-state { margin-left: auto; flex-shrink: 0; color: var(--text-muted); font-family: var(--code-font); font-size: 11px; white-space: nowrap; }
   pre { overflow: auto; max-height: 280px; font: 12px/1.5 var(--code-font); tab-size: 4; }
   .empty-conversation { display: grid; place-content: center; justify-items: center; min-height: 180px; color: var(--text-muted); }
+  .empty-hint { margin: 8px 0 0; font-size: 12px; }
   h2 { font-size: 16px; font-weight: 500; overflow-wrap: anywhere; }
   /* 指令坞：常规流式布局的磨砂胶囊——会话内容始终结束于输入框上方，错误与提示条排在输入框上方，不会被遮挡。 */
   .composer {
@@ -1839,8 +1871,10 @@ import type { ChatDetailLevel } from "./settings";
   .context-ring:hover:not(:disabled) .ring-fg { stroke: var(--accent); filter: brightness(1.15); }
   select { min-width: 0; max-width: 130px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface-alt); padding: 4px; color: var(--text-muted); font-size: 11px; }
   .workflow-hint { flex: 0 1 auto; min-width: 0; max-width: 240px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--text-muted); font-size: 10px; }
-  .connection-status { display: inline-flex; align-items: center; gap: 6px; flex: 1; min-width: 0; font-size: 11px; color: var(--text-muted); white-space: nowrap; overflow: hidden; }
-  .connection-status.stalled { color: #d8a04a; }
+  /* AI 行为状态与耗时：迁入对话流底部（turn-total 同位置），不再显示在输入框操作行。 */
+  .live-status { display: flex; align-items: center; gap: 6px; }
+  .live-status.stalled { color: #d8a04a; }
+  .primary-send { margin-left: auto; }
   .send-button { display: grid; place-items: center; width: 30px; height: 30px; padding: 0; flex-shrink: 0; border: 0; border-radius: 4px; background: var(--surface-hover); color: var(--text); }
   /* 停止按钮：红色醒目，与增强/发送按钮区分；紧跟在发送按钮左侧。 */
   .send-button.stop-button { background: color-mix(in srgb, var(--status-failed) 18%, var(--surface-hover)); color: var(--status-failed); }
@@ -1862,21 +1896,21 @@ import type { ChatDetailLevel } from "./settings";
   .restore-draft { flex-shrink: 0; padding: 6px 10px; margin: 4px 16px 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); color: var(--text); }
   .more-history { display: block; width: max-content; padding: 6px 10px; margin: 4px auto 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); color: var(--text); }
   .turn-nav { position: relative; display: flex; align-items: center; min-width: 0; flex: 0 1 auto; }
-  header .turn-trigger { display: flex; align-items: center; gap: 5px; width: auto; height: 24px; max-width: 240px; padding: 0 8px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-alt); color: var(--text-muted); font-size: 11px; }
-  header .turn-trigger:hover, header .turn-trigger[aria-expanded="true"] { background: var(--surface-hover); border-color: var(--border-strong); color: var(--text); }
+  .turn-trigger { display: flex; align-items: center; gap: 5px; width: auto; height: 24px; max-width: 240px; padding: 0 8px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-alt); color: var(--text-muted); font-size: 11px; }
+  .turn-trigger:hover, .turn-trigger[aria-expanded="true"] { background: var(--surface-hover); border-color: var(--border-strong); color: var(--text); }
   .turn-label { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-  .turn-panel { position: absolute; top: calc(100% + 6px); right: 0; z-index: 14; width: 300px; max-width: min(320px, 90vw); max-height: 340px; overflow-y: auto; overflow-x: hidden; padding: 6px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--surface-raised); box-shadow: 0 10px 26px #0006; }
+  .turn-panel { position: absolute; top: calc(100% + 6px); right: 0; z-index: 40; width: 300px; max-width: min(320px, 90vw); max-height: 340px; overflow-y: auto; overflow-x: hidden; padding: 6px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--surface-raised); box-shadow: 0 10px 26px #0006; }
   .turn-panel-head { margin: 0; padding: 4px 8px 6px; color: var(--text-muted); font-size: 10px; }
   .turn-panel ul { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 0; list-style: none; }
-  header .turn-panel button { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; column-gap: 8px; row-gap: 1px; width: 100%; height: auto; padding: 6px 8px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--text); font-size: 11px; line-height: 1.4; text-align: left; }
-  header .turn-panel button:hover { background: var(--surface-hover); }
-  header .turn-panel button.active { border-color: var(--accent); background: var(--surface-alt); }
-  .turn-no { color: var(--accent); font-family: var(--code-font); }
-  .turn-body { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
-  .turn-summary { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--text-muted); }
-  header .turn-panel button.active .turn-summary { color: var(--text-strong); }
-  .turn-duration { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--text-muted); opacity: .75; font-size: 10px; line-height: 1.2; }
-  .turn-time { color: var(--text-muted); font-size: 10px; white-space: nowrap; }
+  .turn-panel button { display: flex; align-items: flex-start; gap: 8px; width: 100%; padding: 6px 8px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--text); font: inherit; font-size: 11px; line-height: 1.4; text-align: left; cursor: pointer; }
+  .turn-panel button:hover { background: var(--surface-hover); }
+  .turn-panel button.active { border-color: var(--accent); background: var(--surface-alt); }
+  .turn-no { flex-shrink: 0; min-width: 20px; color: var(--accent); font-family: var(--code-font); }
+  .turn-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+  .turn-summary { min-width: 0; white-space: normal; word-break: break-word; color: var(--text-muted); }
+  .turn-panel button.active .turn-summary { color: var(--text-strong); }
+  .turn-duration { white-space: normal; color: var(--text-muted); opacity: .75; font-size: 10px; line-height: 1.2; }
+  .turn-time { flex-shrink: 0; margin-left: auto; color: var(--text-muted); font-size: 10px; white-space: nowrap; }
   .turn-rail { position: absolute; top: 50%; right: 6px; transform: translateY(-50%); z-index: 3; display: flex; flex-direction: column; align-items: center; gap: 6px; max-height: calc(100% - 24px); overflow-y: auto; padding: 4px 2px; }
   .turn-dot { width: 8px; height: 8px; flex-shrink: 0; padding: 0; border: 0; border-radius: 999px; background: var(--border-strong); opacity: .75; transition: background .15s ease, height .15s ease, opacity .15s ease; }
   @media (max-width: 620px) { .transcript { padding: 12px; } .composer { margin: 8px auto 8px; width: calc(100% - 16px); } }
@@ -1887,6 +1921,6 @@ import type { ChatDetailLevel } from "./settings";
     .model-name, .turn-label { display: none; }
     .stats summary { gap: 4px; padding: 2px; }
     .stats summary .hit, .stats summary .cost { display: none; }
-    header .turn-trigger { padding: 0 4px; }
+    .turn-trigger { padding: 0 4px; }
   }
 </style>

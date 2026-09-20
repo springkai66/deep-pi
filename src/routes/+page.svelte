@@ -848,8 +848,13 @@
       if (project && selectedProjectId !== project.id) selectProject(project);
     }
     if (!terminalTaskIds.includes(task.id)) {
-      showError(t("该任务没有活动终端，请先重启任务"));
-      return;
+      // RPC 会话支持「未启动」状态：直接打开（休眠态，不占进程/额度），
+      // 输入提示词回车后才真正启动 pi；TUI 终端仍需要活动进程。
+      if (task.interactionMode !== "rpc") {
+        showError(t("该任务没有活动终端，请先重启任务"));
+        return;
+      }
+      terminalTaskIds.push(task.id);
     }
     applyPaneSelection(
       openPane({

@@ -95,6 +95,9 @@ export const EN_CHAT: Record<string, string> = {
   // —— 对话面板：输入区 ——
   "发送给 Pi": "Send to Pi",
   "会话已停止": "Session stopped",
+  "未启动": "Not started",
+  "输入提示词并回车，启动会话": "Type a prompt and press Enter to start the session",
+  "启动会话并发送": "Start session and send",
   "发送消息": "Send a message",
   "最多附加 {count} 张图片": "Up to {count} images per message",
   "图片格式不支持：仅支持 PNG、JPEG、GIF、WebP": "Unsupported image format: PNG, JPEG, GIF, and WebP only",
