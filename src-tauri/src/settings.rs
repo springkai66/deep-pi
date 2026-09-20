@@ -511,7 +511,6 @@ mod tests {
 
     #[test]
     /// chatDetailLevel：缺省回落 standard，未知值收敛，合法值原样保留。
-    #[test]
     fn chat_detail_level_defaults_and_rejects_unknown_values() {
         let base = serde_json::json!({
             "schemaVersion": 1, "maxConcurrentTasks": 3, "lastProject": null,
