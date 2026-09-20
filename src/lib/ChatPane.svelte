@@ -12,6 +12,7 @@ import type { ChatDetailLevel } from "./settings";
   import { messageSource } from "./message-parts";
   import { formatDuration } from "./duration";
   import { createDormantHistorySession, createRpcHistorySession, prependRpcHistory } from "./rpc-history";
+  import { BUILTIN_SLASH_COMMANDS, filterSlashCommands, parseSlashCommand, slashSourceLabel, type PiCommand, type SlashCommand } from "./slash-commands";
   import { shortcutAria } from "./shortcuts";
   import { t, tm } from "$lib/i18n.svelte";
 
@@ -62,6 +63,20 @@ import type { ChatDetailLevel } from "./settings";
   let stopping = $state(false);
   let error = $state("");
   let notice = $state("");
+  /// 输入框 `/` 命令建议：连接后从 pi 拉取扩展/模板/技能命令，与内置命令合并。
+  let piCommands = $state<PiCommand[]>([]);
+  let slashIndex = $state(0);
+  let slashDismissed = $state(false);
+  const slashQuery = $derived.by(() => {
+    const match = /^\/([^\s]*)$/.exec(draft);
+    return match ? match[1] : null;
+  });
+  const slashItems = $derived(slashQuery !== null && !slashDismissed
+    ? filterSlashCommands(slashQuery, piCommands)
+    : []);
+  // 建议列表变化时回到第一项；查询变化时重新打开被 Esc 关闭的列表。
+  $effect(() => { void slashItems; slashIndex = 0; });
+  $effect(() => { void slashQuery; slashDismissed = false; });
   let modelName = $state("");
   let models = $state<{ id: string; provider: string; name: string }[]>([]);
   /// 模型列表读取失败与「确实无模型」分开提示：失败时显示错误与重试/重载入口。
@@ -876,6 +891,7 @@ import type { ChatDetailLevel } from "./settings";
     modelsLoadFailed = false;
     modelsLoadError = "";
     modelsStale = false;
+    piCommands = [];
     modelName = "";
     selectedModel = "";
     conversation = emptyConversation();
@@ -967,6 +983,22 @@ import type { ChatDetailLevel } from "./settings";
         thinkingLevel = typeof state.thinkingLevel === "string" ? state.thinkingLevel : "";
         onActivity(next.busy);
         refreshStats();
+        // pi 的扩展命令、提示词模板与技能命令：输入 `/` 时与内置命令一起建议，
+        // 发送后由 pi 的 prompt 管道展开执行。
+        void call<Record<string, unknown>>({ type: "get_commands" }).then((result) => {
+          if (!alive) return;
+          const list = Array.isArray(result.commands) ? result.commands : [];
+          piCommands = list.flatMap((item) => {
+            const value = record(item);
+            const name = typeof value.name === "string" ? value.name.trim() : "";
+            if (!name) return [];
+            return [{
+              name,
+              description: typeof value.description === "string" ? value.description : "",
+              source: typeof value.source === "string" ? value.source : "extension",
+            }];
+          });
+        }).catch(() => {});
         void applySavedModelChoice(history.messages.length, next.busy, () => alive);
         // 回车启动的休眠会话：连接就绪（含历史加载与模型恢复）后自动发出草稿。
         if (autoSendOnConnect && alive) { autoSendOnConnect = false; void send(); }
@@ -1343,11 +1375,127 @@ import type { ChatDetailLevel } from "./settings";
     }
   }
 
+  /// 把 /model 参数解析为 `provider/id`：支持完整键、唯一模型 id、唯一显示名。
+  function resolveModelChoice(args: string): string | null {
+    const value = args.trim();
+    if (!value) return null;
+    const exact = models.find((model) => `${model.provider}/${model.id}` === value);
+    if (exact) return `${exact.provider}/${exact.id}`;
+    const byId = models.filter((model) => model.id === value);
+    if (byId.length === 1) return `${byId[0].provider}/${byId[0].id}`;
+    const byName = models.filter((model) => model.name === value);
+    if (byName.length === 1) return `${byName[0].provider}/${byName[0].id}`;
+    return null;
+  }
+
+  /// 选中命令建议：填入 `/name ` 保留参数位置，由回车触发执行/发送。
+  function acceptSlash(item: SlashCommand) {
+    draft = `/${item.name} `;
+    slashDismissed = true;
+    void tick().then(() => input?.focus());
+  }
+
+  function moveSlash(delta: number) {
+    if (!slashItems.length) return;
+    slashIndex = (slashIndex + delta + slashItems.length) % slashItems.length;
+  }
+
+  /// 执行 `/` 命令：内置命令映射到 RPC/界面动作，pi 命令交由 prompt 管道展开。
+  /// 返回 "blocked" 时保留草稿（错误提示可读、可直接改）。
+  async function runSlashCommand(name: string, args: string): Promise<"handled" | "prompt" | "blocked"> {
+    const builtin = BUILTIN_SLASH_COMMANDS.find((command) => command.name === name);
+    if (builtin) {
+      if (!builtin.available) { notice = t("该命令仅在终端兼容模式可用"); return "blocked"; }
+      if (!connected || conversation.closed) { notice = t("请先启动会话后再使用命令"); return "blocked"; }
+      const scope = `rpc:${taskId}:${runId}`;
+      try {
+        switch (name) {
+          case "compact": await compactContext(); break;
+          case "model": {
+            if (args) {
+              const value = resolveModelChoice(args);
+              if (!value) { notice = t("未找到模型「{name}」；可用 /model 查看列表", { name: args }); return "blocked"; }
+              await changeModel(value);
+            } else {
+              const value = await onDialog({ scope, kind: "choice", title: t("选择模型"),
+                message: t("选择本会话使用的模型。"),
+                choices: models.map((model) => ({ value: `${model.provider}/${model.id}`, label: `${model.name} · ${model.provider}` })) });
+              if (typeof value === "string") await changeModel(value);
+            }
+            break;
+          }
+          case "thinking": {
+            if (args) {
+              if (!thinkingLevels.includes(args)) {
+                notice = t("未知推理强度「{level}」；可用值：{levels}", { level: args, levels: thinkingLevels.join(" / ") || t("无") });
+                return "blocked";
+              }
+              await changeThinkingLevel(args);
+            } else if (thinkingLevels.length) {
+              const value = await onDialog({ scope, kind: "choice", title: t("选择推理强度"),
+                message: t("选择本会话使用的推理强度。"),
+                choices: thinkingLevels.map((level) => ({ value: level, label: level })) });
+              if (typeof value === "string") await changeThinkingLevel(value);
+            } else {
+              notice = t("当前模型没有可用的推理强度");
+              return "blocked";
+            }
+            break;
+          }
+          case "name": {
+            if (!args) { notice = t("用法：/name <会话名称>"); return "blocked"; }
+            await call({ type: "set_session_name", name: args });
+            onAutoRename(args);
+            notice = t("会话已重命名为「{name}」", { name: args });
+            break;
+          }
+          case "copy": {
+            const result = await call<Record<string, unknown>>({ type: "get_last_assistant_text" });
+            const text = typeof result.text === "string" ? result.text : "";
+            if (!text) { notice = t("没有可复制的回复"); return "blocked"; }
+            await navigator.clipboard.writeText(text);
+            notice = t("已复制最后一条回复");
+            break;
+          }
+          case "session": {
+            const parts = [t("会话 {id}", { id: taskId }), t("{count} 条消息", { count: conversation.messages.length })];
+            const tokens = sessionStats?.tokens;
+            if (tokens) parts.push(`↑${formatTokens(tokens.input)} ↓${formatTokens(tokens.output)}`);
+            if (sessionStats?.cost !== null && sessionStats?.cost !== undefined) parts.push(formatCost(sessionStats.cost));
+            notice = parts.join(" · ");
+            break;
+          }
+          case "export": {
+            const result = await call<Record<string, unknown>>({ type: "export_html" });
+            const path = typeof result.path === "string" ? result.path : "";
+            notice = path ? t("已导出会话：{path}", { path }) : t("已导出会话");
+            break;
+          }
+          case "tree": turnMenuOpen = true; break;
+          default: notice = t("该命令仅在终端兼容模式可用"); return "blocked";
+        }
+        draft = "";
+        return "handled";
+      } catch (cause) {
+        commandError(cause);
+        return "handled";
+      }
+    }
+    if (piCommands.some((command) => command.name === name)) return "prompt";
+    notice = t("未知命令 /{name}；输入 / 查看可用命令", { name });
+    return "blocked";
+  }
+
   /// 发送语义：空闲时作为新提示；AI 执行中由后端按 streamingBehavior 处理
   /// （steer=当前工具调用后优先引导，followUp=本轮结束后排队执行），因此执行中也可连续发送。
   /// 粘贴的图片附件以 RPC `images` 字段（ImageContent：base64 + mimeType）随消息一并发送。
   async function send() {
     if (!canSend) return;
+    const command = parseSlashCommand(draft);
+    if (command) {
+      const outcome = await runSlashCommand(command.name, command.args);
+      if (outcome !== "prompt") return;
+    }
     if (dormant) {
       // 第一条提示词即启动信号：保留草稿，交父组件启动 pi，连接就绪后自动发送。
       // 启动失败时草稿留在输入框、错误提示可见，可直接重试。
@@ -1697,13 +1845,34 @@ import type { ChatDetailLevel } from "./settings";
       </div>
     {/if}
     {#if attachmentError}<p class="attachment-error" role="alert">{attachmentError}</p>{/if}
+    {#if slashItems.length}
+      <ul class="slash-menu" role="listbox" aria-label={t("命令建议")}>
+        {#each slashItems as item, index (`${item.source}:${item.name}`)}
+          <li role="option" aria-selected={index === slashIndex}>
+            <button type="button" class:active={index === slashIndex}
+              onmousedown={(event) => { event.preventDefault(); acceptSlash(item); }}>
+              <span class="slash-name">/{item.name}</span>
+              <span class="slash-desc">{t(item.description)}</span>
+              <span class="slash-source" class:terminal={!item.available}>{slashSourceLabel(item)}</span>
+            </button>
+          </li>
+        {/each}
+      </ul>
+    {/if}
     <textarea bind:this={input} bind:value={draft} rows="3" maxlength="131072" aria-keyshortcuts={shortcutAria("composer")}
-      aria-label={t("发送给 Pi")} placeholder={dormant ? t("输入提示词并回车，启动会话") : conversation.closed ? t("会话已停止") : conversation.busy ? t("AI 执行中，可继续发送新消息") : t("发送消息")}
+      aria-label={t("发送给 Pi")} placeholder={dormant ? t("输入提示词并回车，启动会话") : conversation.closed ? t("会话已停止") : conversation.busy ? t("AI 执行中，可继续发送新消息") : t("发送消息；输入 / 使用命令")}
       disabled={conversation.closed}
       oncompositionstart={() => { composing = true; }} oncompositionend={() => { composing = false; }}
       onpaste={onComposerPaste}
       onkeydown={(event) => {
         if (event.isComposing || composing) return;
+        // 命令建议弹层打开时，方向键/回车/Tab/Esc 先交给弹层。
+        if (slashItems.length) {
+          if (event.key === "ArrowDown") { event.preventDefault(); moveSlash(1); return; }
+          if (event.key === "ArrowUp") { event.preventDefault(); moveSlash(-1); return; }
+          if (event.key === "Enter" || event.key === "Tab") { event.preventDefault(); acceptSlash(slashItems[Math.min(slashIndex, slashItems.length - 1)]); return; }
+          if (event.key === "Escape") { event.preventDefault(); slashDismissed = true; return; }
+        }
         if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void send(); }
       }}></textarea>
     <div class="composer-actions">
@@ -1774,14 +1943,16 @@ import type { ChatDetailLevel } from "./settings";
         </select>
         <small class="workflow-hint" title={t("技能安装后按任务自动激活；选中工作流只把站点的起手提示填进输入框")}>{t("技能安装后按任务自动激活；选中工作流只把站点的起手提示填进输入框")}</small>
       {/if}
-      <button type="button" class="send-button" title={t("增强提示词（改写为更清晰的结构化提示）")} aria-label={t("增强提示词")}
-        disabled={!canEnhance} onclick={() => void enhanceDraft()}>
-        {#if enhancing}<span class="spin"><RefreshCw size={14} /></span>{:else}<Sparkles size={15} />{/if}
-      </button>
-      {#if conversation.busy || conversation.queue.length}
-        <button type="button" class="send-button stop-button" class:stalled={toolStalled} disabled={switching || stopping} title={t("停止当前响应并清空队列")} aria-label={t("停止当前响应并清空队列")} onclick={() => void interrupt()}><Square size={16} /></button>
-      {/if}
-      <button type="submit" class="send-button primary-send" disabled={!canSend} title={sendHint} aria-label={sendHint}><ArrowUp size={18} /></button>
+      <div class="primary-actions">
+        <button type="button" class="send-button" title={t("增强提示词（改写为更清晰的结构化提示）")} aria-label={t("增强提示词")}
+          disabled={!canEnhance} onclick={() => void enhanceDraft()}>
+          {#if enhancing}<span class="spin"><RefreshCw size={14} /></span>{:else}<Sparkles size={15} />{/if}
+        </button>
+        {#if conversation.busy || conversation.queue.length}
+          <button type="button" class="send-button stop-button" class:stalled={toolStalled} disabled={switching || stopping} title={t("停止当前响应并清空队列")} aria-label={t("停止当前响应并清空队列")} onclick={() => void interrupt()}><Square size={16} /></button>
+        {/if}
+        <button type="submit" class="send-button primary-send" disabled={!canSend} title={sendHint} aria-label={sendHint}><ArrowUp size={18} /></button>
+      </div>
     </div>
   </form>
 </section>
@@ -1859,6 +2030,7 @@ import type { ChatDetailLevel } from "./settings";
   h2 { font-size: 16px; font-weight: 500; overflow-wrap: anywhere; }
   /* 指令坞：常规流式布局的磨砂胶囊——会话内容始终结束于输入框上方，错误与提示条排在输入框上方，不会被遮挡。 */
   .composer {
+    position: relative;
     flex-shrink: 0;
     width: min(760px, calc(100% - 32px));
     margin: 0 auto 16px;
@@ -1868,6 +2040,21 @@ import type { ChatDetailLevel } from "./settings";
     background: color-mix(in srgb, var(--surface) 88%, transparent);
     box-shadow: 0 10px 30px #0006;
   }
+  /* `/` 命令建议：浮于输入框上方，不挤压布局。 */
+  .slash-menu {
+    position: absolute; left: 6px; right: 6px; bottom: calc(100% + 6px); z-index: 24;
+    max-height: 264px; overflow-y: auto; margin: 0; padding: 4px; list-style: none;
+    border: 1px solid var(--border-strong); border-radius: 8px; background: var(--surface-raised);
+    box-shadow: 0 10px 28px #0007;
+  }
+  .slash-menu button { display: flex; align-items: baseline; gap: 8px; width: 100%; padding: 6px 8px; border: 0; border-radius: 5px; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
+  .slash-menu button.active, .slash-menu button:hover { background: var(--surface-hover); }
+  .slash-name { flex-shrink: 0; font-family: var(--code-font); font-size: 12px; color: var(--accent); }
+  .slash-desc { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 11px; color: var(--text-muted); }
+  .slash-source { flex-shrink: 0; padding: 1px 6px; border: 1px solid var(--border); border-radius: 999px; font-size: 10px; color: var(--text-muted); }
+  .slash-source.terminal { opacity: .65; }
+  /* 三个主操作（增强/停止/发送）统一靠右。 */
+  .primary-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; margin-left: auto; }
   .composer-actions { display: flex; align-items: center; gap: 8px; margin-top: 4px; padding: 6px 2px 2px; border-top: 1px solid color-mix(in srgb, var(--text) 8%, transparent); }
   /* 粘贴/拖入的图片附件：缩略图胶囊；拖拽悬停时输入框高亮。 */
   .composer.dragging { border-color: var(--accent); box-shadow: 0 10px 30px #0006, 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent); }
@@ -1902,9 +2089,7 @@ import type { ChatDetailLevel } from "./settings";
   /* AI 行为状态与耗时：迁入对话流底部（turn-total 同位置），不再显示在输入框操作行。 */
   .live-status { display: flex; align-items: center; gap: 6px; }
   .live-status.stalled { color: #d8a04a; }
-  .primary-send { margin-left: auto; }
   .send-button { display: grid; place-items: center; width: 30px; height: 30px; padding: 0; flex-shrink: 0; border: 0; border-radius: 4px; background: var(--surface-hover); color: var(--text); }
-  /* 停止按钮：红色醒目，与增强/发送按钮区分；紧跟在发送按钮左侧。 */
   .send-button.stop-button { background: color-mix(in srgb, var(--status-failed) 18%, var(--surface-hover)); color: var(--status-failed); }
   /* 工具长时间无输出：停止按钮琥珀色呼吸，就近提示可中断。 */
   .send-button.stalled { background: color-mix(in srgb, #d8a04a 22%, var(--surface-hover)); color: #d8a04a; animation: activity-pulse 1.6s ease-in-out infinite; }

@@ -279,6 +279,8 @@ fn validate_command(command: &Value) -> Result<&str, String> {
             | "set_thinking_level"
             | "get_available_thinking_levels"
             | "get_session_stats"
+            | "get_last_assistant_text"
+            | "export_html"
             | "clear_queue"
             | "abort"
             | "extension_ui_response"
@@ -316,9 +318,11 @@ pub async fn rpc_command(
             let reply = transport.request_with_cursor(command, Duration::from_secs(30))?;
             return Ok(json!({"messages":reply.data["messages"],"eventSequence":reply.sequence}));
         }
-        // 压缩上下文可能要等模型总结整段历史，放长超时；其余命令保持 30 秒。
-        let timeout = if kind == "compact" {
+        // 压缩上下文可能要等模型总结整段历史，导出也可能处理大历史，放长超时；其余命令保持 30 秒。
+        let timeout = if kind == "compact" || kind == "export_html" {
             Duration::from_secs(300)
+        } else if kind == "get_last_assistant_text" {
+            Duration::from_secs(10)
         } else {
             Duration::from_secs(30)
         };

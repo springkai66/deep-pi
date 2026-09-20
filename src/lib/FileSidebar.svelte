@@ -82,7 +82,7 @@
     refreshTimer = setTimeout(() => {
       if (!visible) return;
       if (loading) refreshAgain = true;
-      else void refresh();
+      else void refresh(project, false, entries.length > 0); // 已有内容时静默刷新，避免监听事件造成可见重载
     }, 250);
   }
   $effect(() => {
@@ -142,7 +142,7 @@
   });
   onDestroy(() => { generation++; clearTimeout(debounce); clearTimeout(refreshTimer); contentSearch.cancel(); });
 
-  async function refresh(selected = project, reset = false) {
+  async function refresh(selected = project, reset = false, silent = false) {
     const current = ++generation;
     pending = new Set();
     loaded = new Set();
@@ -158,7 +158,7 @@
     incomplete = false;
     unreadable = [];
     if (!selected || !isTauri()) { loading = false; return; }
-    loading = true;
+    if (!silent) loading = true;
     try {
       const result = await invoke<FileIndex>("list_project_files", {
         projectId: selected.id, relativePath: "", recursive: true,
@@ -172,7 +172,7 @@
       if (current === generation) error = tm(String(cause));
     } finally {
       if (current === generation) {
-        loading = false;
+        if (!silent) loading = false;
         if (refreshAgain) { refreshAgain = false; scheduleRefresh(); }
       }
     }
@@ -372,7 +372,7 @@
   .file-tree button { display: flex; align-items: center; gap: 5px; width: 100%; height: 28px; padding-right: 8px; border: 0; color: var(--text); background: transparent; text-align: left; cursor: pointer; }
   .file-tree button:hover, .file-tree button.active { background: var(--surface-hover); }
   .file-tree :global(svg), .indent { flex-shrink: 0; }
-  .filename { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .filename { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .indent { width: 12px; }
   footer { padding: 8px 10px; border-top: 1px solid var(--border); font-size: 11px; color: var(--text-muted); }
 </style>

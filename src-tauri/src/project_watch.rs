@@ -18,6 +18,9 @@ const FILES: u8 = 1;
 const GIT: u8 = 2;
 const FAILED: u8 = 4;
 const LEASE_TIME: Duration = Duration::from_secs(300);
+/// 兜底全量重扫间隔：原生目录通知在部分 Windows 文件系统上可能溢出或静默失效，
+/// 需要定期全量重扫兜底；间隔太短会让文件树/变更栏周期性无谓刷新。
+const RECONCILE_INTERVAL: Duration = Duration::from_secs(300);
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -97,6 +100,16 @@ impl ProjectWatch {
         id: &str,
         emit: impl Fn(WatchEvent) -> bool + Send + 'static,
     ) -> Result<Self, String> {
+        Self::start_with_interval(root, project, id, RECONCILE_INTERVAL, emit)
+    }
+
+    fn start_with_interval(
+        root: &Path,
+        project: &str,
+        id: &str,
+        reconcile_interval: Duration,
+        emit: impl Fn(WatchEvent) -> bool + Send + 'static,
+    ) -> Result<Self, String> {
         let guard = GuardedPath::open(root, "", true)?;
         let identity = guard.identity()?;
         let flags = Arc::new(AtomicU8::new(0));
@@ -144,7 +157,7 @@ impl ProjectWatch {
                     }
                     let mut bits = flags.swap(0, Ordering::AcqRel);
                     // Native directory notifications can overflow or stop silently on some Windows filesystems.
-                    if reconciled.elapsed() >= Duration::from_secs(30) {
+                    if reconciled.elapsed() >= reconcile_interval {
                         bits |= FILES | GIT;
                         reconciled = Instant::now();
                     }
@@ -562,11 +575,15 @@ mod tests {
     fn periodic_reconciliation_refreshes_even_without_native_events() {
         let directory = tempfile::tempdir().unwrap();
         let (sender, receiver) = std::sync::mpsc::channel();
-        let watch = ProjectWatch::start(directory.path(), "p", "w", move |event| {
-            sender.send(event).is_ok()
-        })
+        let watch = ProjectWatch::start_with_interval(
+            directory.path(),
+            "p",
+            "w",
+            Duration::from_secs(1),
+            move |event| sender.send(event).is_ok(),
+        )
         .unwrap();
-        let event = receiver.recv_timeout(Duration::from_secs(35)).unwrap();
+        let event = receiver.recv_timeout(Duration::from_secs(10)).unwrap();
         assert!(event.status == WatchStatus::Changed);
         assert!(event.files && event.git);
         drop(watch);
