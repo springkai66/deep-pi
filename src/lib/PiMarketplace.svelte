@@ -37,7 +37,15 @@
 
   let { projectPath, confirm, onClose, onError, embedded = false, onBusyChange = () => {}, invokeCommand = nativeInvoke }: Props = $props();
   const invoke = <T,>(command: string, args?: Parameters<typeof nativeInvoke>[1]) => invokeCommand<T>(command, args);
+  type SortMode = "default" | "downloads" | "publishedAt";
+  const SORT_MODES: readonly SortMode[] = ["default", "downloads", "publishedAt"];
+  const SORT_LABELS: Record<SortMode, string> = {
+    default: "默认排序",
+    downloads: "按下载量排序",
+    publishedAt: "按发布时间排序",
+  };
   let query = $state("");
+  let sortBy = $state<SortMode>("default");
   let packages = $state<PiPackage[]>([]);
   let installed = $state<InstalledPackage[]>([]);
   let scope = $state<"global" | "project">("global");
@@ -52,6 +60,12 @@
   let installedGeneration = 0;
 
   const canUseProjectScope = $derived(projectPath !== null);
+  /** 目录展示顺序：下载量、发布时间均按降序（最多 / 最新在前），默认保持后端返回顺序。 */
+  const sortedPackages = $derived.by(() => {
+    const mode = sortBy;
+    if (mode === "default") return packages;
+    return [...packages].sort((a, b) => b[mode] - a[mode]);
+  });
 
   onMount(() => {
     void search();
@@ -221,11 +235,18 @@
     </div>
   </header>
 
-  <form class="market-search" onsubmit={(event) => { event.preventDefault(); void search(); }}>
-    <Search size={16} />
-    <input bind:value={query} aria-label={t("搜索 Pi Package")} placeholder={t("搜索 Pi Package")} />
-    <button type="submit" aria-label={t("搜索")} title={t("搜索")}><Search size={15} /></button>
-  </form>
+  <div class="search-row">
+    <form class="market-search" onsubmit={(event) => { event.preventDefault(); void search(); }}>
+      <Search size={16} />
+      <input bind:value={query} aria-label={t("搜索 Pi Package")} placeholder={t("搜索 Pi Package")} />
+      <button type="submit" aria-label={t("搜索")} title={t("搜索")}><Search size={15} /></button>
+    </form>
+    <select class="sort-select" bind:value={sortBy} aria-label={t("排序")}>
+      {#each SORT_MODES as mode (mode)}
+        <option value={mode}>{t(SORT_LABELS[mode])}</option>
+      {/each}
+    </select>
+  </div>
 
   {#if statusMessage}<p class="market-status" role="status">{statusMessage}</p>{/if}
   {#if operationState}
@@ -241,7 +262,7 @@
         <div class="market-empty">{t("没有匹配的 Package")}</div>
       {:else}
         <div class="package-grid">
-          {#each packages as pkg (pkg.name)}
+          {#each sortedPackages as pkg (pkg.name)}
             {@const installedPackage = installedSource(pkg.name)}
             <article class="package-card">
               <div class="package-card-header">
@@ -301,7 +322,7 @@
 <style>
   .market-page.embedded { padding: 0; display: flex; flex-direction: column; }
   .embedded .market-header { justify-content: flex-end; }
-  .embedded .market-header, .embedded .market-search { flex-shrink: 0; }
+  .embedded .market-header, .embedded .search-row { flex-shrink: 0; }
   .embedded .market-body { flex: 1; }
   .market-page {
     display: grid;
@@ -310,7 +331,7 @@
     height: 100%;
     padding: 14px 18px 18px;
     overflow: hidden;
-    color: #d8ded9;
+    color: var(--text);
     font-family: var(--text-font);
   }
 
@@ -349,7 +370,7 @@
 
   h2 {
     overflow: hidden;
-    color: #f4f7f5;
+    color: var(--text-strong);
     font-size: 13px;
     font-weight: 650;
     text-overflow: ellipsis;
@@ -373,21 +394,21 @@
     height: 30px;
     padding: 0;
     border: 1px solid transparent;
-    color: #aeb7b0;
+    color: var(--text-muted);
     background: transparent;
   }
 
   .icon-button:hover,
   .installed-panel button:hover {
-    border-color: #465048;
-    color: #f4f7f5;
-    background: #252b27;
+    border-color: var(--border-strong);
+    color: var(--text-strong);
+    background: var(--surface-hover);
   }
 
   .scope-switch {
     gap: 2px;
     padding: 2px;
-    border: 1px solid #39423b;
+    border: 1px solid var(--border-strong);
     border-radius: 5px;
   }
 
@@ -395,13 +416,13 @@
     height: 26px;
     padding: 0 10px;
     border: 0;
-    color: #89928b;
+    color: var(--text-muted);
     background: transparent;
   }
 
   .scope-switch button.active {
-    color: #111412;
-    background: #8fd6ad;
+    color: var(--accent-ink);
+    background: var(--accent);
     font-weight: 700;
   }
 
@@ -410,13 +431,42 @@
     opacity: 0.4;
   }
 
+  .search-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+
+  .search-row .market-search {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .sort-select {
+    height: 38px;
+    padding: 0 8px;
+    border: 1px solid var(--border-strong);
+    border-radius: 5px;
+    color: var(--text);
+    background: var(--surface);
+    font-family: var(--text-font);
+    font-size: 12px;
+    cursor: pointer;
+  }
+
+  .sort-select:focus-visible {
+    outline: 1px solid var(--accent);
+    outline-offset: -1px;
+  }
+
   .market-search {
     gap: 8px;
     padding: 0 10px;
-    border: 1px solid #39423b;
+    border: 1px solid var(--border-strong);
     border-radius: 5px;
-    color: #778078;
-    background: #161a17;
+    color: var(--text-muted);
+    background: var(--surface);
   }
 
   .market-search input {
@@ -425,7 +475,7 @@
     height: 36px;
     border: 0;
     outline: 0;
-    color: #d8ded9;
+    color: var(--text);
     background: transparent;
   }
 
@@ -436,17 +486,17 @@
     height: 28px;
     padding: 0;
     border: 0;
-    color: #aeb7b0;
+    color: var(--text-muted);
     background: transparent;
   }
 
   .market-search button:hover {
-    color: #f4f7f5;
-    background: #252b27;
+    color: var(--text-strong);
+    background: var(--surface-hover);
   }
 
   .market-status {
-    color: #8fd6ad;
+    color: var(--accent);
     font-size: 12px;
   }
 
@@ -468,7 +518,7 @@
   .section-heading {
     min-height: 28px;
     padding: 0 2px;
-    color: #89928b;
+    color: var(--text-muted);
     font-size: 11px;
     font-weight: 700;
   }
@@ -486,7 +536,7 @@
     height: 25px;
     padding: 0;
     border: 1px solid transparent;
-    color: #89928b;
+    color: var(--text-muted);
     background: transparent;
   }
 
@@ -502,9 +552,9 @@
     min-width: 0;
     min-height: 158px;
     padding: 12px;
-    border: 1px solid #303832;
+    border: 1px solid var(--border);
     border-radius: 6px;
-    background: #191d1a;
+    background: var(--surface);
   }
 
   .package-card-header {
@@ -515,13 +565,13 @@
   .package-types,
   .package-card footer,
   .installed-row {
-    color: #778078;
+    color: var(--text-muted);
     font-size: 10px;
   }
 
   .environment-note {
     margin-left: 4px;
-    color: #607067;
+    color: var(--text-muted);
     font-size: 9px;
     font-weight: 400;
   }
@@ -530,7 +580,7 @@
     display: -webkit-box;
     margin: 10px 0;
     overflow: hidden;
-    color: #aeb7b0;
+    color: var(--text-muted);
     line-height: 1.45;
     line-clamp: 3;
     -webkit-box-orient: vertical;
@@ -540,9 +590,9 @@
   .installed-badge {
     flex: 0 0 auto;
     padding: 3px 6px;
-    border: 1px solid #39654d;
+    border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
     border-radius: 3px;
-    color: #8fd6ad;
+    color: var(--accent);
     font-size: 10px;
   }
 
@@ -559,13 +609,13 @@
   }
 
   .primary-button {
-    color: #111412;
-    background: #8fd6ad;
+    color: var(--accent-ink);
+    background: var(--accent);
   }
 
   .danger-button {
-    border-color: #70423e;
-    color: #f2aaa3;
+    border-color: color-mix(in srgb, var(--status-failed) 55%, transparent);
+    color: var(--status-failed);
     background: transparent;
   }
 
@@ -577,14 +627,14 @@
 
   .installed-panel {
     padding-left: 12px;
-    border-left: 1px solid #303832;
+    border-left: 1px solid var(--border);
   }
 
   .installed-row {
     justify-content: space-between;
     gap: 8px;
     min-height: 36px;
-    border-bottom: 1px solid #262c27;
+    border-bottom: 1px solid var(--border);
   }
 
   .installed-row span {
@@ -601,7 +651,7 @@
 
   .installed-copy strong {
     overflow: hidden;
-    color: #aeb7b0;
+    color: var(--text-muted);
     font-size: 11px;
     font-weight: 600;
     text-overflow: ellipsis;
@@ -609,7 +659,7 @@
   }
 
   .installed-copy small {
-    color: #667169;
+    color: var(--text-muted);
     font-size: 9px;
   }
 
@@ -621,7 +671,7 @@
     height: 25px;
     padding: 0;
     border: 1px solid transparent;
-    color: #89928b;
+    color: var(--text-muted);
     background: transparent;
   }
 
@@ -632,7 +682,7 @@
 
   .market-empty {
     padding: 24px 2px;
-    color: #778078;
+    color: var(--text-muted);
     font-size: 12px;
   }
 
@@ -652,7 +702,7 @@
 
     .installed-panel {
       padding: 8px 0 0;
-      border-top: 1px solid #303832;
+      border-top: 1px solid var(--border);
       border-left: 0;
     }
   }

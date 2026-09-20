@@ -104,6 +104,8 @@ export const EN_MCP: Record<string, string> = {
 
   /* ---------- 插件市场（PiMarketplace） ---------- */
   "Pi 扩展市场": "Pi Extensions Marketplace",
+  "按下载量排序": "Most downloads",
+  "按发布时间排序": "Newest published",
   "返回工作区": "Back to workspace",
   "返回": "Back",
   "安装范围": "Installation scope",
