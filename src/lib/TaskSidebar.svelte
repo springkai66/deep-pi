@@ -284,7 +284,7 @@
                   {:else}
                     <span class:failed={task.status === "failed"} class:waiting={task.status === "waiting"} class:cancelled={task.status === "cancelled"} class="session-status" aria-hidden="true"></span>
                   {/if}
-                  <button class="task-copy" type="button" onclick={() => onOpen(task)}>
+                  <button class="task-copy" type="button" title={task.title} onclick={() => onOpen(task)}>
                     <strong>{task.title}</strong>
                     <span>{t(statusLabels[task.status])}</span>
                   </button>
@@ -301,7 +301,7 @@
                   {:else}
                     <span class:failed={task.status === "failed"} class:waiting={task.status === "waiting"} class:cancelled={task.status === "cancelled"} class="session-status" aria-hidden="true"></span>
                   {/if}
-                  <button class="task-copy" type="button" onclick={() => onOpen(task)}>
+                  <button class="task-copy" type="button" title={task.title} onclick={() => onOpen(task)}>
                     <strong>{task.title}</strong>
                     <span>{t(statusLabels[task.status])}</span>
                   </button>
@@ -323,7 +323,7 @@
         {:else}
           <span class:failed={task.status === "failed"} class:waiting={task.status === "waiting"} class:cancelled={task.status === "cancelled"} class="session-status" aria-hidden="true"></span>
         {/if}
-        <button class="task-copy" type="button" onclick={() => onOpen(task)}>
+        <button class="task-copy" type="button" title={task.title} onclick={() => onOpen(task)}>
           <strong>{task.title}</strong>
           <span>{t(statusLabels[task.status])}</span>
         </button>

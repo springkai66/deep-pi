@@ -12,6 +12,7 @@ import type { ChatDetailLevel } from "./settings";
   import { messageSource } from "./message-parts";
   import { formatDuration } from "./duration";
   import { createDormantHistorySession, createRpcHistorySession, prependRpcHistory } from "./rpc-history";
+  import { deriveSessionTitle, isTruncatedTitleUpgrade } from "./session-title";
   import { BUILTIN_SLASH_COMMANDS, filterSlashCommands, parseSlashCommand, slashSourceLabel, type PiCommand, type SlashCommand } from "./slash-commands";
   import { shortcutAria } from "./shortcuts";
   import { t, tm } from "$lib/i18n.svelte";
@@ -62,6 +63,9 @@ import type { ChatDetailLevel } from "./settings";
   let sending = $state(false);
   let stopping = $state(false);
   let error = $state("");
+  /// 扩展通过 ui.notify(…, "error") 上报的错误：展示在会话流内（与失败回合同处），
+  /// 不再飘在输入框上方的提示条里。
+  let extensionError = $state("");
   let notice = $state("");
   /// 输入框 `/` 命令建议：连接后从 pi 拉取扩展/模板/技能命令，与内置命令合并。
   let piCommands = $state<PiCommand[]>([]);
@@ -897,6 +901,7 @@ import type { ChatDetailLevel } from "./settings";
     conversation = emptyConversation();
     historyOffset = 0;
     error = "";
+    extensionError = "";
     if (!run) {
       // 未启动的休眠会话：不连进程、不占额度，直接读 pi 会话文件展示历史；
       // 输入框保持可用，回车发送时才启动。文件不可读（从未启动或已删除）时保持空白。
@@ -953,6 +958,7 @@ import type { ChatDetailLevel } from "./settings";
         buffered.push(event);
       } else {
         conversation = applyRpcEvent(conversation, event);
+        if (event.payload.type === "agent_start") extensionError = "";
         if (event.payload.type === "agent_start" || event.payload.type === "agent_settled") {
           onActivity(conversation.busy);
           if (event.payload.type === "agent_settled") { void call({ type: "get_state" }).catch(() => {}); refreshStats(); }
@@ -1104,7 +1110,7 @@ import type { ChatDetailLevel } from "./settings";
 
   /// 错误卡片渲染在会话流末尾：出现时若正跟随滚动，则一并滚到底部让错误可见。
   $effect(() => {
-    if (!(error || conversation.error) || !followScroll) return;
+    if (!(error || conversation.error || extensionError) || !followScroll) return;
     void tick().then(() => {
       if (transcript && followScroll) transcript.scrollTop = transcript.scrollHeight;
     });
@@ -1195,21 +1201,15 @@ import type { ChatDetailLevel } from "./settings";
     return "$0";
   }
 
-  function deriveTitle(): string | null {
-    const first = conversation.messages.find((message) => message.role === "user");
-    if (!first) return null;
-    const line = contentText(first.content).split("\n").map((part) => part.trim()).find((part) => part.length > 0);
-    if (!line) return null;
-    return line.length > 24 ? `${line.slice(0, 24)}…` : line;
-  }
-
   $effect(() => {
-    if (!autoName || autoNamed || conversation.busy) return;
+    if (autoNamed || conversation.busy) return;
     const messages = conversation.messages;
     if (!messages.some((message) => message.role === "user")) return;
     if (!messages.some((message) => message.role !== "user" && message.role !== "toolResult")) return;
-    const next = deriveTitle();
+    const next = deriveSessionTitle(messages);
     if (!next) return;
+    // 默认标题匹配自动命名；另外允许把旧版 24 字截断的自动标题升级为完整标题。
+    if (!autoName && !isTruncatedTitleUpgrade(title, next)) return;
     autoNamed = true;
     // 休眠态没有进程可同步名称；pi 启动时会经 --name 带上新标题。
     if (connected) void call({ type: "set_session_name", name: next }).catch(() => {});
@@ -1548,9 +1548,20 @@ import type { ChatDetailLevel } from "./settings";
     sendResponse: <T>(command: Record<string, unknown>) => Promise<T>, alive: () => boolean,
   ) {
     const method = request.method;
-    if (method === "notify") { notice = String(request.message ?? ""); return; }
-    if (method === "setStatus") { notice = String(request.text ?? ""); return; }
-    if (method === "setWidget") { notice = Array.isArray(request.lines) ? request.lines.join("\n") : ""; return; }
+    if (method === "notify") {
+      const text = String(request.message ?? "");
+      // 错误级通知进入会话流（与失败的工具/回合同处）；普通通知仍走提示条。
+      if (request.notifyType === "error") { notice = ""; extensionError = text; }
+      else notice = text;
+      return;
+    }
+    // pi 的字段名是 statusText/widgetLines；兼容旧字段避免漏显。
+    if (method === "setStatus") { notice = String(request.statusText ?? request.text ?? ""); return; }
+    if (method === "setWidget") {
+      const lines = Array.isArray(request.widgetLines) ? request.widgetLines : Array.isArray(request.lines) ? request.lines : [];
+      notice = lines.join("\n");
+      return;
+    }
     if (method === "setTitle") return;
     if (method === "set_editor_text") {
       if (draft) restoredDraft = draft;
@@ -1706,6 +1717,12 @@ import type { ChatDetailLevel } from "./settings";
       <article class="compaction-live">
         <div class="message-label"><Shrink size={14} />{t("上下文压缩")}</div>
         <p class="compaction-running"><span class="spin"><RefreshCw size={13} /></span>{t("正在压缩上下文，历史消息将被总结为摘要…")}</p>
+      </article>
+    {/if}
+    {#if extensionError}
+      <article class="chat-error extension-error" role="alert">
+        <div class="message-label"><CircleAlert size={14} />{t("扩展错误")}</div>
+        <p class="chat-error-text">{extensionError}</p>
       </article>
     {/if}
     {#if error || conversation.error}
