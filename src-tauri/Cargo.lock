@@ -766,7 +766,7 @@ dependencies = [
 
 [[package]]
 name = "deeppi"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "atomic-write-file",
  "base64 0.22.1",
