@@ -21,7 +21,7 @@ export function messageParts(content: unknown): MessagePart[] {
       const mime = String(part.mimeType ?? "");
       const data = part.data;
       const valid = ["image/png", "image/jpeg", "image/gif", "image/webp"].includes(mime)
-        && typeof data === "string" && data.length > 0 && data.length <= 4 * 1024 * 1024
+        && typeof data === "string" && data.length > 0 && data.length <= 6 * 1024 * 1024
         && data.length % 4 === 0 && /^[A-Za-z0-9+/]*={0,2}$/.test(data);
       return { kind: "image", content: t("[图片 {mime}]", { mime }), source: valid ? `data:${mime};base64,${data}` : null };
     }

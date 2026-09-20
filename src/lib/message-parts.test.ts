@@ -13,7 +13,7 @@ describe("structured message display", () => {
     for (const part of [
       { type: "image", data: "<svg onload=x/>", mimeType: "image/svg+xml" },
       { type: "image", data: "https://tracker.test/pixel", mimeType: "image/png" },
-      { type: "image", data: "A".repeat(6_000_000), mimeType: "image/png" },
+      { type: "image", data: "A".repeat(7_000_000), mimeType: "image/png" },
     ]) expect(messageParts([part])[0]).toMatchObject({ kind: "image", source: null });
     expect(messageParts([{ type: "image", data: "AAAA", mimeType: "image/png" }])[0])
       .toMatchObject({ source: "data:image/png;base64,AAAA" });

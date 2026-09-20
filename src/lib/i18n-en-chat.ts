@@ -243,6 +243,7 @@ export const EN_CHAT: Record<string, string> = {
   // —— 输入框 `/` 命令建议 ——
   "命令建议": "Command suggestions",
   "扩展错误": "Extension error",
+  "发送图片": "Send image",
   "发送消息；输入 / 使用命令": "Send a message; type / for commands",
   "内置": "Built-in",
   "扩展": "Extension",

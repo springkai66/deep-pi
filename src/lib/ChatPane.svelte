@@ -163,6 +163,10 @@ import type { ChatDetailLevel } from "./settings";
     attachmentError = "";
   }
 
+  /// 已开始读取、尚未完成的图片数量与预估 base64 字节数（响应式：读取期间禁用发送）。
+  let pendingImageReads = $state(0);
+  let pendingImageReadBytes = $state(0);
+
   /// 把粘贴/拖入的图片文件加入附件列表；读取完成后异步追加。
   function addImageFiles(incoming: Iterable<File>) {
     attachmentError = "";
@@ -209,10 +213,6 @@ import type { ChatDetailLevel } from "./settings";
       reader.readAsDataURL(file);
     }
   }
-
-  /// 已开始读取、尚未完成的图片数量与预估 base64 字节数。
-  let pendingImageReads = 0;
-  let pendingImageReadBytes = 0;
 
   function onComposerPaste(event: ClipboardEvent) {
     const files = event.clipboardData?.files;
@@ -687,13 +687,14 @@ import type { ChatDetailLevel } from "./settings";
       if (current === generation) workflowBusy = false;
     }
   }
-  const canSend = $derived(!switching && (connected || dormant) && !initializing && !stopping && !conversation.closed && canSubmitPrompt(sending, draft));
+  const canSend = $derived(!switching && (connected || dormant) && !initializing && !stopping && !conversation.closed
+    && canSubmitPrompt(sending, draft, attachments.length, pendingImageReads));
   /// 发送按钮提示：执行中说明本条消息将按所选方式引导/排队，而非开启新回复。
   const sendHint = $derived(
     dormant ? t("启动会话并发送")
       : conversation.busy
       ? streamingBehavior === "steer" ? t("执行中：本条将在当前工具调用后优先引导") : t("执行中：本条将排队，本轮结束后执行")
-      : t("发送消息"),
+      : !draft.trim() && attachments.length ? t("发送图片") : t("发送消息"),
   );
   const groupedModels = $derived.by(() => {
     const groups = new Map<string, typeof models>();

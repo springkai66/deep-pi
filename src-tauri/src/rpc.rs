@@ -288,12 +288,20 @@ fn validate_command(command: &Value) -> Result<&str, String> {
     ) {
         return Err("RPC command is not supported by this host".into());
     }
-    if matches!(kind, "prompt" | "steer" | "follow_up")
-        && command["message"]
+    if matches!(kind, "prompt" | "steer" | "follow_up") {
+        let has_text = command["message"]
             .as_str()
-            .is_none_or(|text| text.trim().is_empty() || text.len() > 512 * 1024)
-    {
-        return Err("Prompt must contain 1 to 524288 bytes".into());
+            .is_some_and(|text| !text.trim().is_empty());
+        let text_too_long = command["message"]
+            .as_str()
+            .is_some_and(|text| text.len() > 512 * 1024);
+        let has_images = command["images"]
+            .as_array()
+            .is_some_and(|images| !images.is_empty());
+        // 纯图片消息（无文本）合法；两者都为空或文本超限才拒绝。
+        if (!has_text && !has_images) || text_too_long {
+            return Err("Prompt must contain 1 to 524288 bytes or at least one image".into());
+        }
     }
     Ok(kind)
 }
@@ -566,6 +574,17 @@ mod tests {
         assert!(validate_command(&json!({"type":"bash","command":"anything"})).is_err());
         assert!(validate_command(&json!({"type":"prompt","message":"  "})).is_err());
         assert!(validate_command(&json!({"type":"prompt","message":"hello"})).is_ok());
+        // 纯图片消息（无文本）合法；既无文本又无图片、或文本超限仍拒绝。
+        assert!(validate_command(&json!({
+            "type":"prompt","message":"",
+            "images":[{"type":"image","data":"aGk=","mimeType":"image/png"}]
+        }))
+        .is_ok());
+        assert!(validate_command(&json!({"type":"steer","message":"","images":[]})).is_err());
+        assert!(validate_command(&json!({
+            "type":"prompt","message":"x".repeat(512 * 1024 + 1)
+        }))
+        .is_err());
         assert!(validate_command(&json!({"type":"clear_queue"})).is_ok());
     }
 

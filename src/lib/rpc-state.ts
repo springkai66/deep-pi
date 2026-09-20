@@ -125,8 +125,10 @@ export function readableRpcError(raw: string): string {
     return text;
   }
 }
-export function canSubmitPrompt(inFlight: boolean, draft: string): boolean {
-  return !inFlight && draft.trim().length > 0;
+export function canSubmitPrompt(inFlight: boolean, draft: string, attachments = 0, pendingImageReads = 0): boolean {
+  // 图片读取完成前不允许发送：否则 send() 拿到的是不完整的附件列表，图片会被静默丢弃。
+  if (inFlight || pendingImageReads > 0) return false;
+  return draft.trim().length > 0 || attachments > 0;
 }
 
 export function assistantMessageEmpty(message: RpcMessage): boolean {

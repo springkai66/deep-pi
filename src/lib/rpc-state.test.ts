@@ -312,4 +312,9 @@ describe("execution visibility and concurrency errors", () => {
     expect(canSubmitPrompt(false, "hello")).toBe(true);
     expect(canSubmitPrompt(true, "hello")).toBe(false);
     expect(canSubmitPrompt(false, "   ")).toBe(false);
+    // 图片：纯图片可发送；读取未完成时先等待，避免附件不完整导致丢图。
+    expect(canSubmitPrompt(false, "", 1, 0)).toBe(true);
+    expect(canSubmitPrompt(false, "", 0, 1)).toBe(false);
+    expect(canSubmitPrompt(false, "hello", 0, 1)).toBe(false);
+    expect(canSubmitPrompt(true, "", 1, 0)).toBe(false);
   });
