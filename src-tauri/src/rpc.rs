@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{ipc::Channel, AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
@@ -417,6 +417,17 @@ pub async fn rpc_history_close(
     .map_err(|error| error.to_string())?
 }
 
+/// 休眠历史响应：HistoryPage 字段平铺 + 会话记录的最后模型与推理强度，
+/// 前端打开休眠会话时一并恢复模型选择显示。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DormantHistoryResponse {
+    #[serde(flatten)]
+    pub page: crate::rpc_history::HistoryPage,
+    pub model: Option<crate::native_pi::SessionModel>,
+    pub thinking_level: Option<String>,
+}
+
 /// 休眠会话历史：进程未启动时直接读 pi 会话文件展示历史（分页与 HistoryPage 同构）。
 #[tauri::command]
 pub async fn rpc_dormant_history(
@@ -425,7 +436,7 @@ pub async fn rpc_dormant_history(
     task_id: String,
     before: Option<usize>,
     limit: Option<usize>,
-) -> Result<crate::rpc_history::HistoryPage, String> {
+) -> Result<DormantHistoryResponse, String> {
     require_main(&webview)?;
     tauri::async_runtime::spawn_blocking(move || {
         if app.state::<RpcManager>().contains(&task_id)? {
@@ -439,15 +450,19 @@ pub async fn rpc_dormant_history(
             return Err("Dormant history is only available for RPC Pi tasks".into());
         }
         let file = resolve_session_file(&record)?;
-        let messages = crate::native_pi::read_session_messages(&file, &record.session_id)?;
-        let (start, end) = crate::native_pi::page_bounds(messages.len(), before, limit);
-        Ok(crate::rpc_history::HistoryPage {
-            snapshot_id: format!("dormant:{task_id}"),
-            event_sequence: 0,
-            start,
-            end,
-            total: messages.len(),
-            messages: messages[start..end].to_vec(),
+        let history = crate::native_pi::read_session_history(&file, &record.session_id)?;
+        let (start, end) = crate::native_pi::page_bounds(history.messages.len(), before, limit);
+        Ok(DormantHistoryResponse {
+            page: crate::rpc_history::HistoryPage {
+                snapshot_id: format!("dormant:{task_id}"),
+                event_sequence: 0,
+                start,
+                end,
+                total: history.messages.len(),
+                messages: history.messages[start..end].to_vec(),
+            },
+            model: history.settings.model,
+            thinking_level: history.settings.thinking_level,
         })
     })
     .await

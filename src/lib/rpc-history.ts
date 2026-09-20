@@ -1,6 +1,11 @@
 import { t } from "./i18n.svelte";
 import { asMessage, record, type Conversation, type RpcMessage } from "./rpc-state";
 
+export interface RpcHistoryModel {
+  provider: string;
+  id: string;
+}
+
 export interface RpcHistoryPage {
   snapshotId: string;
   eventSequence: number;
@@ -8,6 +13,10 @@ export interface RpcHistoryPage {
   end: number;
   total: number;
   messages: RpcMessage[];
+  /** 休眠历史专用：会话记录的最后模型；在线历史快照为 null。 */
+  model?: RpcHistoryModel | null;
+  /** 休眠历史专用：会话记录的最后推理强度；在线历史快照为 null。 */
+  thinkingLevel?: string | null;
 }
 
 export function validateHistoryPage(value: unknown): RpcHistoryPage {
@@ -19,8 +28,14 @@ export function validateHistoryPage(value: unknown): RpcHistoryPage {
   if (start > end || end > total || end - start !== page.messages.length) throw new Error(t("历史分页范围无效"));
   const messages = page.messages.map(asMessage);
   if (messages.some((message) => message === null)) throw new Error(t("历史分页包含无效消息"));
+  const rawModel = record(page.model);
+  const model = typeof rawModel.provider === "string" && rawModel.provider
+    && typeof rawModel.id === "string" && rawModel.id
+    ? { provider: rawModel.provider, id: rawModel.id }
+    : null;
+  const thinkingLevel = typeof page.thinkingLevel === "string" && page.thinkingLevel ? page.thinkingLevel : null;
   return { snapshotId: page.snapshotId, eventSequence: page.eventSequence as number,
-    start, end, total, messages: messages as RpcMessage[] };
+    start, end, total, messages: messages as RpcMessage[], model, thinkingLevel };
 }
 
 export function prependRpcHistory(conversation: Conversation, page: RpcHistoryPage, offset: number): Conversation {

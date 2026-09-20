@@ -894,6 +894,17 @@ import type { ChatDetailLevel } from "./settings";
           if (!alive || current !== generation || !history) return;
           conversation = loadHistory(emptyConversation(), history.messages, 0);
           historyOffset = history.start;
+          // 恢复历史会话的模型与推理强度显示：进程未启动时选择器只读，
+          // 回车启动 pi 后由 get_state / 模型列表覆盖为权威值。
+          if (history.model) {
+            models = [{ provider: history.model.provider, id: history.model.id, name: history.model.id }];
+            selectedModel = `${history.model.provider}/${history.model.id}`;
+            modelName = history.model.id;
+          }
+          if (history.thinkingLevel && history.thinkingLevel !== "off") {
+            thinkingLevel = history.thinkingLevel;
+            thinkingLevels = [history.thinkingLevel];
+          }
         } catch {
           // 保持空白会话：输入提示词并回车仍可启动。
         }

@@ -85,6 +85,19 @@ describe("RPC history snapshots", () => {
     ]) expect(() => validateHistoryPage(invalid)).toThrow();
   });
 
+  it("keeps dormant model metadata and clears it for pages that do not provide it", () => {
+    const dormant = validateHistoryPage({ snapshotId: "dormant:task", eventSequence: 0, start: 0, end: 1, total: 1,
+      messages: [{ role: "user" }], model: { provider: "openai", id: "gpt-5" }, thinkingLevel: "high" });
+    expect(dormant.model).toEqual({ provider: "openai", id: "gpt-5" });
+    expect(dormant.thinkingLevel).toBe("high");
+    const online = validateHistoryPage(page);
+    expect(online.model).toBeNull();
+    expect(online.thinkingLevel).toBeNull();
+    const malformed = validateHistoryPage({ ...page, model: { provider: "openai" }, thinkingLevel: 7 });
+    expect(malformed.model).toBeNull();
+    expect(malformed.thinkingLevel).toBeNull();
+  });
+
   describe("dormant history sessions", () => {
     function dormantFixture() {
       const invoke = vi.fn(async (_command: string, _args: Record<string, unknown>): Promise<unknown> => page);
@@ -112,6 +125,14 @@ describe("RPC history snapshots", () => {
       f.invoke.mockClear();
       await expect(f.session.older()).resolves.toBeNull();
       expect(f.invoke).not.toHaveBeenCalled();
+    });
+
+    it("passes the restored model and thinking level through the dormant open", async () => {
+      const f = dormantFixture();
+      f.invoke.mockResolvedValueOnce({ ...page, model: { provider: "anthropic", id: "claude-sonnet-4" }, thinkingLevel: "medium" });
+      const opened = await f.session.open();
+      expect(opened?.model).toEqual({ provider: "anthropic", id: "claude-sonnet-4" });
+      expect(opened?.thinkingLevel).toBe("medium");
     });
 
     it("ignores a late initial open after disposal and deduplicates initial opens", async () => {

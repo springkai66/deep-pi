@@ -6,7 +6,6 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-#[cfg(test)]
 use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -451,6 +450,27 @@ const MAX_SESSION_LOG_ENTRIES: usize = 200_000;
 const MAX_SESSION_SCAN_DIRS: usize = 512;
 const MAX_SESSION_SCAN_FILES: usize = 20_000;
 
+/// 休眠历史投影出的会话设置：叶子路径上最后一次记录的模型与推理强度。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSettings {
+    pub model: Option<SessionModel>,
+    pub thinking_level: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SessionModel {
+    pub provider: String,
+    pub id: String,
+}
+
+/// 一次读取得到的休眠会话内容：投影消息 + 会话设置（避免为两者重复读文件）。
+#[derive(Debug)]
+pub struct SessionHistory {
+    pub messages: Vec<Value>,
+    pub settings: SessionSettings,
+}
+
 /// 把 pi 记录的 ISO 时间戳（`new Date().toISOString()` 产物，恒为 `Z` 结尾）转成毫秒。
 /// 只接受 UTC 形式；解析失败返回 None，与 pi 对缺失时间的容错一致。
 fn iso_to_epoch_ms(value: Option<&Value>) -> Option<i64> {
@@ -552,12 +572,9 @@ fn project_session_entry(entry: &Value) -> Option<Value> {
     }
 }
 
-/// 与 pi `buildSessionPath` + `buildContextEntries` 等价的投影：
-/// 从叶子沿 parentId 走到根；若路径上存在压缩条目，则只保留压缩摘要、
-/// firstKeptEntryId 起的被保留条目与压缩之后的条目。
-fn project_session_messages(entries: &[Value]) -> Vec<Value> {
-    // 归一化：v1 文件没有 id/parentId，按线性顺序补齐（与 pi 的 migrate 等价）；
-    // 已有 id 的条目保留文件里的 id 与 parentId（null 表示分支根）。
+/// 会话条目按 id/parentId 建索引：v1 文件没有 id/parentId，按线性顺序补齐
+///（与 pi 的 migrate 等价）；已有 id 的条目保留文件里的 id 与 parentId（null 表示分支根）。
+fn session_nodes(entries: &[Value]) -> Vec<(String, Option<String>, &Value)> {
     let mut nodes: Vec<(String, Option<String>, &Value)> = Vec::with_capacity(entries.len());
     let mut previous: Option<String> = None;
     for entry in &entries[1..] {
@@ -577,6 +594,11 @@ fn project_session_messages(entries: &[Value]) -> Vec<Value> {
         previous = Some(id.clone());
         nodes.push((id, parent, entry));
     }
+    nodes
+}
+
+/// 叶子 = 最后一个条目；沿 parentId 上溯到根（带访问集防环），返回正序下标路径。
+fn session_leaf_path(nodes: &[(String, Option<String>, &Value)]) -> Vec<usize> {
     if nodes.is_empty() {
         return Vec::new();
     }
@@ -585,7 +607,6 @@ fn project_session_messages(entries: &[Value]) -> Vec<Value> {
         .enumerate()
         .map(|(index, (id, _, _))| (id.as_str(), index))
         .collect();
-    // 叶子 = 最后一个条目；沿 parentId 上溯到根（带访问集防环）。
     let mut path: Vec<usize> = Vec::new();
     let mut visited: HashSet<usize> = HashSet::new();
     let mut cursor = Some(nodes.len() - 1);
@@ -600,17 +621,25 @@ fn project_session_messages(entries: &[Value]) -> Vec<Value> {
             .and_then(|parent| by_id.get(parent).copied());
     }
     path.reverse();
-    // 压缩感知的上下文截取。
-    let context: Vec<usize> = match path
+    path
+}
+
+/// 压缩感知的上下文截取：只保留最后一次压缩摘要、firstKeptEntryId 起的被保留条目
+/// 与压缩之后的条目（与 pi 的 `buildContextEntries` 等价）。
+fn session_context_indices(
+    nodes: &[(String, Option<String>, &Value)],
+    path: &[usize],
+) -> Vec<usize> {
+    match path
         .iter()
         .rposition(|&index| nodes[index].2["type"] == "compaction")
     {
-        Some(compaction_position) => {
-            let compaction = path[compaction_position];
+        Some(position) => {
+            let compaction = path[position];
             let kept_id = nodes[compaction].2["firstKeptEntryId"].as_str();
             let mut context = vec![compaction];
             let mut kept_found = false;
-            for &index in &path[..compaction_position] {
+            for &index in &path[..position] {
                 if kept_id.is_some_and(|kept| nodes[index].0 == kept) {
                     kept_found = true;
                 }
@@ -618,20 +647,60 @@ fn project_session_messages(entries: &[Value]) -> Vec<Value> {
                     context.push(index);
                 }
             }
-            context.extend_from_slice(&path[compaction_position + 1..]);
+            context.extend_from_slice(&path[position + 1..]);
             context
         }
-        None => path,
-    };
-    context
-        .iter()
-        .filter_map(|&index| project_session_entry(nodes[index].2))
-        .collect()
+        None => path.to_vec(),
+    }
 }
 
-/// 读取 pi 会话 JSONL 并投影为消息列表（供休眠会话直接展示历史，无需启动进程）。
+/// 叶子路径上的模型与推理强度（与 pi `getSessionContextSettings` 等价）：
+/// 模型取路径上最后一次 model_change，退而取最后一条 assistant 消息的 provider/model；
+/// 推理强度取最后一次 thinking_level_change。
+fn session_settings(nodes: &[(String, Option<String>, &Value)], path: &[usize]) -> SessionSettings {
+    let mut model = None;
+    let mut thinking_level = None;
+    for &index in path {
+        let entry = nodes[index].2;
+        match entry["type"].as_str() {
+            Some("thinking_level_change") => {
+                if let Some(level) = entry["thinkingLevel"].as_str() {
+                    thinking_level = Some(level.to_owned());
+                }
+            }
+            Some("model_change") => {
+                if let (Some(provider), Some(id)) =
+                    (entry["provider"].as_str(), entry["modelId"].as_str())
+                {
+                    model = Some(SessionModel {
+                        provider: provider.to_owned(),
+                        id: id.to_owned(),
+                    });
+                }
+            }
+            Some("message") if entry["message"]["role"] == "assistant" => {
+                if let (Some(provider), Some(id)) = (
+                    entry["message"]["provider"].as_str(),
+                    entry["message"]["model"].as_str(),
+                ) {
+                    model = Some(SessionModel {
+                        provider: provider.to_owned(),
+                        id: id.to_owned(),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    SessionSettings {
+        model,
+        thinking_level,
+    }
+}
+
+/// 读取 pi 会话 JSONL 并投影为消息列表 + 会话设置（供休眠会话直接展示历史，无需启动进程）。
 /// 文件首行必须是 `type: session` 的头部且 id 与任务一致；损坏行按 pi 的行为跳过。
-pub fn read_session_messages(file: &Path, expected_id: &str) -> Result<Vec<Value>, String> {
+pub fn read_session_history(file: &Path, expected_id: &str) -> Result<SessionHistory, String> {
     let handle =
         File::open(file).map_err(|error| format!("failed to open Pi session file: {error}"))?;
     if handle.metadata().map_err(|error| error.to_string())?.len() > MAX_SESSION_LOG_BYTES {
@@ -675,7 +744,20 @@ pub fn read_session_messages(file: &Path, expected_id: &str) -> Result<Vec<Value
     if header["id"].as_str() != Some(expected_id) {
         return Err(msg("native.session.id_mismatch"));
     }
-    Ok(project_session_messages(&entries))
+    let nodes = session_nodes(&entries);
+    let path = session_leaf_path(&nodes);
+    let settings = session_settings(&nodes, &path);
+    let messages = session_context_indices(&nodes, &path)
+        .iter()
+        .filter_map(|&index| project_session_entry(nodes[index].2))
+        .collect();
+    Ok(SessionHistory { messages, settings })
+}
+
+/// 只取消息列表的兼容入口（测试与仅需消息的调用方使用）。
+#[cfg(test)]
+fn read_session_messages(file: &Path, expected_id: &str) -> Result<Vec<Value>, String> {
+    Ok(read_session_history(file, expected_id)?.messages)
 }
 
 /// 在 pi 主目录的 sessions 下按 `<时间戳>_<session_id>.jsonl` 命名规则定位会话文件；
@@ -720,14 +802,11 @@ pub fn find_session_file(agent_dir: &Path, session_id: &str) -> Result<Option<Pa
             }
         }
     }
-    let latest = matches.into_iter().max_by_key(|path| {
-        fs::metadata(path)
-            .and_then(|meta| meta.modified())
-            .ok()
-            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-            .map(|duration| duration.as_secs())
-            .unwrap_or(0)
-    });
+    // 直接比较 SystemTime（NTFS 精度到 100ns）；不要截断到秒，否则同秒写入会平局，
+    // 由目录遍历顺序随机决定胜者。
+    let latest = matches
+        .into_iter()
+        .max_by_key(|path| fs::metadata(path).and_then(|meta| meta.modified()).ok());
     Ok(latest)
 }
 
@@ -1254,6 +1333,92 @@ mod tests {
     }
 
     #[test]
+    fn dormant_history_reports_settings_from_the_leaf_path() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("s.jsonl");
+        write_session(
+            &file,
+            &[
+                header("session-1"),
+                message_entry("a1", None, "user", "hi"),
+                {
+                    let mut entry = message_entry("a2", Some("a1"), "assistant", "hello");
+                    entry["message"]["provider"] = json!("anthropic");
+                    entry["message"]["model"] = json!("claude-old");
+                    entry
+                },
+                json!({"type":"model_change","id":"a3","parentId":"a2","provider":"openai","modelId":"gpt-5"}),
+                json!({"type":"thinking_level_change","id":"a4","parentId":"a3","thinkingLevel":"high"}),
+            ],
+        );
+        let history = read_session_history(&file, "session-1").unwrap();
+        assert_eq!(
+            history.settings.model,
+            Some(SessionModel {
+                provider: "openai".into(),
+                id: "gpt-5".into()
+            })
+        );
+        assert_eq!(history.settings.thinking_level.as_deref(), Some("high"));
+        assert_eq!(history.messages.len(), 2);
+    }
+
+    #[test]
+    fn dormant_history_falls_back_to_the_last_assistant_model() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("s.jsonl");
+        let mut first = message_entry("a1", None, "assistant", "one");
+        first["message"]["provider"] = json!("p1");
+        first["message"]["model"] = json!("m1");
+        let mut second = message_entry("a2", Some("a1"), "assistant", "two");
+        second["message"]["provider"] = json!("p2");
+        second["message"]["model"] = json!("m2");
+        write_session(&file, &[header("session-1"), first, second]);
+        let history = read_session_history(&file, "session-1").unwrap();
+        assert_eq!(
+            history.settings.model,
+            Some(SessionModel {
+                provider: "p2".into(),
+                id: "m2".into()
+            })
+        );
+        assert_eq!(history.settings.thinking_level, None);
+    }
+
+    #[test]
+    fn dormant_history_ignores_settings_off_the_leaf_branch() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("s.jsonl");
+        let mut off_branch = message_entry("a2", Some("a1"), "assistant", "off branch");
+        off_branch["message"]["provider"] = json!("stale-provider");
+        off_branch["message"]["model"] = json!("stale-model");
+        write_session(
+            &file,
+            &[
+                header("session-1"),
+                message_entry("a1", None, "user", "root"),
+                off_branch,
+                json!({"type":"model_change","id":"a3","parentId":"a1","provider":"on-path","modelId":"chosen"}),
+                message_entry("a4", Some("a3"), "user", "leaf"),
+            ],
+        );
+        let history = read_session_history(&file, "session-1").unwrap();
+        assert_eq!(
+            history.settings.model,
+            Some(SessionModel {
+                provider: "on-path".into(),
+                id: "chosen".into()
+            })
+        );
+        let contents: Vec<&str> = history
+            .messages
+            .iter()
+            .map(|message| message["content"].as_str().unwrap())
+            .collect();
+        assert_eq!(contents, ["root", "leaf"]);
+    }
+
+    #[test]
     fn find_session_file_locates_by_id_suffix_and_prefers_the_latest() {
         let root = tempfile::tempdir().unwrap();
         let directory = root.path().join("sessions").join("--C---proj--");
@@ -1266,21 +1431,15 @@ mod tests {
         );
         let newer = directory.join("2026-09-20T11-00-00-000Z_abc12345.jsonl");
         fs::write(&newer, "{}").unwrap();
-        // 多个同 id 文件时返回修改时间最新的一个（与搜索内部同一套时间源）。
-        let latest = [old.clone(), newer]
-            .into_iter()
-            .max_by_key(|path| {
-                fs::metadata(path)
-                    .and_then(|meta| meta.modified())
-                    .ok()
-                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|duration| duration.as_secs())
-                    .unwrap_or(0)
-            })
-            .unwrap();
         assert_eq!(
             find_session_file(root.path(), "abc12345").unwrap(),
-            Some(latest)
+            Some(newer)
+        );
+        // 重写旧文件后它的修改时间最新，验证“同 id 多文件取最新”的规则。
+        fs::write(&old, "{\"x\":1}").unwrap();
+        assert_eq!(
+            find_session_file(root.path(), "abc12345").unwrap(),
+            Some(old)
         );
         assert_eq!(find_session_file(root.path(), "ffffffff").unwrap(), None);
         // 非法 session_id 直接返回 None，不做目录扫描。
