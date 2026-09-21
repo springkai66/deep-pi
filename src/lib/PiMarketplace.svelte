@@ -37,15 +37,14 @@
 
   let { projectPath, confirm, onClose, onError, embedded = false, onBusyChange = () => {}, invokeCommand = nativeInvoke }: Props = $props();
   const invoke = <T,>(command: string, args?: Parameters<typeof nativeInvoke>[1]) => invokeCommand<T>(command, args);
-  type SortMode = "default" | "downloads" | "publishedAt";
-  const SORT_MODES: readonly SortMode[] = ["default", "downloads", "publishedAt"];
+  type SortMode = "downloads" | "publishedAt";
+  const SORT_MODES: readonly SortMode[] = ["downloads", "publishedAt"];
   const SORT_LABELS: Record<SortMode, string> = {
-    default: "默认排序",
     downloads: "按下载量排序",
     publishedAt: "按发布时间排序",
   };
   let query = $state("");
-  let sortBy = $state<SortMode>("default");
+  let sortBy = $state<SortMode>("downloads");
   let packages = $state<PiPackage[]>([]);
   let installed = $state<InstalledPackage[]>([]);
   let scope = $state<"global" | "project">("global");
@@ -60,11 +59,10 @@
   let installedGeneration = 0;
 
   const canUseProjectScope = $derived(projectPath !== null);
-  /** 目录展示顺序：下载量、发布时间均按降序（最多 / 最新在前），默认保持后端返回顺序。 */
+  /** 目录展示顺序：下载量、发布时间均按降序（最多 / 最新在前），并列时按名称稳定排序。 */
   const sortedPackages = $derived.by(() => {
     const mode = sortBy;
-    if (mode === "default") return packages;
-    return [...packages].sort((a, b) => b[mode] - a[mode]);
+    return [...packages].sort((a, b) => b[mode] - a[mode] || a.name.localeCompare(b.name));
   });
 
   onMount(() => {

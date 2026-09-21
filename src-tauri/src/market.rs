@@ -836,7 +836,9 @@ pub fn validate_package_name(name: &str) -> Result<&str, String> {
 
 /// Pi 生态包普遍带 `pi-package` 等关键词；搜索为空时用它覆盖整个生态。
 const PI_PACKAGE_SEARCH_TERM: &str = "pi-package";
-const NPM_SEARCH_SIZE: usize = 25;
+/// npm 单次搜索上限 250；100 足以覆盖当前 Pi 生态，避免高下载量包被
+/// 相关性排序挤出首页（这正是“按下载量排序却看不到下载量最高的包”的原因）。
+const NPM_SEARCH_SIZE: usize = 100;
 /// 命中任一关键词即视为 Pi 相关包。
 const PI_PACKAGE_KEYWORDS: [&str; 6] = [
     "pi-package",
@@ -1370,6 +1372,16 @@ pub async fn search_pi_packages(
         .map_err(|error| format!("package search worker failed: {error}"))?
 }
 
+/// 目录默认顺序：按下载量降序，并列时按名称稳定排序。
+pub(crate) fn sort_packages_by_downloads(packages: &mut [PiPackage]) {
+    packages.sort_by(|left, right| {
+        right
+            .downloads
+            .cmp(&left.downloads)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+}
+
 fn filter_packages_by_types(packages: Vec<PiPackage>, types: &[String]) -> Vec<PiPackage> {
     if types.is_empty() {
         return packages;
@@ -1404,6 +1416,9 @@ fn search_pi_packages_inner(
         return Ok(packages);
     }
     let packages = filter_packages_by_types(fetch_npm_pi_packages(&query)?, &request.types);
+    let mut packages = packages;
+    // 目录默认顺序 = 下载量降序（并列按名称），前端不再依赖 npm 的相关性排序。
+    sort_packages_by_downloads(&mut packages);
     cache.insert(key, packages.clone());
     Ok(packages)
 }
@@ -1422,9 +1437,54 @@ mod tests {
     use super::{
         filter_packages_by_types, parse_mcp_registry, parse_model_profile,
         parse_models_dev_catalog, parse_models_dev_profile, parse_npm_package_search,
-        parse_pi_models, parse_pi_packages, validate_package_name, MAX_MODEL_RESULTS,
+        parse_pi_models, parse_pi_packages, sort_packages_by_downloads, validate_package_name,
+        MAX_MODEL_RESULTS,
     };
     use serde_json::json;
+    #[test]
+    fn sorts_packages_by_downloads_descending_then_name() {
+        let mut packages = vec![
+            super::PiPackage {
+                name: "pi-b".into(),
+                description: String::new(),
+                types: vec!["extension".into()],
+                downloads: 100,
+                published_at: 0,
+                path: String::new(),
+            },
+            super::PiPackage {
+                name: "pi-a".into(),
+                description: String::new(),
+                types: vec!["extension".into()],
+                downloads: 900,
+                published_at: 0,
+                path: String::new(),
+            },
+            super::PiPackage {
+                name: "pi-c".into(),
+                description: String::new(),
+                types: vec!["skill".into()],
+                downloads: 0,
+                published_at: 0,
+                path: String::new(),
+            },
+            super::PiPackage {
+                name: "pi-d".into(),
+                description: String::new(),
+                types: vec!["skill".into()],
+                downloads: 100,
+                published_at: 0,
+                path: String::new(),
+            },
+        ];
+        sort_packages_by_downloads(&mut packages);
+        let order: Vec<&str> = packages
+            .iter()
+            .map(|package| package.name.as_str())
+            .collect();
+        assert_eq!(order, ["pi-a", "pi-b", "pi-d", "pi-c"]);
+    }
+
     #[test]
     fn filters_packages_by_type_case_insensitively() {
         let packages = parse_pi_packages(

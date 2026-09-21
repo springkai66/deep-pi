@@ -1,6 +1,6 @@
 {
   "name": "deeppi",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "Desktop host for Pi Coding Agent and DeepSeek Harness",
   "type": "module",
   "scripts": {
