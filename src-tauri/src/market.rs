@@ -835,10 +835,9 @@ pub fn validate_package_name(name: &str) -> Result<&str, String> {
 }
 
 /// Pi 生态包普遍带 `pi-package` 等关键词；搜索为空时用它覆盖整个生态。
-const PI_PACKAGE_SEARCH_TERM: &str = "pi-package";
 /// npm 单次搜索上限 250；100 足以覆盖当前 Pi 生态，避免高下载量包被
 /// 相关性排序挤出首页（这正是“按下载量排序却看不到下载量最高的包”的原因）。
-const NPM_SEARCH_SIZE: usize = 100;
+const NPM_SEARCH_SIZE: usize = 250;
 /// 命中任一关键词即视为 Pi 相关包。
 const PI_PACKAGE_KEYWORDS: [&str; 6] = [
     "pi-package",
@@ -1042,17 +1041,35 @@ pub fn parse_npm_package_search(body: &str) -> Result<Vec<PiPackage>, String> {
     Ok(relevant)
 }
 
-/// 通过 npm registry 搜索接口检索 Pi 包；query 为空时用 `pi-package` 覆盖整个生态。
+/// 通过 npm registry 搜索接口按关键字枚举 Pi 生态：
+/// Pi 包用 `pi-package`/`pi-extension`/`pi-skill`/… 关键字标记，
+/// 单一 `text=pi-package` 搜索既匹配不到全部（120 万条噪声明中）
+/// 也无法保证高下载量包在前；按关键字分别搜索后合并去重。
 pub fn fetch_npm_pi_packages(query: &str) -> Result<Vec<PiPackage>, String> {
     let query = query.trim();
     if query.len() > MAX_QUERY_LENGTH || query.chars().any(char::is_control) {
         return Err("package search query is invalid".into());
     }
-    let text = if query.is_empty() {
-        PI_PACKAGE_SEARCH_TERM
-    } else {
-        query
-    };
+    let mut packages: Vec<PiPackage> = Vec::new();
+    for keyword in PI_PACKAGE_KEYWORDS {
+        let text = if query.is_empty() {
+            format!("keywords:{keyword}")
+        } else {
+            format!("keywords:{keyword} {query}")
+        };
+        for package in fetch_npm_search(&text)? {
+            if !packages
+                .iter()
+                .any(|existing| existing.name == package.name)
+            {
+                packages.push(package);
+            }
+        }
+    }
+    Ok(packages)
+}
+
+fn fetch_npm_search(text: &str) -> Result<Vec<PiPackage>, String> {
     let mut url = Url::parse(&format!("{NPM_REGISTRY_URL}/-/v1/search"))
         .map_err(|error| format!("invalid npm search URL: {error}"))?;
     url.query_pairs_mut()
