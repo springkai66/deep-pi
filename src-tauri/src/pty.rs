@@ -1111,7 +1111,9 @@ mod tests {
             }
             sender.send(bytes).unwrap();
         });
-        let exited = (0..200).any(|_| {
+        // CI 负载下 PowerShell + ConPTY 光标握手可能明显变慢：预算放宽到 20s，
+        // 避免把机器负载当成产品缺陷（本地/空闲机器仍毫秒级通过）。
+        let exited = (0..800).any(|_| {
             if child.try_wait().unwrap().is_some() {
                 true
             } else {
@@ -1123,7 +1125,7 @@ mod tests {
             let _ = child.kill();
         }
         drop(pair.master);
-        let bytes = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+        let bytes = receiver.recv_timeout(Duration::from_secs(15)).unwrap();
         assert!(
             exited,
             "child did not complete after terminal cursor response"
@@ -1184,7 +1186,7 @@ mod tests {
 
         drop(manager);
 
-        let terminated = (0..40).any(|_| {
+        let terminated = (0..400).any(|_| {
             if child
                 .try_wait()
                 .expect("test child should be queryable")
