@@ -2210,6 +2210,9 @@ import type { ChatDetailLevel } from "./settings";
   .turn-summary { min-width: 0; white-space: normal; word-break: break-word; color: var(--text-muted); }
   .turn-panel button.active .turn-summary { color: var(--text-strong); }
   .turn-duration { white-space: normal; color: var(--text-muted); opacity: .75; font-size: 10px; line-height: 1.2; }
+  /* 面板内的耗时不沿用消息标签的胶囊样式，也不随纵向 flex 拉伸成整行宽条
+     （否则会横跨整行、视觉上与下一轮文字挤在一起）。 */
+  .turn-panel .turn-duration { align-self: flex-start; width: fit-content; white-space: nowrap; border: 0; padding: 0; }
   .turn-time { flex-shrink: 0; margin-left: auto; color: var(--text-muted); font-size: 10px; white-space: nowrap; }
   .turn-rail { position: absolute; top: 50%; right: 6px; transform: translateY(-50%); z-index: 3; display: flex; flex-direction: column; align-items: center; gap: 6px; max-height: calc(100% - 24px); overflow-y: auto; padding: 4px 2px; }
   .turn-dot { width: 8px; height: 8px; flex-shrink: 0; padding: 0; border: 0; border-radius: 999px; background: var(--border-strong); opacity: .75; transition: background .15s ease, height .15s ease, opacity .15s ease; }
