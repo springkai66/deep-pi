@@ -1075,11 +1075,19 @@ fn fetch_npm_search(text: &str) -> Result<Vec<PiPackage>, String> {
     url.query_pairs_mut()
         .append_pair("text", text)
         .append_pair("size", &NPM_SEARCH_SIZE.to_string());
-    let mut response = http_agent()
-        .get(url.as_str())
-        .call()
-        .map_err(|error| format!("Pi package catalog request failed: {error}"))?;
-    parse_npm_package_search(&read_response(response.body_mut())?)
+    let body = crate::retry::retry_network(|_attempt| {
+        let mut response = http_agent().get(url.as_str()).call().map_err(|error| {
+            crate::retry::AttemptFailure {
+                message: format!("Pi package catalog request failed: {error}"),
+                retryable: crate::retry::is_retryable_ureq_error(&error),
+                status: None,
+                retry_after: None,
+            }
+        })?;
+        read_response(response.body_mut()).map_err(crate::retry::AttemptFailure::retryable)
+    })
+    .map_err(|failure| failure.message)?;
+    parse_npm_package_search(&body)
 }
 
 fn registry_string(object: &Value, key: &str) -> Option<String> {
@@ -1161,11 +1169,19 @@ fn fetch_mcp_registry(query: &str) -> Result<Vec<McpRegistryEntry>, String> {
     }
     url.query_pairs_mut()
         .append_pair("limit", &MAX_MCP_RESULTS.to_string());
-    let mut response = http_agent()
-        .get(url.as_str())
-        .call()
-        .map_err(|error| format!("MCP registry request failed: {error}"))?;
-    Ok(parse_mcp_registry(&read_response(response.body_mut())?))
+    let body = crate::retry::retry_network(|_attempt| {
+        let mut response = http_agent().get(url.as_str()).call().map_err(|error| {
+            crate::retry::AttemptFailure {
+                message: format!("MCP registry request failed: {error}"),
+                retryable: crate::retry::is_retryable_ureq_error(&error),
+                status: None,
+                retry_after: None,
+            }
+        })?;
+        read_response(response.body_mut()).map_err(crate::retry::AttemptFailure::retryable)
+    })
+    .map_err(|failure| failure.message)?;
+    Ok(parse_mcp_registry(&body))
 }
 
 #[tauri::command]
@@ -1192,11 +1208,19 @@ pub fn fetch_package_metadata(name: &str) -> Result<PackageMetadata, String> {
     validate_package_name(name)?;
     let encoded = name.replace('/', "%2f");
     let url = format!("{NPM_REGISTRY_URL}/{encoded}");
-    let mut response = http_agent()
-        .get(url)
-        .call()
-        .map_err(|error| format!("npm metadata request failed: {error}"))?;
-    let body = read_response(response.body_mut())?;
+    let body =
+        crate::retry::retry_network(|_attempt| {
+            let mut response = http_agent().get(url.clone()).call().map_err(|error| {
+                crate::retry::AttemptFailure {
+                    message: format!("npm metadata request failed: {error}"),
+                    retryable: crate::retry::is_retryable_ureq_error(&error),
+                    status: None,
+                    retry_after: None,
+                }
+            })?;
+            read_response(response.body_mut()).map_err(crate::retry::AttemptFailure::retryable)
+        })
+        .map_err(|failure| failure.message)?;
     let value: Value =
         serde_json::from_str(&body).map_err(|error| format!("npm metadata is invalid: {error}"))?;
     let version = value
@@ -1265,12 +1289,26 @@ fn fetch_models_dev_catalog(cache: Option<&ModelCatalogCache>) -> Result<String,
             return Ok(body);
         }
     }
-    let mut response = http_agent_with_timeout(MODELS_REQUEST_TIMEOUT)
-        .get(MODELS_DEV_URL)
-        .call()
-        .map_err(|error| format!("models.dev catalog request failed: {error}"))?;
-    let body = read_response_with_limit(response.body_mut(), MAX_MODELS_RESPONSE_BYTES)
-        .map_err(|error| format!("models.dev catalog request failed: {error}"))?;
+    let body = crate::retry::retry_network(|_attempt| {
+        let mut response = http_agent_with_timeout(MODELS_REQUEST_TIMEOUT)
+            .get(MODELS_DEV_URL)
+            .call()
+            .map_err(|error| crate::retry::AttemptFailure {
+                message: format!("models.dev catalog request failed: {error}"),
+                retryable: crate::retry::is_retryable_ureq_error(&error),
+                status: None,
+                retry_after: None,
+            })?;
+        read_response_with_limit(response.body_mut(), MAX_MODELS_RESPONSE_BYTES).map_err(|error| {
+            crate::retry::AttemptFailure {
+                message: format!("models.dev catalog request failed: {error}"),
+                retryable: true,
+                status: None,
+                retry_after: None,
+            }
+        })
+    })
+    .map_err(|failure| failure.message)?;
     if let Some(cache) = cache {
         cache.insert(MODELS_CATALOG_CACHE_KEY.to_owned(), body.clone());
     }

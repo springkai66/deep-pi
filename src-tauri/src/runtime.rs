@@ -357,21 +357,41 @@ fn fetch_latest_from_registry(
         config = config.proxy(Some(proxy));
     }
     let agent = config.build().new_agent();
-    let mut response = agent
-        .get(&format!("{registry}/{encoded}"))
-        .call()
-        .map_err(|error| format!("update check failed: {error}"))?;
-    let status = response.status().as_u16();
-    let body = response
-        .body_mut()
-        .with_config()
-        .limit(512 * 1024)
-        .lossy_utf8(true)
-        .read_to_string()
-        .map_err(|error| format!("update response read failed: {error}"))?;
-    if !(200..300).contains(&status) {
-        return Err(format!("update check returned HTTP {status}"));
-    }
+    let mut body = String::new();
+    crate::retry::retry_network(|_attempt| {
+        let mut response = agent
+            .get(&format!("{registry}/{encoded}"))
+            .call()
+            .map_err(|error| crate::retry::AttemptFailure {
+                message: format!("update check failed: {error}"),
+                retryable: crate::retry::is_retryable_ureq_error(&error),
+                status: None,
+                retry_after: None,
+            })?;
+        let status = response.status().as_u16();
+        body = response
+            .body_mut()
+            .with_config()
+            .limit(512 * 1024)
+            .lossy_utf8(true)
+            .read_to_string()
+            .map_err(|error| crate::retry::AttemptFailure {
+                message: format!("update response read failed: {error}"),
+                retryable: true,
+                status: None,
+                retry_after: None,
+            })?;
+        if !(200..300).contains(&status) {
+            return Err(crate::retry::AttemptFailure {
+                message: format!("update check returned HTTP {status}"),
+                retryable: crate::retry::is_retryable_status(status),
+                status: Some(status),
+                retry_after: None,
+            });
+        }
+        Ok(())
+    })
+    .map_err(|failure| failure.message)?;
     let value: serde_json::Value = serde_json::from_str(&body)
         .map_err(|error| format!("update response is invalid JSON: {error}"))?;
     let version = value
@@ -877,31 +897,50 @@ fn install_dshmarket(
 
 /// 下载 Node 用于校验的 SHA-256 清单/小文件。
 fn download_node_text(agent: &ureq::Agent, url: &str) -> Result<String, String> {
-    let mut response = agent.get(url).call().map_err(|error| {
-        msg_with(
-            "runtime.node.download_failed",
-            &[("detail", &error.to_string())],
-        )
-    })?;
-    let status = response.status().as_u16();
-    let body = response
-        .body_mut()
-        .with_config()
-        .limit(1024 * 1024)
-        .lossy_utf8(true)
-        .read_to_string()
-        .map_err(|error| {
-            msg_with(
-                "runtime.node.download_read_failed",
-                &[("detail", &error.to_string())],
-            )
-        })?;
-    if !(200..300).contains(&status) {
-        return Err(msg_with(
-            "runtime.node.download_http_failed",
-            &[("status", &status.to_string())],
-        ));
-    }
+    let mut body = String::new();
+    crate::retry::retry_network(|_attempt| {
+        let mut response = agent
+            .get(url)
+            .call()
+            .map_err(|error| crate::retry::AttemptFailure {
+                message: msg_with(
+                    "runtime.node.download_failed",
+                    &[("detail", &error.to_string())],
+                ),
+                retryable: crate::retry::is_retryable_ureq_error(&error),
+                status: None,
+                retry_after: None,
+            })?;
+        let status = response.status().as_u16();
+        body = response
+            .body_mut()
+            .with_config()
+            .limit(1024 * 1024)
+            .lossy_utf8(true)
+            .read_to_string()
+            .map_err(|error| crate::retry::AttemptFailure {
+                message: msg_with(
+                    "runtime.node.download_read_failed",
+                    &[("detail", &error.to_string())],
+                ),
+                retryable: true,
+                status: None,
+                retry_after: None,
+            })?;
+        if !(200..300).contains(&status) {
+            return Err(crate::retry::AttemptFailure {
+                message: msg_with(
+                    "runtime.node.download_http_failed",
+                    &[("status", &status.to_string())],
+                ),
+                retryable: crate::retry::is_retryable_status(status),
+                status: Some(status),
+                retry_after: None,
+            });
+        }
+        Ok(())
+    })
+    .map_err(|failure| failure.message)?;
     Ok(body)
 }
 
@@ -914,12 +953,22 @@ fn download_node_archive(
     on_progress: Option<&dyn Fn(u8)>,
 ) -> Result<String, String> {
     cancellation.check()?;
-    let response = agent.get(url).call().map_err(|error| {
-        msg_with(
-            "runtime.node.download_failed",
-            &[("detail", &error.to_string())],
-        )
-    })?;
+    // 连接建立带重试（网络瞬断）；流式下载中断不自动重放，交由用户重试。
+    let response = crate::retry::retry_network(|_attempt| {
+        agent
+            .get(url)
+            .call()
+            .map_err(|error| crate::retry::AttemptFailure {
+                message: msg_with(
+                    "runtime.node.download_failed",
+                    &[("detail", &error.to_string())],
+                ),
+                retryable: crate::retry::is_retryable_ureq_error(&error),
+                status: None,
+                retry_after: None,
+            })
+    })
+    .map_err(|failure| failure.message)?;
     let status = response.status().as_u16();
     if !(200..300).contains(&status) {
         return Err(msg_with(

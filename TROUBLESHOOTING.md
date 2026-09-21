@@ -64,7 +64,7 @@ DeepPi v1.0 只安装并验证 **DSH 0.1.1-rc.2**。DSH 0.1.5-rc.1 起启动 URL
 
 扩展与 dshmarket 的原地修改会先建立持久化快照。应用意外退出后，下次启动会在创建会话前恢复未提交快照。若提示 `pending package recovery`，请关闭并重新启动 DeepPi；恢复失败时保留日志及 `backups\operation-*`，不要继续修改包目录。旧格式快照只保留用于人工诊断，不自动重放。
 
-没有网络时，设置页可能显示带“离线缓存”的旧检查结果；旧结果最多保留 7 天，不代表当前 registry 状态。需要代理时，在启动 DeepPi 前设置 `HTTPS_PROXY` 或 `HTTP_PROXY`；代理必须是 HTTPS，或指向 loopback 的 HTTP 地址。
+没有网络时，设置页可能显示带“离线缓存”的旧检查结果；旧结果最多保留 7 天，不代表当前 registry 状态。需要代理时，可在设置页选择“跟随系统”（自动检测 Windows 系统代理）或“手动设置”；开发环境也可在启动前设置 `HTTPS_PROXY` 或 `HTTP_PROXY`。
 
 ```powershell
 $env:HTTPS_PROXY = "https://proxy.example.com:8443"

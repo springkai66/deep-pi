@@ -25,7 +25,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter, Manager, Url};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::message::{msg, msg_with};
 use crate::{app_paths::AppPaths, provider::validate_provider_id};
@@ -427,113 +427,6 @@ fn install_bridge(paths: &AppPaths) -> Result<PathBuf, String> {
     Ok(destination)
 }
 
-/// 解析 Windows `ProxyServer` 注册表值，返回形如 `http://host:port` 的代理。
-/// 支持三种形态：`127.0.0.1:7890`（单值同时用于 http/https）、
-/// `http=…;https=…`（按协议分组，优先 https）、`socks=…`（仅 SOCKS 无法映射
-/// 为 HTTP 代理，返回 None）。其余或非法输入返回 None。
-#[cfg_attr(not(windows), allow(dead_code))]
-fn parse_windows_proxy_server(raw: &str) -> Option<String> {
-    let raw = raw.trim();
-    if raw.is_empty() {
-        return None;
-    }
-    if raw.contains('=') {
-        let mut https = None;
-        let mut http = None;
-        for part in raw.split(';') {
-            let Some((scheme, value)) = part.trim().split_once('=') else {
-                continue;
-            };
-            match scheme.trim().to_ascii_lowercase().as_str() {
-                "https" => https = Some(value.trim()),
-                "http" => http = Some(value.trim()),
-                // ftp= / socks= 等其它协议条目与 HTTP(S) 代理环境变量无关。
-                _ => {}
-            }
-        }
-        return host_port_to_http_proxy(https.or(http)?);
-    }
-    host_port_to_http_proxy(raw)
-}
-
-/// 把 `host:port` 或 URL 形态的代理统一成 `http://host:port`。
-#[cfg_attr(not(windows), allow(dead_code))]
-fn host_port_to_http_proxy(value: &str) -> Option<String> {
-    let value = value.trim();
-    if value.is_empty() {
-        return None;
-    }
-    if value.contains("//") {
-        let url = Url::parse(value).ok()?;
-        if url.scheme() != "http" {
-            return None;
-        }
-        let host = url.host_str()?;
-        let port = url.port_or_known_default()?;
-        return Some(format!("http://{host}:{port}"));
-    }
-    let (host, port_text) = value.rsplit_once(':')?;
-    let host = host.trim();
-    let port_text = port_text.trim();
-    if host.is_empty()
-        || port_text.is_empty()
-        || !port_text.bytes().all(|byte| byte.is_ascii_digit())
-    {
-        return None;
-    }
-    let port: u16 = port_text.parse().ok()?;
-    if port == 0 {
-        return None;
-    }
-    Some(format!("http://{host}:{port}"))
-}
-
-/// Windows 系统代理解析（注册表 Internet Settings）。某些代理客户端会把
-/// ProxyEnable 保持为 0，但仍写入 ProxyServer 并由浏览器实际使用；只要地址
-/// 通过安全校验，就应交给桥接子进程，否则 OAuth 会绕过浏览器代理直连超时。
-#[cfg(windows)]
-fn detect_system_proxy() -> Option<String> {
-    use crate::provider::validate_proxy;
-    use winreg::enums::HKEY_CURRENT_USER;
-
-    let settings = winreg::RegKey::predef(HKEY_CURRENT_USER)
-        .open_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings")
-        .ok()?;
-    let raw: String = settings.get_value("ProxyServer").ok()?;
-    let proxy = parse_windows_proxy_server(&raw)?;
-    validate_proxy(Some(&proxy)).ok()?;
-    Some(proxy)
-}
-
-/// 非 Windows 平台暂不解析系统代理。
-#[cfg(not(windows))]
-fn detect_system_proxy() -> Option<String> {
-    None
-}
-
-/// 决定桥接子进程要注入的代理环境变量：已有任何代理环境变量时尊重现有配置
-/// （返回 None），否则使用系统代理。`lookup` 由调用方注入以便测试。
-fn decide_proxy_injection(
-    lookup: &dyn Fn(&str) -> Option<String>,
-    system_proxy: Option<String>,
-) -> Option<Vec<(&'static str, String)>> {
-    for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
-        if lookup(key).is_some_and(|value| !value.trim().is_empty()) {
-            return None;
-        }
-    }
-    let proxy = system_proxy?;
-    let no_proxy = "localhost,127.0.0.1,::1".to_string();
-    Some(vec![
-        ("HTTP_PROXY", proxy.clone()),
-        ("HTTPS_PROXY", proxy.clone()),
-        ("http_proxy", proxy.clone()),
-        ("https_proxy", proxy.clone()),
-        ("NO_PROXY", no_proxy.clone()),
-        ("no_proxy", no_proxy),
-    ])
-}
-
 fn spawn_bridge(
     app: Option<&AppHandle>,
     paths: &AppPaths,
@@ -558,11 +451,19 @@ fn spawn_bridge(
     // HTTP(S)_PROXY 环境变量。浏览器端走系统代理能完成授权，而这里直连会被
     // 部分官方服务（如 OpenAI）按地区拦截（HTTP 403），造成「网页成功、应用
     // 报失败」。用户已显式配置代理环境变量时尊重现状，不覆盖。
-    if let Some(pairs) =
-        decide_proxy_injection(&|key| std::env::var(key).ok(), detect_system_proxy())
-    {
-        for (key, value) in pairs {
-            command.env(key, value);
+    //
+    // 跟随系统/手动模式的常规注入已由 apply_to_command 完成；这里只补 OAuth
+    // 特例：仅跟随系统模式且严格系统代理（ProxyEnable=1）未命中时，兼容
+    // 「ProxyEnable=0 但写了 ProxyServer」的注册表残留配置。直连模式不注入，
+    // 尊重用户的直连选择。
+    if crate::proxy::current_mode() == "system" && crate::proxy::detect_system_proxy().is_none() {
+        if let Some(pairs) = crate::proxy::decide_proxy_injection(
+            &|key| std::env::var(key).ok(),
+            crate::proxy::detect_system_proxy_tolerant(),
+        ) {
+            for (key, value) in pairs {
+                command.env(key, value);
+            }
         }
     }
     if let Some(inject) = inject {
@@ -884,48 +785,6 @@ mod tests {
             .unwrap()
             .contains("[redacted]"));
         assert_eq!(sanitized["provider"], json!("anthropic"));
-    }
-
-    #[test]
-    fn parses_windows_proxy_server_forms() {
-        // 单值形态：host:port 同时用于 http/https。
-        assert_eq!(
-            parse_windows_proxy_server("127.0.0.1:7890").as_deref(),
-            Some("http://127.0.0.1:7890")
-        );
-        assert_eq!(
-            parse_windows_proxy_server(" localhost:8080 ").as_deref(),
-            Some("http://localhost:8080")
-        );
-        // 按协议分组：优先 https 条目，大小写不敏感。
-        assert_eq!(
-            parse_windows_proxy_server("http=10.0.0.2:80;https=10.0.0.2:443").as_deref(),
-            Some("http://10.0.0.2:443")
-        );
-        assert_eq!(
-            parse_windows_proxy_server("HTTP=10.0.0.2:8080").as_deref(),
-            Some("http://10.0.0.2:8080")
-        );
-        // 仅 SOCKS 无法映射为 HTTP 代理环境变量；空值与非法端口返回 None。
-        assert_eq!(parse_windows_proxy_server("socks=127.0.0.1:1080"), None);
-        assert_eq!(parse_windows_proxy_server(""), None);
-        assert_eq!(parse_windows_proxy_server("host:not-a-port"), None);
-    }
-
-    #[test]
-    fn proxy_injection_respects_existing_env() {
-        // 用户已显式配置代理环境变量：不注入、不覆盖。
-        let existing = |key: &str| (key == "HTTPS_PROXY").then(|| "http://env-proxy:1".to_string());
-        assert!(decide_proxy_injection(&existing, Some("http://127.0.0.1:7890".into())).is_none());
-        let none = |_: &str| None::<String>;
-        let pairs = decide_proxy_injection(&none, Some("http://127.0.0.1:7890".into()))
-            .expect("system proxy should be injected");
-        assert!(pairs
-            .iter()
-            .any(|(key, value)| *key == "HTTPS_PROXY" && value == "http://127.0.0.1:7890"));
-        assert!(pairs.iter().any(|(key, _)| *key == "NO_PROXY"));
-        // 没有可用系统代理时不注入任何东西。
-        assert!(decide_proxy_injection(&none, None).is_none());
     }
 
     #[test]

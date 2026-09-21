@@ -896,9 +896,8 @@ pub(crate) enum ChatCallError {
     Request(String),
     /// 上游返回非 2xx 状态码。
     Http(u16),
-    /// 响应体读取失败。
-    ResponseRead(String),
     /// 响应体不是可识别的聊天补全结构；细节是句子片段（如 `is not valid JSON: …`）。
+    /// 响应体读取失败经重试后仍失败时并入 Request。
     ResponseInvalid(String),
     /// 本地准备阶段失败：models.json、凭据、URL、代理配置。
     Local(String),
@@ -910,10 +909,9 @@ impl ChatCallError {
         match self {
             Self::ProviderUnconfigured => "no Pi provider with models is configured".into(),
             Self::BaseUrlMissing => "provider has no base URL".into(),
-            Self::Request(error)
-            | Self::ResponseRead(error)
-            | Self::ResponseInvalid(error)
-            | Self::Local(error) => error.clone(),
+            Self::Request(error) | Self::ResponseInvalid(error) | Self::Local(error) => {
+                error.clone()
+            }
             Self::Http(status) => format!("HTTP {status}"),
         }
     }
@@ -1087,24 +1085,44 @@ pub(crate) fn call_configured_model(
     let agent = chat_agent(&provider, timeout).map_err(ChatCallError::Local)?;
     let body = chat_request_body(&api, &model_id, system, user, max_output_tokens);
 
-    let request = agent
-        .post(url.as_str())
-        .header("Accept", "application/json");
-    let request = apply_provider_auth(request, &provider, api_key.as_deref());
-    let mut response = request
-        .send_json(&body)
-        .map_err(|error| ChatCallError::Request(error.to_string()))?;
-    let status = response.status().as_u16();
-    let body_text = response
-        .body_mut()
-        .with_config()
-        .limit(CHAT_MAX_RESPONSE_BYTES)
-        .lossy_utf8(true)
-        .read_to_string()
-        .map_err(|error| ChatCallError::ResponseRead(error.to_string()))?;
-    if !(200..300).contains(&status) {
-        return Err(ChatCallError::Http(status));
-    }
+    // 网络瞬断自动重试：仅连接建立失败与网关类状态（429/502/503/504），
+    // 超时与中段 IO 不重放（服务端可能已受理，避免重复计费）。每次尝试
+    // 重建请求（ureq 消耗 builder），鉴权头与请求体随尝试一起恢复。
+    let mut status = 0u16;
+    let mut body_text = String::new();
+    crate::retry::retry_network(|_attempt| {
+        let request = agent
+            .post(url.as_str())
+            .header("Accept", "application/json");
+        let request = apply_provider_auth(request, &provider, api_key.as_deref());
+        match request.send_json(&body) {
+            Ok(mut response) => {
+                status = response.status().as_u16();
+                body_text =
+                    crate::retry::read_body_limited(response.body_mut(), CHAT_MAX_RESPONSE_BYTES)
+                        .map_err(crate::retry::AttemptFailure::retryable)?;
+                if !(200..300).contains(&status) {
+                    return Err(crate::retry::AttemptFailure {
+                        message: format!("HTTP {status}"),
+                        retryable: crate::retry::is_retryable_status(status),
+                        status: Some(status),
+                        retry_after: crate::retry::parse_retry_after_header(response.headers()),
+                    });
+                }
+                Ok(())
+            }
+            Err(error) => Err(crate::retry::AttemptFailure {
+                message: error.to_string(),
+                retryable: crate::retry::is_retryable_post_error(&error),
+                status: None,
+                retry_after: None,
+            }),
+        }
+    })
+    .map_err(|failure| match failure.status {
+        Some(status) => ChatCallError::Http(status),
+        None => ChatCallError::Request(failure.message),
+    })?;
     parse_chat_response(&body_text).map_err(ChatCallError::ResponseInvalid)
 }
 
@@ -1116,22 +1134,37 @@ fn fetch_provider_models(provider: &ProviderRecord) -> Result<Vec<ProviderModelS
     let url = provider_models_url(base_url, &provider.api)?;
     let api_key = provider_api_key(&provider.id)?;
     let agent = provider_agent(provider)?;
-    let request = agent.get(url.as_str()).header("Accept", "application/json");
-    let request = apply_provider_auth(request, provider, api_key.as_deref());
-    let mut response = request.call().map_err(|error| {
-        msg_with(
-            "provider.model_request.error",
-            &[("error", &error.to_string())],
-        )
-    })?;
-    let status = response.status().as_u16();
-    let body = provider_response_body(response.body_mut())?;
-    if !(200..300).contains(&status) {
-        return Err(msg_with(
-            "provider.model_request.failed",
-            &[("status", &status.to_string())],
-        ));
-    }
+    let body = crate::retry::retry_network(|_attempt| {
+        let request = agent.get(url.as_str()).header("Accept", "application/json");
+        let request = apply_provider_auth(request, provider, api_key.as_deref());
+        let mut response = request
+            .call()
+            .map_err(|error| crate::retry::AttemptFailure {
+                message: msg_with(
+                    "provider.model_request.error",
+                    &[("error", &error.to_string())],
+                ),
+                retryable: crate::retry::is_retryable_ureq_error(&error),
+                status: None,
+                retry_after: None,
+            })?;
+        let status = response.status().as_u16();
+        let body = provider_response_body(response.body_mut())
+            .map_err(crate::retry::AttemptFailure::retryable)?;
+        if !(200..300).contains(&status) {
+            return Err(crate::retry::AttemptFailure {
+                message: msg_with(
+                    "provider.model_request.failed",
+                    &[("status", &status.to_string())],
+                ),
+                retryable: crate::retry::is_retryable_status(status),
+                status: Some(status),
+                retry_after: None,
+            });
+        }
+        Ok(body)
+    })
+    .map_err(|failure| failure.message)?;
     parse_provider_models(&body, &provider.id)
 }
 
