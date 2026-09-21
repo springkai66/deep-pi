@@ -4,6 +4,8 @@
   import { onMount, tick, untrack, type Snippet } from "svelte";
   import type { DialogRequest, DialogValue } from "./dialog";
   import { applyRpcEvent, canSubmitPrompt, contentText, emptyConversation, loadHistory, messageRenderable, readableRpcError, record, type RpcEvent, type RpcMessage, type RpcTool } from "./rpc-state";
+  import FileChangeDiff from "./FileChangeDiff.svelte";
+  import { computeLineDiff, extractFileChange, type FileChange, type LineDiff } from "./file-change-diff";
   import { onModelsChanged } from "./model-config-sync";
   import { findSavedModel, parseModelKey, shouldApplySavedChoice, validSavedThinkingLevel, type SavedModelChoice } from "./model-memory";
 import type { ChatDetailLevel } from "./settings";
@@ -288,12 +290,24 @@ import type { ChatDetailLevel } from "./settings";
       .map((message, offset) => ({ message, index: messageStart + offset }))
       .filter((entry) => messageRenderable(entry.message)),
   );
-  const toolResults = $derived(new Set(conversation.messages.map((message) => message.toolCallId).filter(Boolean)));
+  const toolResults = $derived(
+    new Set(conversation.messages.map((message) => message.toolCallId).filter((id): id is string => Boolean(id))),
+  );
   const liveTools = $derived(Object.values(conversation.tools).filter((tool) => !toolResults.has(tool.id)));
   /// 正在执行的工具：工具卡与状态栏共用；通常只有一个，多个时展示最新的一个。
   const runningTools = $derived(liveTools.filter((tool) => tool.running));
   const finishedLiveTools = $derived(liveTools.filter((tool) => !tool.running));
   const activeTool = $derived(runningTools.length ? runningTools[runningTools.length - 1] : null);
+  /// 文件修改工具（edit/write）的差异缓存：按工具 id 记忆，避免流式更新反复重算。
+  const fileChangeDiffs = $derived.by(() => {
+    const map = new Map<string, { change: FileChange; diff: LineDiff }>();
+    for (const tool of Object.values(conversation.tools)) {
+      const change = extractFileChange(tool.name, tool.args);
+      if (!change) continue;
+      map.set(tool.id, { change, diff: computeLineDiff(change.before, change.after) });
+    }
+    return map;
+  });
 
   interface ChatTurn {
     /// 该 user 消息在 conversation.messages 中的下标
@@ -1624,6 +1638,10 @@ import type { ChatDetailLevel } from "./settings";
     sendResponse: <T>(command: Record<string, unknown>) => Promise<T>, alive: () => boolean,
   ) {
     const method = request.method;
+    // 扩展恢复检测：错误横幅只在扩展出错时展示；扩展随后发出任何有效信号
+    // （非错误通知、状态/组件更新、UI 交互）即视为已恢复正常，自动清除横幅，
+    // 避免错误在功能恢复后仍长期滞留。错误通知本身仍会重新设置横幅。
+    if (!(method === "notify" && request.notifyType === "error")) extensionError = "";
     if (method === "notify") {
       const text = String(request.message ?? "");
       // 错误级通知进入会话流（与失败的工具/回合同处）；普通通知仍走提示条。
@@ -1767,7 +1785,7 @@ import type { ChatDetailLevel } from "./settings";
             {#if messageModule}
               {#await messageModule}
                 <pre>{messageSource(message.content)}</pre>
-              {:then module}<module.default {message} onOpenLink={openMessageLink} detail={chatDetailLevel} />
+              {:then module}<module.default {message} onOpenLink={openMessageLink} detail={chatDetailLevel} resolvedToolIds={toolResults} />
               {:catch}<pre>{messageSource(message.content)}</pre>{/await}
             {/if}
           </MessageDisclosure>
@@ -1776,7 +1794,7 @@ import type { ChatDetailLevel } from "./settings";
             {#if messageModule}
               {#await messageModule}
                 <div class="plain-message">{messageSource(message.content)}</div>
-              {:then module}<module.default {message} onOpenLink={openMessageLink} detail={chatDetailLevel} />
+              {:then module}<module.default {message} onOpenLink={openMessageLink} detail={chatDetailLevel} resolvedToolIds={toolResults} />
               {:catch}
                 <div class="plain-message">{messageSource(message.content)}</div>
                 <button type="button" title={t("重新加载消息显示")} aria-label={t("重新加载消息显示")} onclick={() => { messageModule = null; }}><RefreshCw size={15} /></button>
@@ -1797,7 +1815,11 @@ import type { ChatDetailLevel } from "./settings";
     {/if}
     {#if extensionError}
       <article class="chat-error extension-error" role="alert">
-        <div class="message-label"><CircleAlert size={14} />{t("扩展错误")}</div>
+        <div class="message-label">
+          <CircleAlert size={14} />{t("扩展错误")}
+          <button type="button" class="extension-error-dismiss" aria-label={t("隐藏扩展错误")} title={t("隐藏扩展错误")}
+            onclick={() => { extensionError = ""; }}><X size={12} /></button>
+        </div>
         <p class="chat-error-text">{extensionError}</p>
       </article>
     {/if}
@@ -1823,6 +1845,10 @@ import type { ChatDetailLevel } from "./settings";
           <button type="button" class="tool-call-interrupt" disabled={stopping} title={t("中断当前执行")} aria-label={t("中断当前执行")}
             onclick={() => void interrupt()}><Square size={11} />{t("中断")}</button>
         </div>
+        {#if fileChangeDiffs.get(tool.id)}
+          {@const runningChange = fileChangeDiffs.get(tool.id)!}
+          <FileChangeDiff change={runningChange.change} diff={runningChange.diff} tone="pending" />
+        {/if}
         {#if chatDetailLevel === "concise"}
           {#if liveOutputLastLine(tool)}<p class="tool-call-preview">{liveOutputLastLine(tool)}</p>{/if}
         {:else if liveOutputTail(tool)}
@@ -1839,6 +1865,10 @@ import type { ChatDetailLevel } from "./settings";
             <Terminal size={14} /><span class="tool-call-name">{toolCallSummary(tool.name, tool.args)}</span>
             <span class="tool-call-state">{tool.isError ? t("失败") : t("完成")}</span>
           </summary>
+          {#if fileChangeDiffs.get(tool.id)}
+            {@const finishedChange = fileChangeDiffs.get(tool.id)!}
+            <FileChangeDiff change={finishedChange.change} diff={finishedChange.diff} tone={tool.isError ? "failed" : "done"} />
+          {/if}
           <pre>{JSON.stringify(tool.args, null, 2)}</pre>
           {#if tool.result}<pre>{contentText(record(tool.result).content)}</pre>{/if}
         </details>
@@ -2195,6 +2225,12 @@ import type { ChatDetailLevel } from "./settings";
   /* 错误卡片：与其他内容同宽（900px 居中），显示在会话流内随内容滚动，不再常驻输入框上方。 */
   .chat-error { max-width: 900px; margin: 0 auto 24px; padding: 10px 12px; border: 1px solid #bd5147; border-radius: 6px; background: rgb(189 81 71 / 8%); color: #d46b61; overflow-wrap: anywhere; }
   .chat-error .message-label { margin-bottom: 6px; color: #d46b61; }
+  .extension-error-dismiss {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 20px; height: 20px; margin-left: auto; padding: 0;
+    border: 0; border-radius: 4px; color: #d46b61; background: transparent; cursor: pointer;
+  }
+  .extension-error-dismiss:hover { background: rgb(189 81 71 / 15%); }
   .chat-error-text { margin: 0 0 8px; font-size: 12.5px; line-height: 1.55; white-space: pre-wrap; }
   .chat-error-retry { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border: 1px solid #bd5147; border-radius: 4px; background: transparent; color: #d46b61; font-size: 12px; cursor: pointer; }
   .chat-error-retry:hover { background: rgb(189 81 71 / 15%); }

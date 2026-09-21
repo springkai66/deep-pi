@@ -6,8 +6,10 @@
   import MessageMarkdown from "./MessageMarkdown.svelte";
   import MessageCodeBlock from "./MessageCodeBlock.svelte";
   import MessageDisclosure from "./MessageDisclosure.svelte";
+  import FileChangeDiff from "./FileChangeDiff.svelte";
+  import { computeLineDiff, extractFileChange, type FileChange, type LineDiff } from "./file-change-diff";
   import { t, tm } from "$lib/i18n.svelte";
-  let { message, onOpenLink, detail = "standard" }: { message: RpcMessage; onOpenLink: (url: string) => void; detail?: ChatDetailLevel } = $props();
+  let { message, onOpenLink, detail = "standard", resolvedToolIds }: { message: RpcMessage; onOpenLink: (url: string) => void; detail?: ChatDetailLevel; resolvedToolIds?: Set<string> } = $props();
   /// 「简洁」档只显示文本与图片（隐藏思考/工具调用等过程内容）；「详细」档过程内容默认展开。
   const parts = $derived(
     detail === "concise"
@@ -15,6 +17,19 @@
       : messageParts(message.content),
   );
   const detailOpen = $derived(detail === "verbose");
+  /// 工具参数命中文件修改（edit/write）的差异缓存：按参数 JSON 串为键，
+  /// 每条消息只计算一次，模板里 O(1) 查表。
+  const fileChangeDiffs = $derived.by(() => {
+    const map = new Map<string, { change: FileChange; diff: LineDiff }>();
+    if (message.role !== "assistant") return map;
+    for (const part of messageParts(message.content)) {
+      if (part.kind !== "tool") continue;
+      const change = extractFileChange(part.name, part.args);
+      if (!change) continue;
+      map.set(part.content, { change, diff: computeLineDiff(change.before, change.after) });
+    }
+    return map;
+  });
   let sourceMode = $state(false);
   let copied = $state(false);
   let copying = $state(false);
@@ -43,6 +58,12 @@
       {:else if part.kind === "thinking"}
         <MessageDisclosure title={t("思考")} variant="thinking" defaultOpen={detailOpen}><MessageMarkdown content={part.content} {onOpenLink} /></MessageDisclosure>
       {:else if part.kind === "tool"}
+        {@const fileChange = fileChangeDiffs.get(part.content)}
+        {#if fileChange && (!part.id || !resolvedToolIds || resolvedToolIds.has(part.id))}
+          <!-- 文件修改工具：差异卡片展示。同一调用的实时卡片存在时
+               （尚未收到工具结果）不重复渲染，避免双重显示。 -->
+          <FileChangeDiff change={fileChange.change} diff={fileChange.diff} tone="plain" />
+        {/if}
         <MessageDisclosure title={t("{name} · 工具参数", { name: part.name })} defaultOpen={detailOpen}><MessageCodeBlock content={part.content} language="json" /></MessageDisclosure>
       {:else if part.kind === "image"}
         <MessageDisclosure title={part.content} defaultOpen={detailOpen}>

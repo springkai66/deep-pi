@@ -3,7 +3,7 @@ import { record } from "./rpc-state";
 
 export type MessagePart =
   | { kind: "text" | "thinking" | "unknown"; content: string }
-  | { kind: "tool"; content: string; name: string }
+  | { kind: "tool"; content: string; name: string; args?: unknown; id?: string }
   | { kind: "image"; content: string; source: string | null };
 
 function cleanThinkingText(value: string): string {
@@ -16,7 +16,7 @@ export function messageParts(content: unknown): MessagePart[] {
     const part = record(value);
     if (part.type === "text" && typeof part.text === "string") return { kind: "text", content: part.text };
     if (part.type === "thinking") return { kind: "thinking", content: cleanThinkingText(typeof part.thinking === "string" ? part.thinking : t("思考内容不可用")) };
-    if (part.type === "toolCall") return { kind: "tool", name: String(part.name ?? t("工具")), content: JSON.stringify(part.arguments ?? {}, null, 2) };
+    if (part.type === "toolCall") return { kind: "tool", name: String(part.name ?? t("工具")), content: JSON.stringify(part.arguments ?? {}, null, 2), args: part.arguments, id: typeof part.id === "string" ? part.id : undefined };
     if (part.type === "image") {
       const mime = String(part.mimeType ?? "");
       const data = part.data;
