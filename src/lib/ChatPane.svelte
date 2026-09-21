@@ -10,6 +10,7 @@ import type { ChatDetailLevel } from "./settings";
   import { captureTranscriptAnchor, restoreTranscriptAnchor, messageWindowStart, transcriptPort } from "./transcript-scroll";
   import MessageDisclosure from "./MessageDisclosure.svelte";
   import { messageSource } from "./message-parts";
+  import { clipboardImageFiles } from "./clipboard-images";
   import { hasQueuedImages, rekeyQueuedImages, takeQueuedImages, type QueuedImageEntry } from "./queued-images";
   import { formatDuration } from "./duration";
   import { createDormantHistorySession, createRpcHistorySession, prependRpcHistory } from "./rpc-history";
@@ -216,9 +217,18 @@ import type { ChatDetailLevel } from "./settings";
   }
 
   function onComposerPaste(event: ClipboardEvent) {
-    const files = event.clipboardData?.files;
-    if (!files?.length) return;
-    const images = Array.from(files).filter((file) => file.type.startsWith("image/"));
+    const images = clipboardImageFiles(event.clipboardData);
+    if (!images.length) return;
+    event.preventDefault();
+    addImageFiles(images);
+  }
+
+  /// 粘贴兜底：焦点不在输入框（例如刚点过消息/工具卡）时，也把剪贴板里的图片收进附件。
+  function onPanePaste(event: ClipboardEvent) {
+    if (!visible) return;
+    const target = event.target as HTMLElement | null;
+    if (target?.closest("input, textarea, [contenteditable='true']")) return;
+    const images = clipboardImageFiles(event.clipboardData);
     if (!images.length) return;
     event.preventDefault();
     addImageFiles(images);
@@ -1661,7 +1671,7 @@ import type { ChatDetailLevel } from "./settings";
   }
 </script>
 
-<section class="terminal-pane chat-pane" class:hidden={!visible} class:active aria-label={title}>
+<section class="terminal-pane chat-pane" class:hidden={!visible} class:active aria-label={title} onpaste={onPanePaste}>
   <header>
     {#if tabs}
       <div class="header-tabs">{@render tabs()}</div>
