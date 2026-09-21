@@ -1,6 +1,6 @@
 [package]
 name = "deeppi"
-version = "1.0.4"
+version = "1.0.5"
 description = "Desktop host for Pi Coding Agent and DeepSeek Harness"
 authors = ["DeepPi contributors"]
 edition = "2021"
