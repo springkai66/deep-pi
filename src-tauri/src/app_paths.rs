@@ -7,6 +7,9 @@ pub struct AppPaths {
     pub database: PathBuf,
     pub checklist: PathBuf,
     pub settings: PathBuf,
+    /// 桌宠数据目录（位置与自定义形象；独立于 settings.json，
+    /// 避免与主窗口的设置整份保存互相覆盖）。
+    pub pet: PathBuf,
     pub backups: PathBuf,
     pub pi_home: PathBuf,
     pub dsh_home: PathBuf,
@@ -42,6 +45,7 @@ impl AppPaths {
             database: roaming.join("deeppi.db"),
             checklist: roaming.join("checklist.db"),
             settings: roaming.join("settings.json"),
+            pet: roaming.join("pet"),
             backups: roaming.join("backups"),
             pi_home: roaming.join("agents").join("pi"),
             dsh_home: roaming.join("agents").join("dsh"),

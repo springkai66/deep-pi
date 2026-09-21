@@ -85,6 +85,10 @@ fn enhance_error(error: ChatCallError) -> String {
     match error {
         ChatCallError::ProviderUnconfigured => msg("prompt_enhance.provider_unconfigured"),
         ChatCallError::BaseUrlMissing => msg("prompt_enhance.base_url_missing"),
+        // 响应读取失败经重试后仍失败：保持既有英文文案（非消息码）。
+        ChatCallError::Request(error) if error.starts_with("failed to read") => {
+            format!("failed to read enhancement response: {error}")
+        }
         ChatCallError::Request(error) => {
             msg_with("prompt_enhance.request_failed", &[("error", &error)])
         }
@@ -92,10 +96,6 @@ fn enhance_error(error: ChatCallError) -> String {
             "prompt_enhance.http_failed",
             &[("status", &status.to_string())],
         ),
-        // 下面两种在既有实现里就是原始英文文案（不是消息码），保持原样。
-        ChatCallError::ResponseRead(error) => {
-            format!("failed to read enhancement response: {error}")
-        }
         ChatCallError::ResponseInvalid(detail) => format!("enhancement response {detail}"),
         ChatCallError::Local(error) => error,
     }
@@ -219,8 +219,8 @@ mod tests {
             "@msg:prompt_enhance.http_failed?status=500"
         );
         assert_eq!(
-            enhance_error(ChatCallError::ResponseRead("broken pipe".into())),
-            "failed to read enhancement response: broken pipe"
+            enhance_error(ChatCallError::Request("broken pipe".into())),
+            msg_with("prompt_enhance.request_failed", &[("error", "broken pipe")])
         );
         assert_eq!(
             enhance_error(ChatCallError::ResponseInvalid("has no message text".into())),

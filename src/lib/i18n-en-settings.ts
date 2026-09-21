@@ -274,6 +274,26 @@ export const EN_SETTINGS: Record<string, string> = {
   "测试中…": "Testing…",
   "连接成功（{result}）": "Connected ({result})",
   "连接失败：{error}": "Connection failed: {error}",
-  "代理作用于 Pi / DSH 子进程（含模型请求与 Advisor）、运行时下载、扩展市场与 DeepPi 自身的模型调用；Provider 单独配置的代理优先。已打开的会话需重启任务后生效，应用内更新检查需重启应用。":
-    "The proxy applies to Pi/DSH child processes (model requests and Advisor included), runtime downloads, the extension marketplace, and DeepPi's own model calls; a provider's own proxy takes precedence. Restart a task for open sessions and restart the app for in-app update checks.",
+  "代理作用于 Pi / DSH 子进程（含模型请求与 Advisor）、运行时下载、扩展市场与 DeepPi 自身的模型调用；Provider 单独配置的代理优先。跟随系统会读取代理环境变量，未设置时自动检测 Windows 系统代理；直连不使用应用层代理。已打开的会话需重启任务后生效，应用内更新检查需重启应用。":
+    "The proxy applies to Pi/DSH child processes (model requests and Advisor included), runtime downloads, the extension marketplace, and DeepPi's own model calls; a provider's own proxy takes precedence. Follow system reads proxy environment variables and falls back to the Windows system proxy when none are set; direct bypasses application-layer proxies. Restart a task for open sessions and restart the app for in-app update checks.",
+  // —— 通知与桌宠 ——
+  "通知与桌宠": "Notifications & pet",
+  "任务完成通知": "Task completion notifications",
+  "启动时显示桌宠": "Show the desktop pet on startup",
+  "任务完成或失败时发送系统通知；应用切到后台（最小化/失焦）也会提示。":
+    "Send a system notification when a task completes or fails. It also pops up while the app is in the background (minimized or unfocused).",
+  "桌宠常驻桌面，随任务状态做动作；随时可在主窗口工具栏打开或关闭。":
+    "The pet lives on your desktop and reacts to task states. Open or close it anytime from the main-window toolbar.",
+  "桌宠形象": "Pet appearance",
+  "选择图片…": "Pick an image…",
+  "AI 生成…": "Generate with AI…",
+  "生成中…": "Generating…",
+  "恢复默认": "Restore default",
+  "形象描述": "Appearance description",
+  "例如：圆滚滚的橙色小猫，戴一顶贝雷帽": "e.g. a chubby orange cat wearing a beret",
+  "AI 生成使用「模型设置」里已配置的模型，让模型输出一张 Q 版 SVG 形象；生成结果自动启用。":
+    "AI generation uses the model configured under Model settings and asks it to draw a chibi SVG pet; the result is applied automatically.",
+  "选择桌宠形象图片": "Choose a pet image",
+  "图片": "Images",
+  "内置机器人": "Built-in robot",
 };

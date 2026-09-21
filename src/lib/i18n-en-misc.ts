@@ -130,4 +130,18 @@ export const EN_MISC: Record<string, string> = {
   "关闭文件预览": "Close file preview",
   "正在读取文件…": "Reading file…",
   "字节": "bytes",
+  // —— 桌宠与任务通知 ——
+  "桌宠": "Desktop pet",
+  "显示桌宠": "Show the desktop pet",
+  "关闭桌宠": "Close the pet",
+  "桌宠窗口打开失败：{error}": "Failed to open the pet window: {error}",
+  "任务已完成": "Task completed",
+  "任务失败": "Task failed",
+  "任务完成！": "All done! 🎉",
+  "任务失败…": "The task failed…",
+  "嗨，我在呢～": "Hi, I'm here~",
+  "有任务尽管交给我！": "Just hand me a task!",
+  "咯咯——": "Beep boop—",
+  "一起加油鸭！": "Let's go!",
+  "请先输入桌宠形象描述": "Describe the pet appearance first",
 };

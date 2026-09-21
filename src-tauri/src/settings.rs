@@ -74,6 +74,14 @@ fn default_proxy_mode() -> String {
     "system".into()
 }
 
+fn default_notify_on_task_complete() -> bool {
+    true
+}
+
+fn default_pet_enabled() -> bool {
+    true
+}
+
 /// 未知代理模式回落 system（旧设置文件与手改配置容错）。
 fn deserialize_proxy_mode<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
@@ -218,6 +226,12 @@ pub struct AppSettings {
     /// 不走代理的地址列表（NO_PROXY，逗号分隔）。
     #[serde(default)]
     pub proxy_no_proxy: String,
+    /// 任务完成/失败时发送系统通知（应用在后台也会提示）。
+    #[serde(default = "default_notify_on_task_complete")]
+    pub notify_on_task_complete: bool,
+    /// 启动时自动显示桌宠浮窗。
+    #[serde(default = "default_pet_enabled")]
+    pub pet_enabled: bool,
 }
 
 impl Default for AppSettings {
@@ -245,6 +259,8 @@ impl Default for AppSettings {
             proxy_mode: default_proxy_mode(),
             proxy_url: String::new(),
             proxy_no_proxy: String::new(),
+            notify_on_task_complete: default_notify_on_task_complete(),
+            pet_enabled: default_pet_enabled(),
         }
     }
 }

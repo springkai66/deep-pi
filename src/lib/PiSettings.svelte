@@ -3,6 +3,7 @@
   import type { Snippet } from "svelte";
   import { onMount } from "svelte";
   import { invoke as nativeInvoke } from "@tauri-apps/api/core";
+  import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
   import { CODE_FONT_OPTIONS, CHAT_DETAIL_LEVELS, FONT_SIZE_RANGE, cssAppFontFamily, cssCodeFontFamily, appFontPreviewStack, codeFontPreviewStack, type AppSettings, type ExternalEditor } from "./settings";
   import FontSelect from "./FontSelect.svelte";
   import {
@@ -203,6 +204,73 @@
     taskLimitError = value === null ? t("同时运行任务数必须为 1 到 16 的整数") : "";
     if (value !== null) updateSettings({ maxConcurrentTasks: value });
   }
+  // —— 通知与桌宠：形象预览 / 本地图片 / AI 生成 ——
+  type PetAppearance =
+    | { kind: "builtin" }
+    | { kind: "image"; mime: string; dataBase64: string };
+  let petAppearance = $state<PetAppearance>({ kind: "builtin" });
+  let petPrompt = $state("");
+  let petGenerating = $state(false);
+  let petNotice = $state("");
+  let petImageSrc = $derived(
+    petAppearance.kind === "image"
+      ? `data:${petAppearance.mime};base64,${petAppearance.dataBase64}`
+      : "",
+  );
+
+  async function refreshPetAppearance() {
+    try {
+      petAppearance = await nativeInvoke<PetAppearance>("get_pet_appearance");
+      petNotice = "";
+    } catch (cause) {
+      petNotice = tm(String(cause));
+    }
+  }
+
+  async function choosePetImage() {
+    try {
+      const picked = await openFileDialog({
+        directory: false,
+        multiple: false,
+        title: t("选择桌宠形象图片"),
+        filters: [{ name: t("图片"), extensions: ["png", "jpg", "jpeg", "webp", "svg", "gif"] }],
+      });
+      if (typeof picked !== "string") return;
+      await nativeInvoke("set_pet_image", { path: picked });
+      await refreshPetAppearance();
+    } catch (cause) {
+      petNotice = tm(String(cause));
+    }
+  }
+
+  async function generatePetImage() {
+    if (petGenerating) return;
+    const description = petPrompt.trim();
+    if (!description) {
+      petNotice = t("请先输入桌宠形象描述");
+      return;
+    }
+    petGenerating = true;
+    petNotice = "";
+    try {
+      await nativeInvoke("generate_pet_image", { prompt: description });
+      await refreshPetAppearance();
+    } catch (cause) {
+      petNotice = tm(String(cause));
+    } finally {
+      petGenerating = false;
+    }
+  }
+
+  async function resetPetImage() {
+    try {
+      await nativeInvoke("reset_pet_image");
+      await refreshPetAppearance();
+    } catch (cause) {
+      petNotice = tm(String(cause));
+    }
+  }
+
   function navigate(event: KeyboardEvent, current: SettingsCategory) {
     if (event.isComposing || event.altKey || event.ctrlKey || event.metaKey) return;
     const next = nextSettingsCategory(current, event.key);
@@ -277,6 +345,44 @@
             </select>
           </label>
           <p class="muted">{t("只影响之后打开的命令终端；Pi 终端仍用于 Pi TUI 会话。")}</p>
+        </section>
+        <section class="settings-group" aria-labelledby="notification-heading">
+          <h3 id="notification-heading">{t("通知与桌宠")}</h3>
+          <label class="setting-control setting-check">
+            <input type="checkbox" checked={runtime.settings.notifyOnTaskComplete} aria-label={t("任务完成通知")}
+              onchange={(event) => updateSettings({ notifyOnTaskComplete: event.currentTarget.checked })} />
+            <strong>{t("任务完成通知")}</strong>
+          </label>
+          <p class="muted">{t("任务完成或失败时发送系统通知；应用切到后台（最小化/失焦）也会提示。")}</p>
+          <label class="setting-control setting-check">
+            <input type="checkbox" checked={runtime.settings.petEnabled} aria-label={t("启动时显示桌宠")}
+              onchange={(event) => updateSettings({ petEnabled: event.currentTarget.checked })} />
+            <strong>{t("启动时显示桌宠")}</strong>
+          </label>
+          <p class="muted">{t("桌宠常驻桌面，随任务状态做动作；随时可在主窗口工具栏打开或关闭。")}</p>
+          <div class="setting-control pet-appearance">
+            <strong>{t("桌宠形象")}</strong>
+            <div class="pet-preview-row">
+              <span class="pet-preview" aria-hidden="true">
+                {#if petAppearance.kind === "image"}
+                  <img src={petImageSrc} alt="" />
+                {:else}
+                  <span class="pet-preview-builtin">{t("内置机器人")}</span>
+                {/if}
+              </span>
+              <div class="pet-actions">
+                <button type="button" class="quiet-button" onclick={() => void choosePetImage()}>{t("选择图片…")}</button>
+                <button type="button" class="quiet-button" disabled={petGenerating}
+                  onclick={() => void generatePetImage()}>{petGenerating ? t("生成中…") : t("AI 生成…")}</button>
+                <button type="button" class="quiet-button" disabled={petAppearance.kind === "builtin"}
+                  onclick={() => void resetPetImage()}>{t("恢复默认")}</button>
+              </div>
+            </div>
+            <input type="text" aria-label={t("形象描述")} placeholder={t("例如：圆滚滚的橙色小猫，戴一顶贝雷帽")}
+              bind:value={petPrompt} maxlength="500" />
+            {#if petNotice}<p class="pet-notice" role="alert">{petNotice}</p>{/if}
+            <p class="muted">{t("AI 生成使用「模型设置」里已配置的模型，让模型输出一张 Q 版 SVG 形象；生成结果自动启用。")}</p>
+          </div>
         </section>
       </div>
       <div class="settings-panel" hidden={category !== "appearance"}>
@@ -412,7 +518,7 @@
               {#if proxyTestResult}<span class="proxy-state" role="status">{proxyTestResult}</span>{/if}
             </div>
           </div>
-          <p class="muted">{t("代理作用于 Pi / DSH 子进程（含模型请求与 Advisor）、运行时下载、扩展市场与 DeepPi 自身的模型调用；Provider 单独配置的代理优先。已打开的会话需重启任务后生效，应用内更新检查需重启应用。")}</p>
+          <p class="muted">{t("代理作用于 Pi / DSH 子进程（含模型请求与 Advisor）、运行时下载、扩展市场与 DeepPi 自身的模型调用；Provider 单独配置的代理优先。跟随系统会读取代理环境变量，未设置时自动检测 Windows 系统代理；直连不使用应用层代理。已打开的会话需重启任务后生效，应用内更新检查需重启应用。")}</p>
         </section>
       </div>
       <div class="settings-panel" hidden={category !== "advanced"}>
@@ -475,4 +581,19 @@
   .panel-error { margin: 8px 0 0; font-size: 12px; color: var(--status-failed); overflow-wrap: anywhere; }
   .proxy-test { display: flex; align-items: center; justify-content: flex-end; gap: 10px; min-width: 0; }
   .proxy-state { min-width: 0; overflow-wrap: anywhere; color: var(--text-muted); font-size: 12px; }
+  /* —— 通知与桌宠 —— */
+  .setting-check { display: flex; align-items: center; gap: 8px; }
+  .setting-check input[type="checkbox"] { width: 14px; height: 14px; flex-shrink: 0; accent-color: var(--accent); cursor: pointer; }
+  .pet-preview-row { display: flex; align-items: center; gap: 12px; margin: 8px 0; }
+  .pet-preview {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 64px; height: 64px; flex-shrink: 0;
+    border: 1px dashed var(--border-strong); border-radius: 10px;
+    overflow: hidden; background: var(--surface);
+  }
+  .pet-preview img { width: 100%; height: 100%; object-fit: contain; }
+  .pet-preview-builtin { font-size: 11px; color: var(--text-muted); padding: 4px; text-align: center; }
+  .pet-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+  .pet-appearance input[type="text"] { width: 100%; max-width: 420px; }
+  .pet-notice { color: var(--status-failed); font-size: 12px; margin: 6px 0 0; }
 </style>

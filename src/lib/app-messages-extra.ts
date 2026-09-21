@@ -5,6 +5,42 @@
  * 因此条目为按代码场景回填（`prompt_enhance.rs` 中每个消息码的触发条件都很明确）。
  */
 export const APP_MESSAGES_EXTRA: Record<string, import("./app-messages").AppMessageText> = {
+  // —— 桌宠形象 ——
+  "pet.image.unsupported": {
+    "zh-CN": "不支持的图片格式，请使用 PNG/JPG/WebP/SVG/GIF",
+    "zh-TW": "不支援的圖片格式，請使用 PNG/JPG/WebP/SVG/GIF",
+    en: "Unsupported image format. Use PNG/JPG/WebP/SVG/GIF.",
+  },
+  "pet.image.missing": {
+    "zh-CN": "图片文件不存在或无法读取",
+    "zh-TW": "圖片檔案不存在或無法讀取",
+    en: "The image file does not exist or cannot be read.",
+  },
+  "pet.image.too_large": {
+    "zh-CN": "图片超过 {max} MB，请换一张小一些的",
+    "zh-TW": "圖片超過 {max} MB，請換一張小一些的",
+    en: "The image is larger than {max} MB. Pick a smaller one.",
+  },
+  "pet.generate.input_empty": {
+    "zh-CN": "请先输入桌宠形象描述",
+    "zh-TW": "請先輸入桌寵形象描述",
+    en: "Describe the pet appearance first.",
+  },
+  "pet.generate.input_too_long": {
+    "zh-CN": "描述超过 {max} 个字符，请精简后再试",
+    "zh-TW": "描述超過 {max} 個字元，請精簡後再試",
+    en: "The description exceeds {max} characters. Shorten it and try again.",
+  },
+  "pet.generate.no_svg": {
+    "zh-CN": "模型没有返回可用的 SVG 形象，请换个描述或模型再试",
+    "zh-TW": "模型沒有回傳可用的 SVG 形象，請換個描述或模型再試",
+    en: "The model did not return a usable SVG pet. Try a different description or model.",
+  },
+  "pet.generate.response_invalid": {
+    "zh-CN": "生成结果无法解析：{error}",
+    "zh-TW": "生成結果無法解析：{error}",
+    en: "The generated result could not be parsed: {error}",
+  },
   "prompt_enhance.input_empty": {
     "zh-CN": "请先输入要增强的提示词",
     "zh-TW": "請先輸入要增強的提示詞",

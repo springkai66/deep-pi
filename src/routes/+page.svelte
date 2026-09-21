@@ -28,6 +28,7 @@
     Settings2,
     Globe,
     GitBranch,
+    Cat,
   } from "@lucide/svelte";
   import { onMount, tick } from "svelte";
   import FileSidebar from "$lib/FileSidebar.svelte";
@@ -67,6 +68,12 @@
   import { applyAppearance } from "$lib/appearance";
   import { t, tm } from "$lib/i18n.svelte";
   import { BOARD_ACTION_EVENT, type BoardActionRequest } from "$lib/board-actions";
+  import { createTaskExitNotifier } from "$lib/task-notifications";
+  import {
+    isPermissionGranted,
+    requestPermission,
+    sendNotification,
+  } from "@tauri-apps/plugin-notification";
   import TaskBoard from "$lib/TaskBoard.svelte";
   import type { Task, TaskStatus } from "$lib/task";
   import {
@@ -110,6 +117,17 @@
   });
   let pendingAppUpdate: Update | null = null;
   let settings = $state<AppSettings>({ ...DEFAULT_APP_SETTINGS });
+  /// 任务完成系统通知：后台（最小化/失焦）也弹系统级提示，文案按当前语言渲染。
+  const taskNotifier = createTaskExitNotifier({
+    fetchTasks: () => invoke<Task[]>("list_tasks"),
+    isEnabled: () => settings.notifyOnTaskComplete,
+    bodyFor: (status) => t(status === "completed" ? "任务已完成" : "任务失败"),
+    send: async (input) => {
+      let granted = await isPermissionGranted();
+      if (!granted) granted = (await requestPermission()) === "granted";
+      if (granted) await sendNotification({ title: input.title, body: input.body });
+    },
+  });
   let settingsSaving = $state(false);
   const settingsSaver = createSettingsSaver(
     (next) => invoke("save_settings", { settings: next }), showError, (busy) => { settingsSaving = busy; },
@@ -682,6 +700,13 @@
     const boardActionListener = listen<BoardActionRequest>(BOARD_ACTION_EVENT, ({ payload }) => {
       void handleBoardAction(payload);
     });
+    // 任务完成系统通知：pty（TUI）与 rpc 两条退出通道共用一个通知器。
+    const ptyExitNoticeListener = listen<{ taskId: string; runId: string }>("pty-exit", ({ payload }) => {
+      void taskNotifier.handlePtyExit(payload);
+    });
+    const rpcExitNoticeListener = listen<TaskStatusUpdate>("rpc-task-exit", ({ payload }) => {
+      void taskNotifier.handleRpcExit(payload);
+    });
     const runtimeProgressListener = listen<{ operationId: string; phase: string; percent: number | null }>(
       "runtime-progress",
       ({ payload }) => {
@@ -705,6 +730,8 @@
       void dshStatusListener.then((unlisten) => unlisten());
       void statusListener.then((unlisten) => unlisten());
       void rpcExitListener.then((unlisten) => unlisten());
+      void ptyExitNoticeListener.then((unlisten) => unlisten());
+      void rpcExitNoticeListener.then((unlisten) => unlisten());
       void boardActionListener.then((unlisten) => unlisten());
       void runtimeProgressListener.then((unlisten) => unlisten());
       dialogs.dispose();
@@ -1103,6 +1130,16 @@
     }
   }
 
+  /// 桌宠浮窗：透明置顶小窗，随任务状态做动作，可自定义形象或 AI 生成。
+  async function openPetWindow() {
+    if (!canLeaveSettings()) return;
+    try {
+      await invoke("open_pet_window");
+    } catch (cause) {
+      showError(t("桌宠窗口打开失败：{error}", { error: tm(String(cause)) }));
+    }
+  }
+
   async function openShell() {
     if (!canLeaveSettings()) return;
     if (!selectedProjectId || !selectedProject) {
@@ -1380,6 +1417,8 @@
         onclick={() => void openBoardWindow()}><Kanban size={16} /></button>
       <button type="button" aria-label={t("四象限清单")} title={t("四象限清单")}
         onclick={() => void openChecklistWindow()}><ClipboardList size={16} /></button>
+      <button type="button" aria-label={t("桌宠")} title={t("显示桌宠")}
+        onclick={() => void openPetWindow()}><Cat size={16} /></button>
     </div>
   </header>
   <aside class="project-sidebar" class:panel-hidden={!showSidebar} aria-label={t("项目侧栏")}>

@@ -10,7 +10,7 @@ export type CloseBehavior = "ask" | "minimize" | "exit";
 export type TerminalShell = "powershell" | "pwsh" | "bash" | "cmd";
 /** AI 对话内容的显示详细程度：简洁（只看正文）/ 标准（过程内容折叠）/ 详细（过程内容默认展开）。 */
 export type ChatDetailLevel = "concise" | "standard" | "verbose";
-/** 全局网络代理模式：跟随系统环境变量 / 直连 / 手动地址。 */
+/** 全局网络代理模式：跟随系统（代理环境变量，未设置时自动检测 Windows 系统代理）/ 直连 / 手动地址。 */
 export type ProxyMode = "system" | "direct" | "manual";
 
 export const CHAT_DETAIL_LEVELS: Array<{ value: ChatDetailLevel; label: string }> = [
@@ -55,6 +55,10 @@ export interface AppSettings {
   proxyUrl: string;
   /** 不走代理的地址列表（NO_PROXY，逗号分隔）。 */
   proxyNoProxy: string;
+  /** 任务完成/失败时发送系统通知（应用在后台也会提示）。 */
+  notifyOnTaskComplete: boolean;
+  /** 启动时自动显示桌宠浮窗。 */
+  petEnabled: boolean;
 }
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
@@ -80,6 +84,8 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   proxyMode: "system",
   proxyUrl: "",
   proxyNoProxy: "",
+  notifyOnTaskComplete: true,
+  petEnabled: true,
 };
 
 export const FONT_SIZE_RANGE = { min: 9, max: 32 } as const;

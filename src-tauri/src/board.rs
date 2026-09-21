@@ -212,6 +212,9 @@ pub fn install_main_window_hooks(app: &AppHandle) {
             {
                 let _ = checklist.destroy();
             }
+            if let Some(pet) = app_for_exit.get_webview_window(crate::pet::PET_LABEL) {
+                let _ = pet.destroy();
+            }
         }
     });
 }

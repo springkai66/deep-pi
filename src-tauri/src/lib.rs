@@ -31,6 +31,7 @@ pub mod message;
 mod native_pi;
 mod operation;
 mod package;
+mod pet;
 mod pi_auth;
 mod process_runner;
 mod project_edit;
@@ -38,9 +39,10 @@ mod project_files;
 mod project_watch;
 mod prompt_enhance;
 mod provider;
-mod proxy;
+pub mod proxy;
 mod pty;
 mod recovery;
+mod retry;
 mod rpc;
 mod rpc_history;
 #[cfg(test)]
@@ -48,7 +50,7 @@ mod rpc_integration_tests;
 mod rpc_transport;
 mod runtime;
 mod runtime_pointer;
-mod settings;
+pub mod settings;
 mod shell;
 mod snapshot;
 mod startup;
@@ -161,6 +163,17 @@ pub fn run() {
                     worker_app.manage(file_recovery);
                     worker_app.manage(checklist_store);
                     worker_app.manage(settings);
+                    // 桌宠按设置自启：窗口创建需在主线程，投递到事件循环执行。
+                    if worker_app
+                        .state::<crate::settings::SettingsStore>()
+                        .get()
+                        .map(|current| current.pet_enabled)
+                        .unwrap_or(false)
+                    {
+                        let pet_app = worker_app.clone();
+                        let _ = worker_app
+                            .run_on_main_thread(move || pet::show_pet_at_startup(&pet_app));
+                    }
                     log::info!(
                         "event=app_initialization status=ready duration_ms={}",
                         started.elapsed().as_millis()
@@ -175,6 +188,7 @@ pub fn run() {
         })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .invoke_handler(|invoke| {
             if invoke.message.command() != "await_startup"
                 && !startup::is_ready(invoke.message.webview_ref().state())
@@ -190,6 +204,12 @@ pub fn run() {
                 diagnostics::diagnostics_clear,
                 diagnostics::diagnostics_export,
                 board::open_board_window,
+                pet::open_pet_window,
+                pet::save_pet_position,
+                pet::get_pet_appearance,
+                pet::set_pet_image,
+                pet::reset_pet_image,
+                pet::generate_pet_image,
                 checklist::open_checklist_window,
                 checklist::list_checklist_items,
                 checklist::add_checklist_item,
