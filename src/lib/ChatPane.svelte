@@ -2209,21 +2209,21 @@ import type { ChatDetailLevel } from "./settings";
   .turn-trigger { display: flex; align-items: center; gap: 5px; width: auto; height: 24px; max-width: 240px; padding: 0 8px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-alt); color: var(--text-muted); font-size: 11px; }
   .turn-trigger:hover, .turn-trigger[aria-expanded="true"] { background: var(--surface-hover); border-color: var(--border-strong); color: var(--text); }
   .turn-label { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-  .turn-panel { position: absolute; top: calc(100% + 6px); right: 0; z-index: 40; width: 300px; max-width: min(320px, 90vw); max-height: 340px; overflow-y: auto; overflow-x: hidden; padding: 6px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--surface-raised); box-shadow: 0 10px 26px #0006; }
-  .turn-panel-head { margin: 0; padding: 4px 8px 6px; color: var(--text-muted); font-size: 10px; }
-  .turn-panel ul { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 0; list-style: none; }
-  .turn-panel button { display: flex; align-items: flex-start; gap: 8px; width: 100%; padding: 6px 8px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--text); font: inherit; font-size: 11px; line-height: 1.4; text-align: left; cursor: pointer; }
+  .turn-panel { position: absolute; top: calc(100% + 6px); right: 0; z-index: 40; width: 340px; max-width: min(380px, 92vw); max-height: min(420px, 70vh); overflow-y: auto; overflow-x: hidden; padding: 8px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--surface-raised); box-shadow: 0 10px 26px #0006; }
+  .turn-panel-head { margin: 0; padding: 2px 10px 8px; color: var(--text-muted); font-size: 10px; }
+  .turn-panel ul { display: flex; flex-direction: column; gap: 4px; margin: 0; padding: 0; list-style: none; }
+  .turn-panel button { display: flex; align-items: flex-start; gap: 10px; width: 100%; padding: 8px 10px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--text); font: inherit; font-size: 12px; line-height: 1.45; text-align: left; cursor: pointer; }
   .turn-panel button:hover { background: var(--surface-hover); }
   .turn-panel button.active { border-color: var(--accent); background: var(--surface-alt); }
-  .turn-no { flex-shrink: 0; min-width: 20px; color: var(--accent); font-family: var(--code-font); }
-  .turn-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+  .turn-no { flex-shrink: 0; min-width: 22px; padding-top: 1px; color: var(--accent); font-family: var(--code-font); }
+  .turn-body { display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1; }
   .turn-summary { min-width: 0; white-space: normal; word-break: break-word; color: var(--text-muted); }
   .turn-panel button.active .turn-summary { color: var(--text-strong); }
   .turn-duration { white-space: normal; color: var(--text-muted); opacity: .75; font-size: 10px; line-height: 1.2; }
   /* 面板内的耗时不沿用消息标签的胶囊样式，也不随纵向 flex 拉伸成整行宽条
      （否则会横跨整行、视觉上与下一轮文字挤在一起）。 */
   .turn-panel .turn-duration { align-self: flex-start; width: fit-content; white-space: nowrap; border: 0; padding: 0; }
-  .turn-time { flex-shrink: 0; margin-left: auto; color: var(--text-muted); font-size: 10px; white-space: nowrap; }
+  .turn-time { flex-shrink: 0; margin-left: auto; padding-top: 1px; color: var(--text-muted); font-size: 10px; white-space: nowrap; }
   .turn-rail { position: absolute; top: 50%; right: 6px; transform: translateY(-50%); z-index: 3; display: flex; flex-direction: column; align-items: center; gap: 6px; max-height: calc(100% - 24px); overflow-y: auto; padding: 4px 2px; }
   .turn-dot { width: 8px; height: 8px; flex-shrink: 0; padding: 0; border: 0; border-radius: 999px; background: var(--border-strong); opacity: .75; transition: background .15s ease, height .15s ease, opacity .15s ease; }
   @media (max-width: 620px) { .transcript { padding: 12px; } .composer { margin: 8px auto 8px; width: calc(100% - 16px); } }
