@@ -221,6 +221,9 @@ export const EN_SETTINGS: Record<string, string> = {
   "应用更新": "App update",
   "安装更新": "Install update",
   "检查应用更新": "Check for app updates",
+  "未知错误": "Unknown error",
+  "无法连接更新服务器：{detail}。请检查网络；直连模式可能无法直达 GitHub，可在 设置 → 网络代理 中改为「手动」并填入本地代理地址后重试。":
+    "Could not reach the update server: {detail}. Check your network; in Direct mode GitHub may be unreachable — switch to Manual with your local proxy address in Settings → Network proxy and retry.",
   "运行服务": "Running services",
   "{count} 个任务运行中": "{count} tasks running",
   "没有运行中的任务": "No tasks running",

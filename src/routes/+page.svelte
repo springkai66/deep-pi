@@ -46,7 +46,7 @@
   import AppDialog from "$lib/AppDialog.svelte";
   import AppToasts from "$lib/AppToasts.svelte";
   import { notices } from "$lib/notices.svelte";
-  import { checkAppUpdate, installAppUpdate, type AppUpdateState, type Update } from "$lib/app-update";
+  import { checkAppUpdate, describeUpdateError, installAppUpdate, type AppUpdateState, type Update } from "$lib/app-update";
   import type { DialogRequest, DialogValue } from "$lib/dialog";
   import type { Project } from "$lib/project";
   import PiMarketplace from "$lib/PiMarketplace.svelte";
@@ -517,7 +517,7 @@
         status: "error",
         version: null,
         notes: null,
-        error: tm(String(error)),
+        error: describeUpdateError(error),
       };
     }
   }
@@ -528,7 +528,7 @@
     try {
       await installAppUpdate(pendingAppUpdate);
     } catch (error) {
-      appUpdate = { ...appUpdate, status: "error", error: tm(String(error)) };
+      appUpdate = { ...appUpdate, status: "error", error: describeUpdateError(error) };
     }
   }
 

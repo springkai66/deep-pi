@@ -5,7 +5,7 @@ const relaunch = vi.fn(async () => {});
 vi.mock("@tauri-apps/plugin-updater", () => ({ check: (...args: unknown[]) => check(...args) }));
 vi.mock("@tauri-apps/plugin-process", () => ({ relaunch: () => relaunch() }));
 
-const { checkAppUpdate, installAppUpdate } = await import("./app-update");
+const { checkAppUpdate, describeUpdateError, installAppUpdate } = await import("./app-update");
 
 beforeEach(() => { check.mockReset(); relaunch.mockClear(); });
 
@@ -29,6 +29,16 @@ describe("DeepPi self update", () => {
     await expect(checkAppUpdate()).rejects.toThrow("endpoints");
   });
 
+  it("retries transport-level failures like 'error sending request'", async () => {
+    // 连接被重置时 reqwest 只报「error sending request」，旊配不到旧重试正则；
+    // 直连 GitHub 被间歇阻断或代理链路抖动时这类错误最常见，必须重试。
+    check.mockRejectedValue(new Error(
+      "error sending request for url (https://github.com/springkai66/deep-pi/releases/download/stable/latest.json)",
+    ));
+    await expect(checkAppUpdate()).rejects.toThrow("error sending request");
+    expect(check).toHaveBeenCalledTimes(3);
+  });
+
   it("installs before relaunching, and does not relaunch when the install fails", async () => {
     const order: string[] = [];
     const update = { version: "1.0.1", downloadAndInstall: vi.fn(async () => { order.push("install"); }) };
@@ -40,5 +50,23 @@ describe("DeepPi self update", () => {
     const failing = { version: "1.0.1", downloadAndInstall: vi.fn(async () => { order.push("install"); throw new Error("disk full"); }) };
     await expect(installAppUpdate(failing as never)).rejects.toThrow("disk full");
     expect(order).toEqual(["install"]);
+  });
+
+  describe("describeUpdateError", () => {
+    it("appends proxy guidance to transport-level failures, keeping the original detail", () => {
+      const message = describeUpdateError(
+        new Error("error sending request for url (https://github.com/springkai66/deep-pi/releases/download/stable/latest.json)"),
+      );
+      expect(message).toContain("无法连接更新服务器");
+      expect(message).toContain("error sending request for url");
+      expect(message).toContain("手动");
+    });
+
+    it("passes non-network errors through unchanged (signature/manifest issues)", () => {
+      expect(describeUpdateError("signature verification failed"))
+        .toBe("signature verification failed");
+      expect(describeUpdateError("Updater does not have any endpoints set."))
+        .toBe("Updater does not have any endpoints set.");
+    });
   });
 });
