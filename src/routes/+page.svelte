@@ -1494,6 +1494,7 @@
       {projects}
       tasks={piTasks}
       selectedProjectId={selectedProjectId}
+      activeTaskId={activeTaskId}
       onAddProject={addProject}
       onOpenProject={selectProject}
       onOpen={openTask}

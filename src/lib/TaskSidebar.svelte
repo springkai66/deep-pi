@@ -26,6 +26,7 @@
     projects: Project[];
     tasks: Task[];
     selectedProjectId: string | null;
+    activeTaskId?: string | null;
     onAddProject: () => void;
     onOpenProject: (project: Project) => void;
     onOpen: (task: Task) => void;
@@ -44,6 +45,7 @@
     projects,
     tasks,
     selectedProjectId,
+    activeTaskId = null,
     onAddProject,
     onOpenProject,
     onOpen,
@@ -278,7 +280,7 @@
             <section class="project-task-section">
               <header><span>{t("进行中")}</span><span>{activeTasks.length}</span></header>
               {#each activeTasks as task (task.id)}
-                <div class="task-row" role="presentation" oncontextmenu={(event) => showSessionMenu(event, task)}>
+                <div class="task-row" class:selected={task.id === activeTaskId} role="presentation" oncontextmenu={(event) => showSessionMenu(event, task)}>
                   {#if task.status === "running"}
                     <RefreshCw class="session-status running" size={10} aria-hidden="true" />
                   {:else}
@@ -295,7 +297,7 @@
             <section class="project-task-section">
               <header><span>{t("已完成")}</span><span>{completedTasks.length}</span></header>
               {#each completedTasks as task (task.id)}
-                <div class="task-row" role="presentation" oncontextmenu={(event) => showSessionMenu(event, task)}>
+                <div class="task-row" class:selected={task.id === activeTaskId} role="presentation" oncontextmenu={(event) => showSessionMenu(event, task)}>
                   {#if task.status === "running"}
                     <RefreshCw class="session-status running" size={10} aria-hidden="true" />
                   {:else}
@@ -317,7 +319,7 @@
   <section class="task-section archived-section">
     <header><span>{t("归档")}</span><span>{archivedTasks.length}</span></header>
     {#each archivedTasks as task (task.id)}
-      <div class="task-row" role="presentation" oncontextmenu={(event) => showSessionMenu(event, task)}>
+      <div class="task-row" class:selected={task.id === activeTaskId} role="presentation" oncontextmenu={(event) => showSessionMenu(event, task)}>
         {#if task.status === "running"}
           <RefreshCw class="session-status running" size={10} aria-hidden="true" />
         {:else}
