@@ -65,7 +65,7 @@ export interface AppSettings {
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
   schemaVersion: 1,
-  maxConcurrentTasks: 3,
+  maxConcurrentTasks: 10,
   lastProject: null,
   colorMode: "system",
   theme: DEFAULT_THEME_ID,
@@ -83,7 +83,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   piEnvironment: "managed",
   chatDetailLevel: "standard",
   customThemes: [],
-  proxyMode: "system",
+  proxyMode: "direct",
   proxyUrl: "",
   proxyNoProxy: "",
   notifyOnTaskComplete: true,

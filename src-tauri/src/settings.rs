@@ -71,7 +71,7 @@ fn default_pi_environment() -> String {
 }
 
 fn default_proxy_mode() -> String {
-    "system".into()
+    "direct".into()
 }
 
 fn default_notify_on_task_complete() -> bool {
@@ -248,7 +248,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             schema_version: 1,
-            max_concurrent_tasks: 3,
+            max_concurrent_tasks: 10,
             last_project: None,
             skipped_updates: std::collections::BTreeMap::new(),
             snoozed_updates: std::collections::BTreeMap::new(),
@@ -697,7 +697,7 @@ mod tests {
         let path = root.join("settings.json");
         let backups = root.join("backups");
         let store = SettingsStore::open(path.clone(), backups.clone()).unwrap();
-        assert_eq!(store.get().unwrap().proxy_mode, "system");
+        assert_eq!(store.get().unwrap().proxy_mode, "direct");
 
         // 手动模式缺地址：保存被拒绝，不会写入无效配置。
         assert!(store
@@ -766,7 +766,7 @@ mod tests {
                 .get()
                 .expect("settings should read")
                 .max_concurrent_tasks,
-            3
+            10
         );
 
         store
