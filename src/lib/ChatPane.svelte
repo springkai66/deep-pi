@@ -1014,7 +1014,12 @@ import type { ChatDetailLevel } from "./settings";
     queuedImages = [];
     modelName = "";
     selectedModel = "";
-    conversation = emptyConversation();
+    // 同一会话重建（休眠→回车启动、重连、重启）时保留已加载的历史消息：
+    // 重启恢复的是同一份 pi 会话，随后加载的 RPC 历史快照内容一致并会原样覆盖，
+    // 先清空只会让会话流整屏闪烁（用户感知为「窗口全部刷新一遍」）。
+    conversation = conversation.messages.length
+      ? { ...emptyConversation(), messages: conversation.messages }
+      : emptyConversation();
     historyOffset = 0;
     error = "";
     extensionError = "";
@@ -1122,12 +1127,16 @@ import type { ChatDetailLevel } from "./settings";
           });
         }).catch(() => {});
         void applySavedModelChoice(history.messages.length, next.busy, () => alive);
-        // 回车启动的休眠会话：连接就绪（含历史加载与模型恢复）后自动发出草稿。
-        if (autoSendOnConnect && alive) { autoSendOnConnect = false; void send(); }
       } catch (cause) {
         if (alive) error = tm(String(cause));
       } finally {
-        if (alive) initializing = false;
+        if (alive) {
+          initializing = false;
+          // 回车启动的休眠会话：连接就绪（含历史加载与模型恢复）后自动发出草稿。
+          // 必须等 initializing 清零后再调用：canSend 含 !initializing 条件，
+          // 提前调用会被 send() 开头的检查静默吞掉，用户被迫再按一次回车。
+          if (autoSendOnConnect) { autoSendOnConnect = false; void send(); }
+        }
       }
     })();
     return () => {
