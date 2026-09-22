@@ -6,7 +6,7 @@
   import { createOperationRunner, type OperationState } from "$lib/operation";
   import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
   import { createProjectWatch, type ProjectWatchEvent } from "$lib/project-watch";
-  import { listen } from "@tauri-apps/api/event";
+  import { emitTo, listen } from "@tauri-apps/api/event";
   import { open } from "@tauri-apps/plugin-dialog";
   import { LogicalPosition, LogicalSize } from "@tauri-apps/api/dpi";
   import { Webview } from "@tauri-apps/api/webview";
@@ -68,6 +68,7 @@
   import { applyAppearance } from "$lib/appearance";
   import { t, tm } from "$lib/i18n.svelte";
   import { BOARD_ACTION_EVENT, type BoardActionRequest } from "$lib/board-actions";
+  import { createPetTaskActionHandler, isPetTaskRequest, PET_TASK_ACTION_EVENT, PET_TASK_RESULT_EVENT } from "$lib/pet-task-actions";
   import { createTaskExitNotifier } from "$lib/task-notifications";
   import {
     isPermissionGranted,
@@ -176,6 +177,40 @@
       const next = new Set(switchingTasks);
       if (busy) next.add(id); else next.delete(id);
       switchingTasks = next;
+    },
+  });
+  // Pet and main-window actions share locks; native commands still validate runId.
+  const taskControlBusy = new Set<string>();
+  const handlePetTaskAction = createPetTaskActionHandler({
+    loadTask: async (id) => (await invoke<Task[]>("list_tasks")).find((task) => task.id === id),
+    isBusy: (id) => taskControlBusy.has(id) || modeSwitcher.isBusy(id),
+    busyChanged: (id, busy) => { if (busy) taskControlBusy.add(id); else taskControlBusy.delete(id); },
+    stop: (task) => invoke(task.interactionMode === "rpc" ? "stop_rpc_task" : "stop_pi_run", {
+      taskId: task.id, runId: task.runId,
+    }),
+    restart: (task) => {
+      if (task.piEnvironment && task.piEnvironment !== "managed") {
+        throw new Error(t("该任务来自旧版本机 Pi 环境，当前稳定版仅支持 DeepPi 托管任务，本机会话记录已保留。"));
+      }
+      return requestTaskRestart(task, task.interactionMode ?? "tui");
+    },
+    prepareContinue: async () => {
+      if (!canLeaveSettings()) throw new Error(t("主窗口正在处理设置操作，请稍后继续"));
+      const main = getCurrentWindow();
+      if (await main.isMinimized()) await main.unminimize();
+      await main.show();
+      await main.setFocus();
+    },
+    updated: (task) => {
+      const current = tasks.find((candidate) => candidate.id === task.id);
+      if (current) Object.assign(current, task); else tasks.unshift(task);
+    },
+    open: (task) => {
+      if (!canLeaveSettings()) throw new Error(t("主窗口正在处理设置操作，请稍后继续"));
+      view = "workspace";
+      activeAgent = "pi";
+      boardView = false;
+      applyTaskRestart(tasks.find((candidate) => candidate.id === task.id) ?? task, task);
     },
   });
   // Assigned through `bind:this` on the workspace element below; oxlint does not
@@ -714,6 +749,12 @@
     const boardActionListener = listen<BoardActionRequest>(BOARD_ACTION_EVENT, ({ payload }) => {
       void handleBoardAction(payload);
     });
+    const petActionListener = listen<unknown>(PET_TASK_ACTION_EVENT, ({ payload }) => {
+      if (!isPetTaskRequest(payload)) return;
+      void handlePetTaskAction(payload)
+        .then((result) => emitTo("pet", PET_TASK_RESULT_EVENT, result))
+        .catch((error) => showError(error));
+    });
     // 任务完成系统通知：pty（TUI）与 rpc 两条退出通道共用一个通知器。
     const ptyExitNoticeListener = listen<{ taskId: string; runId: string }>("pty-exit", ({ payload }) => {
       void taskNotifier.handlePtyExit(payload);
@@ -748,6 +789,7 @@
       void ptyExitNoticeListener.then((unlisten) => unlisten());
       void rpcExitNoticeListener.then((unlisten) => unlisten());
       void boardActionListener.then((unlisten) => unlisten());
+      void petActionListener.then((unlisten) => unlisten());
       void runtimeProgressListener.then((unlisten) => unlisten());
       dialogs.dispose();
       void dshWebview?.close();
@@ -1108,7 +1150,8 @@
   }
 
   async function stopTask(task: Task) {
-    if (modeSwitcher.isBusy(task.id)) return;
+    if (modeSwitcher.isBusy(task.id) || taskControlBusy.has(task.id)) return;
+    taskControlBusy.add(task.id);
     try {
       if (task.interactionMode === "rpc") {
         await invoke("stop_rpc_task", { taskId: task.id, runId: task.runId });
@@ -1118,6 +1161,8 @@
       task.status = "cancelled";
     } catch (error) {
       showError(error);
+    } finally {
+      taskControlBusy.delete(task.id);
     }
   }
 
@@ -1244,6 +1289,7 @@
   }
 
   async function closeTask(task: Task) {
+    if (taskControlBusy.has(task.id)) return;
     if (!modeSwitcher.isBusy(task.id) && ["running", "waiting"].includes(task.status)) {
       try { await stopTask(task); } catch { /* 停止失败时仍然关闭标签页 */ }
     }
@@ -1263,15 +1309,18 @@
   }
 
   async function restartTask(task: Task, mode = task.interactionMode ?? "tui") {
-    if (modeSwitcher.isBusy(task.id)) return;
+    if (modeSwitcher.isBusy(task.id) || taskControlBusy.has(task.id)) return;
     if (task.piEnvironment && task.piEnvironment !== "managed") {
       showError(t("该任务来自旧版本机 Pi 环境，当前稳定版仅支持 DeepPi 托管任务，本机会话记录已保留。"));
       return;
     }
+    taskControlBusy.add(task.id);
     try {
       applyTaskRestart(task, await requestTaskRestart(task, mode));
     } catch (error) {
       showError(error);
+    } finally {
+      taskControlBusy.delete(task.id);
     }
   }
 
@@ -1311,6 +1360,7 @@
   }
 
   async function switchTaskMode(task: Task, mode: InteractionMode) {
+    if (taskControlBusy.has(task.id)) return;
     if (mode === "tui" && !terminalModule) loadTerminalModule();
     try {
       const restarted = await modeSwitcher.switch(task, mode);

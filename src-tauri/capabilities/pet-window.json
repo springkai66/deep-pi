@@ -5,6 +5,7 @@
   "windows": ["pet"],
   "permissions": [
     "core:default",
+    "core:event:allow-emit-to",
     "core:window:allow-close",
     "core:window:allow-start-dragging",
     "core:window:allow-set-position",

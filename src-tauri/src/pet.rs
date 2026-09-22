@@ -3,20 +3,25 @@
 //! 与看板浮窗同构：无边框窗口加载 `/pet` 预渲染页。差异点：
 //! - 位置由用户自由拖放，持久化在 `pet/pet-state.json`（物理像素），独立于
 //!   settings.json —— 主窗口保存设置是整份覆写，混进设置会互相覆盖坐标。
-//! - 形象两种来源：默认形象（随应用打包的内置图片 pet-default.jpg）、
+//! - 形象两种来源：默认形象（原图抠白底制作的透明动图 pet-default.gif）、
 //!   本地图片（复制进 pet 资产目录）。形象变更后向桌宠窗口广播
 //!   `pet-appearance` 事件即时换装。
 
 use std::{
     fs,
     path::PathBuf,
-    sync::atomic::{AtomicBool, AtomicU32, Ordering},
+    sync::{
+        atomic::{AtomicBool, AtomicU32, Ordering},
+        Mutex,
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, WebviewUrl, WebviewWindowBuilder};
+use tauri::{
+    AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, WebviewUrl, WebviewWindowBuilder,
+};
 
 use crate::message::{msg, msg_with};
 use crate::settings::SettingsStore;
@@ -41,7 +46,7 @@ const IMAGE_MIME: [(&str, &str); 6] = [
     ("svg", "image/svg+xml"),
 ];
 /// 默认桌宠形象：随应用打包的内置图片（未选择自定义形象时生效）。
-const DEFAULT_PET_IMAGE: &[u8] = include_bytes!("../assets/pet-default.jpg");
+const DEFAULT_PET_IMAGE: &[u8] = include_bytes!("../assets/pet-default.gif");
 
 /// open_pet_window 的在途创建标志：并发触发时只允许一次 build。
 static PET_OPEN_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
@@ -119,8 +124,14 @@ fn pet_state(app: &AppHandle) -> Option<PetStateStore> {
 }
 
 /// 当前生效的形象：内置默认图，或某个自定义形象文件的字节（base64 + MIME）。
+/// rename_all 作用于变体名，rename_all_fields 作用于字段名 —— 前端契约
+/// 是 { kind, mime, dataBase64, isDefault }，两个字段缺一不可。
 #[derive(Serialize, PartialEq, Eq, Debug)]
-#[serde(rename_all = "camelCase", tag = "kind")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
 pub enum PetAppearance {
     Image {
         mime: String,
@@ -128,6 +139,14 @@ pub enum PetAppearance {
         /// true 表示尚未选择自定义形象（返回的是内置默认图）。
         is_default: bool,
     },
+}
+
+fn default_pet_appearance() -> PetAppearance {
+    PetAppearance::Image {
+        mime: "image/gif".to_owned(),
+        data_base64: base64::engine::general_purpose::STANDARD.encode(DEFAULT_PET_IMAGE),
+        is_default: true,
+    }
 }
 
 /// 打开（或显示已存在的）桌宠浮窗。
@@ -207,6 +226,15 @@ fn build_pet_window(app: &AppHandle) -> Result<(), String> {
     // 先缓存缩放再定位：位置钳位需要物理尺寸。
     store_pet_scale(pet.scale_factor().unwrap_or(1.0));
     position_pet(app, &pet);
+    let owner = app.clone();
+    pet.on_window_event(move |event| {
+        if matches!(event, tauri::WindowEvent::Destroyed) {
+            let _ = update_task_hover(false, true);
+            if let Some(popup) = owner.get_webview_window(PET_TASKS_LABEL) {
+                let _ = popup.destroy();
+            }
+        }
+    });
     // 不抢焦点：桌宠只是陪伴，不应打断正在输入的窗口。
     let _ = pet.show();
     Ok(())
@@ -223,8 +251,10 @@ fn pet_always_on_top(app: &AppHandle) -> bool {
 /// 应用桌宠置顶设置到已打开的浮窗（未打开则无操作）。设置保存时调用，
 /// 让「桌宠置顶显示」开关即时生效。
 pub(crate) fn apply_always_on_top(app: &AppHandle, on_top: bool) {
-    if let Some(pet) = app.get_webview_window(PET_LABEL) {
-        let _ = pet.set_always_on_top(on_top);
+    for label in [PET_LABEL, PET_TASKS_LABEL] {
+        if let Some(window) = app.get_webview_window(label) {
+            let _ = window.set_always_on_top(on_top);
+        }
     }
 }
 
@@ -321,9 +351,40 @@ fn default_pet_position(width: u32, height: u32, monitors: &[(i32, i32, u32, u32
 /// 坐标（物理）减去锚点×缩放即窗口左上角目标位置。
 const ANCHOR_X: f64 = 105.0;
 const ANCHOR_Y: f64 = 155.0;
-/// 任务环绕气泡模式下的窗口尺寸（逻辑像素，与前端 RING 常量一致）。
-pub(crate) const RING_WIDTH: f64 = 400.0;
-pub(crate) const RING_HEIGHT: f64 = 320.0;
+/// 独立任务气泡窗口：不再通过改变桌宠窗口大小展开，避免透明 WebView 闪烁。
+pub const PET_TASKS_LABEL: &str = "pet-tasks";
+const TASKS_WIDTH: f64 = 420.0;
+const TASKS_HEIGHT: f64 = 280.0;
+static TASKS_BUILD_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PetTaskHover {
+    revision: u64,
+    hovered: bool,
+    force_close: bool,
+}
+static TASK_HOVER: Mutex<PetTaskHover> = Mutex::new(PetTaskHover {
+    revision: 0,
+    hovered: false,
+    force_close: false,
+});
+
+fn update_task_hover(hovered: bool, force_close: bool) -> Result<PetTaskHover, String> {
+    let mut state = TASK_HOVER.lock().map_err(|error| error.to_string())?;
+    state.revision += 1;
+    state.hovered = hovered;
+    state.force_close = force_close;
+    Ok(state.clone())
+}
+
+#[tauri::command]
+pub fn get_pet_task_hover() -> Result<PetTaskHover, String> {
+    TASK_HOVER
+        .lock()
+        .map(|state| state.clone())
+        .map_err(|error| error.to_string())
+}
 
 /// 壁纸点击坐标（物理）→ 桌宠窗口左上角目标位置（物理，锚定本体中心
 /// 并钳进屏幕）。
@@ -339,50 +400,128 @@ pub(crate) fn anchored_pet_position(app: &AppHandle, cursor_x: i32, cursor_y: i3
     )
 }
 
-/// 展开/收起任务环绕气泡：改窗口尺寸（逻辑）并按缩放补偿物理位置，
-/// 保持桌宠本体在屏幕上不动。
+/// 转发本体悬停状态；仅创建隐藏的气泡窗口，不移动/缩放桌宠本身。
+/// 气泡页面先注册监听，再读带版本的快照，避免首次载入遗漏移出事件。
 #[tauri::command]
-pub async fn set_pet_ring(app: AppHandle, open: bool) -> Result<(), String> {
-    let Some(pet) = app.get_webview_window(PET_LABEL) else {
+pub async fn set_pet_ring(
+    app: AppHandle,
+    open: bool,
+    force_close: Option<bool>,
+) -> Result<(), String> {
+    let state = update_task_hover(open, force_close.unwrap_or(false))?;
+    let _ = app.emit_to(PET_TASKS_LABEL, "pet-task-hover", state);
+    if !open || app.get_webview_window(PET_TASKS_LABEL).is_some() {
         return Ok(());
-    };
-    tauri::async_runtime::spawn_blocking(move || {
-        let scale = cached_pet_scale();
-        let (width, height) = if open {
-            (RING_WIDTH, RING_HEIGHT)
-        } else {
-            (PET_WIDTH as f64, PET_HEIGHT as f64)
-        };
-        let (delta_x, delta_y) = ring_resize_delta(open);
-        let current = pet.outer_position().map_err(|error| error.to_string())?;
-        let monitors = collect_monitors(&app);
-        let (x, y) = clamp_pet_position(
-            current.x + (delta_x * scale).round() as i32,
-            current.y + (delta_y * scale).round() as i32,
-            (width * scale).round() as u32,
-            (height * scale).round() as u32,
-            &monitors,
-        );
-        pet.set_size(LogicalSize::new(width, height))
-            .map_err(|error| error.to_string())?;
-        pet.set_position(PhysicalPosition::new(x, y))
-            .map_err(|error| error.to_string())?;
+    }
+    if TASKS_BUILD_IN_FLIGHT.swap(true, Ordering::SeqCst) {
+        return Ok(());
+    }
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        if app.get_webview_window(PET_LABEL).is_none() {
+            return Ok(());
+        }
+        let popup =
+            WebviewWindowBuilder::new(&app, PET_TASKS_LABEL, WebviewUrl::App("pet-tasks".into()))
+                .title("DeepPi")
+                .decorations(false)
+                .transparent(true)
+                .shadow(false)
+                .always_on_top(pet_always_on_top(&app))
+                .skip_taskbar(true)
+                .resizable(false)
+                .maximizable(false)
+                .minimizable(false)
+                .focused(false)
+                .visible(false)
+                .inner_size(TASKS_WIDTH, TASKS_HEIGHT)
+                .build()
+                .map_err(|error| error.to_string())?;
+        if app.get_webview_window(PET_LABEL).is_none() {
+            let _ = popup.destroy();
+        }
         Ok(())
     })
     .await
-    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())
+    .and_then(|result| result);
+    TASKS_BUILD_IN_FLIGHT.store(false, Ordering::SeqCst);
+    result
 }
 
-/// 展开时窗口左上角应移动的逻辑位移（收起取反）：宽 (210−400)/2 = −95，
-/// 高 240−320 = −80。展开时窗口向左上扩，本体才能停在原位。
-fn ring_resize_delta(open: bool) -> (f64, f64) {
-    let dx = (PET_WIDTH as f64 - RING_WIDTH) / 2.0;
-    let dy = PET_HEIGHT as f64 - RING_HEIGHT;
-    if open {
-        (dx, dy)
+fn task_popup_position(
+    pet: (i32, i32, u32, u32),
+    size: (u32, u32),
+    gap: i32,
+    monitors: &[(i32, i32, u32, u32)],
+) -> (i32, i32) {
+    let (x, y, width, height) = pet;
+    let top = monitors
+        .iter()
+        .find(|(mx, my, mw, mh)| {
+            let cx = x + width as i32 / 2;
+            let cy = y + height as i32 / 2;
+            cx >= *mx && cx < mx + *mw as i32 && cy >= *my && cy < my + *mh as i32
+        })
+        .map(|(_, my, _, _)| *my)
+        .unwrap_or(0);
+    let above = y - size.1 as i32 - gap;
+    let preferred_y = if above >= top {
+        above
     } else {
-        (-dx, -dy)
+        y + height as i32 + gap
+    };
+    clamp_pet_position(
+        x + (width as i32 - size.0 as i32) / 2,
+        preferred_y,
+        size.0,
+        size.1,
+        monitors,
+    )
+}
+
+/// 只由任务浮层执行显示/隐藏。切换时桌宠本体的尺寸、位置、图片节点不变。
+#[tauri::command]
+pub async fn set_pet_tasks_visible(
+    webview: tauri::Webview,
+    app: AppHandle,
+    open: bool,
+) -> Result<(), String> {
+    if webview.label() != PET_TASKS_LABEL {
+        return Err("task popup requires its own webview".into());
     }
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(popup) = app.get_webview_window(PET_TASKS_LABEL) else {
+            return Ok(());
+        };
+        if !open {
+            return popup.hide().map_err(|error| error.to_string());
+        }
+        let pet = app
+            .get_webview_window(PET_LABEL)
+            .ok_or("pet window is closed")?;
+        let scale = pet.scale_factor().map_err(|error| error.to_string())?;
+        let pos = pet.outer_position().map_err(|error| error.to_string())?;
+        let size = pet.inner_size().map_err(|error| error.to_string())?;
+        let target = (
+            (TASKS_WIDTH * scale).round() as u32,
+            (TASKS_HEIGHT * scale).round() as u32,
+        );
+        let (x, y) = task_popup_position(
+            (pos.x, pos.y, size.width, size.height),
+            target,
+            (8.0 * scale).round() as i32,
+            &collect_monitors(&app),
+        );
+        popup
+            .set_position(PhysicalPosition::new(x, y))
+            .map_err(|error| error.to_string())?;
+        popup
+            .set_size(LogicalSize::new(TASKS_WIDTH, TASKS_HEIGHT))
+            .map_err(|error| error.to_string())?;
+        popup.show().map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 /// 保存桌宠位置（物理像素）。桌宠窗口在拖动结束后调用（前端已防抖）。
@@ -419,11 +558,7 @@ pub async fn get_pet_appearance(app: AppHandle) -> Result<PetAppearance, String>
             healed.image = None;
             let _ = store.save(healed);
         }
-        Ok(PetAppearance::Image {
-            mime: "image/jpeg".to_owned(),
-            data_base64: base64::engine::general_purpose::STANDARD.encode(DEFAULT_PET_IMAGE),
-            is_default: true,
-        })
+        Ok(default_pet_appearance())
     })
     .await
     .map_err(|error| error.to_string())?
@@ -589,10 +724,21 @@ mod tests {
     }
 
     #[test]
-    fn ring_resize_keeps_figure_centered() {
-        // 展开：窗口向左上扩（宽度对称、高度向下扩展），本体保持不动。
-        assert_eq!(ring_resize_delta(true), (-95.0, -80.0));
-        assert_eq!(ring_resize_delta(false), (95.0, 80.0));
+    fn task_popup_uses_space_above_or_below_without_moving_pet() {
+        let monitors = [(0, 0, 1920, 1080)];
+        assert_eq!(
+            task_popup_position((500, 600, 210, 240), (420, 280), 8, &monitors),
+            (395, 312)
+        );
+        assert_eq!(
+            task_popup_position((500, 10, 210, 240), (420, 280), 8, &monitors),
+            (395, 258)
+        );
+        let monitors = [(-1920, -200, 1920, 1080)];
+        assert_eq!(
+            task_popup_position((-1900, 300, 315, 360), (630, 420), 12, &monitors),
+            (-1920, -132)
+        );
     }
 
     #[test]
@@ -637,6 +783,43 @@ mod tests {
         assert!(store.asset_path("C:\\evil.svg").is_none());
         assert!(store.asset_path(".hidden").is_none());
         assert!(store.asset_path("").is_none());
+    }
+
+    #[test]
+    fn appearance_json_uses_camel_case_field_names() {
+        // 前端（pet 页与设置页预览）读取 dataBase64/isDefault：线格式必须
+        // 是驼峰字段名。serde 的 rename_all 只作用于枚举变体名，字段要
+        // 另用 rename_all_fields —— 这个测试守住两者的契约。
+        let json = serde_json::to_string(&PetAppearance::Image {
+            mime: "image/jpeg".to_owned(),
+            data_base64: "aGk=".to_owned(),
+            is_default: true,
+        })
+        .unwrap();
+        assert!(
+            json.contains("\"kind\":\"image\""),
+            "tag kind=image: {json}"
+        );
+        assert!(json.contains("\"dataBase64\":"), "camelCase data: {json}");
+        assert!(json.contains("\"isDefault\":"), "camelCase flag: {json}");
+        assert!(
+            !json.contains("data_base64"),
+            "snake_case leaks to wire: {json}"
+        );
+    }
+
+    #[test]
+    fn default_appearance_embeds_the_transparent_gif_with_matching_wire_mime() {
+        let json = serde_json::to_value(default_pet_appearance()).unwrap();
+        assert_eq!(json["kind"], "image");
+        assert_eq!(json["mime"], "image/gif");
+        assert_eq!(json["isDefault"], true);
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(json["dataBase64"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(bytes, DEFAULT_PET_IMAGE);
+        assert_eq!(sniff_image_extension(&bytes), Some("gif"));
+        assert!(bytes.len() as u64 <= MAX_IMAGE_BYTES);
     }
 
     #[test]

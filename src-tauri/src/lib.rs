@@ -220,6 +220,8 @@ pub fn run() {
                 pet::set_pet_image,
                 pet::reset_pet_image,
                 pet::set_pet_ring,
+                pet::set_pet_tasks_visible,
+                pet::get_pet_task_hover,
                 checklist::open_checklist_window,
                 checklist::list_checklist_items,
                 checklist::add_checklist_item,

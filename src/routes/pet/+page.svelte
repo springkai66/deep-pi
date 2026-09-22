@@ -1,7 +1,8 @@
 <script lang="ts">
   // 桌宠浮窗：透明、置顶、不进任务栏的小窗口。
-  // 交互：抓着桌宠/顶部拖动条拖动位置（防抖持久化），悬停显示关闭按钮与
-  // 随机气泡；任务运行时进入工作状态，完成时庆祝、失败时沮丧（pet-state）。
+  // 交互：抓着桌宠/顶部拖动条拖动位置（防抖持久化），悬停窗口任意处显示
+  // 关闭按钮；悬停本体显示可停止/继续的任务气泡；任务完成时庆祝、
+  // 失败时沮丧（pet-state）。
   // 形象来自 get_pet_appearance：默认内置图片或本地自定义图片。
   import { invoke } from "@tauri-apps/api/core";
   import { PhysicalPosition } from "@tauri-apps/api/dpi";
@@ -19,7 +20,8 @@
   } from "$lib/pet-state";
   import { t, tm } from "$lib/i18n.svelte";
   import type { AppSettings } from "$lib/settings";
-  import { statusLabels, type Task } from "$lib/task";
+  import type { Task } from "$lib/task";
+  import { createPetTaskBubbles } from "$lib/pet-task-bubbles";
 
   type PetAppearance = { kind: "image"; mime: string; dataBase64: string; isDefault: boolean };
 
@@ -35,7 +37,13 @@
   let moodTimer: ReturnType<typeof setTimeout> | null = null;
   let moveSaveTimer: ReturnType<typeof setTimeout> | null = null;
   let reloadTimer: ReturnType<typeof setTimeout> | null = null;
-  let hoverPhraseAt = 0;
+  // 悬停转发给独立的任务浮层窗口；本体窗口尺寸、位置与图片节点保持不变（避免闪烁）。
+  const petTasks = createPetTaskBubbles({
+    load: async () => [],
+    resize: (open) => invoke<void>("set_pet_ring", { open }),
+    action: async () => {},
+    changed: () => {},
+  });
 
   // —— 气泡队列：多条提示（多任务完成/悬停问候等）依次播放，不互相覆盖 ——
   const bubbleQueue: { text: string; duration: number }[] = [];
@@ -57,8 +65,6 @@
     bubbleQueueTimer = setTimeout(drainBubbleQueue, next.duration);
   }
 
-  const IDLE_PHRASES = ["嗨，我在呢～", "有任务尽管交给我！", "咯咯——", "一起加油鸭！"];
-
   function scheduleReload(delay = 160) {
     if (reloadTimer) return;
     reloadTimer = setTimeout(() => {
@@ -67,16 +73,21 @@
     }, delay);
   }
 
+  function applyTaskSnapshot(next: Task[]) {
+    tasks = next;
+    if (mood !== "celebrate" && mood !== "sad") mood = petStateFromTasks(tasks);
+  }
+
   async function reloadTasks() {
     try {
-      const next = await invoke<Task[]>("list_tasks");
-      tasks = next;
-      if (mood !== "celebrate" && mood !== "sad") mood = petStateFromTasks(tasks);
-      // 环绕气泡展开中：同步刷新，让新任务/已结束任务即时进出。
-      if (ringOpen) ringTasks = activeRingTasks();
+      applyTaskSnapshot(await invoke<Task[]>("list_tasks"));
     } catch {
-      // 状态拉取失败保持现状；下一次事件会再试。
+      // 后台状态失败保留现状；任务数据由独立浮层窗口读取与展示。
     }
+  }
+
+  async function refreshWindowAppearance() {
+    try { applyAppearance(await invoke<AppSettings>("get_settings")); } catch { /* 保留主题 */ }
   }
 
   async function refreshAppearance() {
@@ -102,19 +113,11 @@
     }, PET_TRANSIENT_MS);
   }
 
-  function showIdlePhrase() {
-    // 悬停问候限频：避免反复划过时喋喋不休。
-    const now = Date.now();
-    if (now - hoverPhraseAt < 15_000) return;
-    hoverPhraseAt = now;
-    queueBubble(IDLE_PHRASES[Math.floor(Math.random() * IDLE_PHRASES.length)]);
-  }
-
   function startDrag(event: PointerEvent) {
     if (event.button !== 0) return;
-    if (ringOpen) void closeRing();
     event.preventDefault();
-    void getCurrentWindow().startDragging().catch(() => { /* 窗口已销毁时忽略 */ });
+    void petTasks.close(true).then(() => getCurrentWindow().startDragging())
+      .catch(() => { /* 窗口已销毁时忽略 */ });
   }
 
   function schedulePositionSave(position: { x: number; y: number }) {
@@ -143,7 +146,7 @@
   let lastKnownPosition: { x: number; y: number } | null = null;
 
   function onDesktopPointer(event: DesktopPointerEvent) {
-    if (ringOpen) void closeRing();
+    void petTasks.close(true);
     if (event.kind === "teleport") {
       stopCrawlLoop();
       crawl = null;
@@ -206,111 +209,45 @@
     crawlRaf = 0;
   }
 
-  // —— 右键环绕任务气泡 ——
-  // 展开时窗口从 210×240 扩到 400×320（逻辑像素，与后端 RING 常量一致），
-  // 由后端补偿位置保持本体不动；气泡沿本体上半圈环绕排布。
-  const RING_WIDTH = 400;
-  const RING_HEIGHT = 320;
-  const RING_AUTO_CLOSE_MS = 8000;
-  let ringOpen = $state(false);
-  let ringTasks = $state<Task[]>([]);
-  let ringCloseTimer: ReturnType<typeof setTimeout> | null = null;
-
-  function activeRingTasks(): Task[] {
-    return tasks.filter((task) => task.status === "running" || task.status === "waiting");
-  }
-
-  function toggleRing(event: MouseEvent) {
-    event.preventDefault();
-    if (ringOpen) {
-      void closeRing();
-      return;
-    }
-    ringTasks = activeRingTasks();
-    if (!ringTasks.length) {
-      queueBubble(t("现在没有执行中的任务"));
-      return;
-    }
-    ringOpen = true;
-    void invoke("set_pet_ring", { open: true }).catch(() => { /* 窗口已销毁时忽略 */ });
-    armRingAutoClose();
-  }
-
-  async function closeRing() {
-    if (!ringOpen) return;
-    ringOpen = false;
-    if (ringCloseTimer) {
-      clearTimeout(ringCloseTimer);
-      ringCloseTimer = null;
-    }
-    try {
-      await invoke("set_pet_ring", { open: false });
-    } catch { /* 窗口可能已销毁 */ }
-  }
-
-  function armRingAutoClose() {
-    if (ringCloseTimer) clearTimeout(ringCloseTimer);
-    ringCloseTimer = setTimeout(() => {
-      ringCloseTimer = null;
-      void closeRing();
-    }, RING_AUTO_CLOSE_MS);
-  }
-
-  function ringBubbleStyle(index: number, total: number): string {
-    // 气泡沿本体上半圈环绕：展开窗口里本体中心在 (200, 235)。
-    const cx = RING_WIDTH / 2;
-    const cy = RING_HEIGHT - 85;
-    const rx = 140;
-    const ry = 92;
-    const degrees = total === 1 ? 90 : 165 - (index * 150) / (total - 1);
-    const angle = (degrees * Math.PI) / 180;
-    const left = Math.round(cx + rx * Math.cos(angle));
-    const top = Math.round(cy - ry * Math.sin(angle));
-    return `left:${left}px;top:${top}px`;
-  }
-
   onMount(() => {
     void (async () => {
       try {
         await invoke<void>("await_startup");
-        applyAppearance(await invoke<AppSettings>("get_settings"));
-        await Promise.all([reloadTasks(), refreshAppearance()]);
+        await Promise.all([refreshWindowAppearance(), reloadTasks(), refreshAppearance()]);
       } catch {
         // 启动未就绪/读取失败：保持默认形象与待机状态。
       }
     })();
     const unlisteners = [
       listen("task-status", () => scheduleReload()),
+      listen("dsh-tasks", () => scheduleReload()),
       listen<PetExitEvent>("pty-exit", ({ payload }) => onTaskExit(payload)),
       listen<PetExitEvent>("rpc-task-exit", ({ payload }) => onTaskExit(payload)),
       listen("pet-appearance", () => void refreshAppearance()),
       listen<DesktopPointerEvent>("desktop-pointer", ({ payload }) => onDesktopPointer(payload)),
     ];
     // 记录窗口位置（爬行起点用）；拖动/爬行停住后防抖保存位置。
-    void getCurrentWindow().onMoved(({ payload }) => {
+    unlisteners.push(getCurrentWindow().onMoved(({ payload }) => {
       lastKnownPosition = { x: payload.x, y: payload.y };
       schedulePositionSave(payload);
-    });
+    }));
     void getCurrentWindow()
       .outerPosition()
       .then((position) => { lastKnownPosition = { x: position.x, y: position.y }; })
       .catch(() => { /* 取不到就首次爬行从目标处开始 */ });
-    void getCurrentWindow().onFocusChanged(({ payload: focused }) => {
+    unlisteners.push(getCurrentWindow().onFocusChanged(({ payload: focused }) => {
       if (!focused) return;
       void refreshAppearance();
-      void (async () => {
-        try {
-          applyAppearance(await invoke<AppSettings>("get_settings"));
-        } catch { /* 保留当前外观 */ }
-      })();
-    });
+      void refreshWindowAppearance();
+      scheduleReload(80);
+    }));
     return () => {
-      for (const unlisten of unlisteners) void unlisten.then((dispose) => dispose());
+      petTasks.dispose();
+      for (const unlisten of unlisteners) void unlisten.then((dispose) => dispose()).catch(() => {});
       if (moodTimer) clearTimeout(moodTimer);
       if (bubbleQueueTimer) clearTimeout(bubbleQueueTimer);
       if (moveSaveTimer) clearTimeout(moveSaveTimer);
       if (reloadTimer) clearTimeout(reloadTimer);
-      if (ringCloseTimer) clearTimeout(ringCloseTimer);
       stopCrawlLoop();
     };
   });
@@ -323,7 +260,11 @@
   {@html "<style>html,body{background:transparent !important;overflow:hidden}</style>"}
 </svelte:head>
 
-<div class="pet-window" role="presentation" oncontextmenu={(event) => event.preventDefault()}>
+<!-- hover 跟踪在窗口根节点：若挂在桌宠本体上，鼠标从本体移向右上角
+     关闭按钮的途中 pointerleave 会提前触发、按钮被卸载，永远点不到。 -->
+<div class="pet-window" role="presentation" oncontextmenu={(event) => event.preventDefault()}
+  onpointerenter={() => { hover = true; }}
+  onpointerleave={() => { hover = false; }}>
   <!-- 顶部拖动条：常驻的抓握区（无边框窗口没有系统标题栏）。 -->
   <div class="pet-drag-strip" data-tauri-drag-region>
     {#if hover}
@@ -335,29 +276,15 @@
     {#if bubble}
       <div class="pet-bubble" role="status">{tm(bubble)}</div>
     {/if}
-    <!-- 桌宠本体：左键按住拖动，右键环绕任务气泡，悬停出气泡。 -->
-    <div class="pet-figure pet-{mood}" class:pet-walk={Boolean(crawl)} role="img" aria-label={t("桌宠")}
-      onpointerenter={() => { hover = true; showIdlePhrase(); }}
-      onpointerleave={() => { hover = false; bubble = ""; }}
-      onpointerdown={startDrag}
-      oncontextmenu={toggleRing}>
+    <!-- 悬停转发给独立任务浮层；本体窗口尺寸、位置与图片节点保持不变（避免闪烁）。 -->
+    <div class="pet-figure pet-{mood}" class:pet-walk={Boolean(crawl)} role="img" aria-label={t("桌宠，悬停查看任务")}
+      onpointerenter={() => void petTasks.enter()}
+      onpointerdown={startDrag}>
       {#if appearance}
         <img class="pet-image" src={imageSrc} alt={t("桌宠")} draggable="false" />
       {/if}
     </div>
   </div>
-  {#if ringOpen}
-    <!-- 环绕任务气泡：覆盖整个窗口，气泡本体不可交互，仅展示。 -->
-    <div class="pet-ring" aria-label={t("执行中的任务")}>
-      {#each ringTasks as task, index (task.id)}
-        <div class="pet-ring-bubble" style={ringBubbleStyle(index, ringTasks.length)}>
-          <span class="pet-ring-dot pet-ring-dot-{task.status}" aria-hidden="true"></span>
-          <span class="pet-ring-title">{task.title}</span>
-          <span class="pet-ring-status">{t(statusLabels[task.status])}</span>
-        </div>
-      {/each}
-    </div>
-  {/if}
 </div>
 
 <style>
@@ -468,39 +395,4 @@
     75% { transform: translateX(4px); }
   }
 
-  /* —— 右键环绕任务气泡 —— */
-  .pet-ring {
-    position: absolute;
-    inset: 0;
-    pointer-events: none;
-    z-index: 5;
-  }
-  .pet-ring-bubble {
-    position: absolute;
-    transform: translate(-50%, -50%);
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    max-width: 150px;
-    padding: 4px 9px;
-    border: 1px solid var(--border-strong);
-    border-radius: 9px;
-    color: var(--text);
-    background: var(--surface);
-    box-shadow: 0 8px 22px rgb(0 0 0 / 25%);
-    font-family: var(--text-font);
-    font-size: 12px;
-    line-height: 1.4;
-    white-space: nowrap;
-    animation: ring-in 150ms ease-out;
-  }
-  .pet-ring-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-  .pet-ring-status { flex-shrink: 0; color: var(--text-muted); font-size: 10px; }
-  .pet-ring-dot { flex-shrink: 0; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
-  .pet-ring-dot-running { background: var(--status-running, var(--accent)); }
-  .pet-ring-dot-waiting { background: #f6c945; }
-  @keyframes ring-in {
-    from { opacity: 0; }
-    to { opacity: 1; }
-  }
 </style>

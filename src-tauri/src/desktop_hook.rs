@@ -40,17 +40,14 @@ use windows_sys::Win32::System::Diagnostics::Debug::WriteProcessMemory;
 use windows_sys::Win32::System::Memory::{
     VirtualAllocEx, VirtualFreeEx, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE,
 };
-use windows_sys::Win32::System::Threading::{
-    OpenProcess, PROCESS_VM_OPERATION, PROCESS_VM_WRITE,
-};
+use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_VM_OPERATION, PROCESS_VM_WRITE};
 use windows_sys::Win32::UI::Controls::{LVHITTESTINFO, LVM_HITTEST};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GA_PARENT, GetAncestor, GetClassNameW, GetMessageW,
-    GetSystemMetrics, GetWindowThreadProcessId, MSG, MSLLHOOKSTRUCT, SendMessageTimeoutW,
-    SetWindowsHookExW, SMTO_ABORTIFHUNG, SM_CXDOUBLECLK, SM_CYDOUBLECLK, TranslateMessage,
-    UnhookWindowsHookEx, WindowFromPoint, WH_MOUSE_LL, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE,
+    CallNextHookEx, DispatchMessageW, GetAncestor, GetClassNameW, GetMessageW, GetSystemMetrics,
+    GetWindowThreadProcessId, SendMessageTimeoutW, SetWindowsHookExW, TranslateMessage,
+    UnhookWindowsHookEx, WindowFromPoint, GA_PARENT, MSG, MSLLHOOKSTRUCT, SMTO_ABORTIFHUNG,
+    SM_CXDOUBLECLK, SM_CYDOUBLECLK, WH_MOUSE_LL, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
 };
 
 use tauri::{AppHandle, Emitter, Manager};
@@ -80,13 +77,26 @@ struct RawMouse {
     y: i32,
 }
 
-/// 发给桌宠窗口的桌面指针事件（坐标为窗口左上角目标位置）。
+/// 发给桌宠窗口的桌面指针事件（坐标为窗口左上角目标位置）。变体名
+/// 序列化成 kind 标签值，必须与前端 DesktopPointerEvent 的字面量一致：
+/// crawl / crawl-end / teleport（rename_all=camelCase 会把 CrawlEnd 变成
+/// crawlEnd，这里显式指定文档约定的连字符名）。
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 enum DesktopPointer {
-    Crawl { x: i32, y: i32 },
-    CrawlEnd { x: i32, y: i32 },
-    Teleport { x: i32, y: i32 },
+    Crawl {
+        x: i32,
+        y: i32,
+    },
+    #[serde(rename = "crawl-end")]
+    CrawlEnd {
+        x: i32,
+        y: i32,
+    },
+    Teleport {
+        x: i32,
+        y: i32,
+    },
 }
 
 /// 点击落点分类：非壁纸一律不触发，判定失败保守归为其他。
@@ -118,14 +128,19 @@ pub fn install(app: AppHandle) {
         .spawn(move || {
             let mut state = WorkerState::default();
             for raw in receiver {
-                handle_raw(HOOK_APP.get().expect("app set before worker"), raw, &mut state);
+                handle_raw(
+                    HOOK_APP.get().expect("app set before worker"),
+                    raw,
+                    &mut state,
+                );
             }
         });
     // 钩子线程：LL 钩子要求装钩线程泵消息。
     let hook = std::thread::Builder::new()
         .name("desktop-mouse-hook".into())
         .spawn(|| unsafe {
-            let handle = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook_proc), std::ptr::null_mut(), 0);
+            let handle =
+                SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook_proc), std::ptr::null_mut(), 0);
             if handle.is_null() {
                 log::warn!("event=desktop_hook_install_failed");
                 return;
@@ -208,9 +223,7 @@ fn handle_raw(app: &AppHandle, raw: RawMouse, state: &mut WorkerState) {
             let double = state
                 .last_wallpaper_down
                 .take()
-                .map(|(previous, at)| {
-                    within_double_click(previous, at, (raw.x, raw.y), now)
-                })
+                .map(|(previous, at)| within_double_click(previous, at, (raw.x, raw.y), now))
                 .unwrap_or(false);
             if double {
                 // 双击：闪现（不再启动爬行，前端会取消未完成的爬行）。
@@ -315,7 +328,11 @@ fn listview_hits_icon(hwnd: windows_sys::Win32::Foundation::HWND, pt: POINT) -> 
 
 /// 在目标进程里分配一块内存写入 LVHITTESTINFO，执行带超时的
 /// LVM_HITTEST，读取返回的命中索引（≥ 0 为图标项，-1 为空白）。
-fn remote_hit_test(process: HANDLE, hwnd: windows_sys::Win32::Foundation::HWND, pt: POINT) -> Option<bool> {
+fn remote_hit_test(
+    process: HANDLE,
+    hwnd: windows_sys::Win32::Foundation::HWND,
+    pt: POINT,
+) -> Option<bool> {
     unsafe {
         let mut info: LVHITTESTINFO = std::mem::zeroed();
         info.pt = pt;
@@ -456,9 +473,55 @@ mod tests {
     #[test]
     fn double_click_needs_time_and_proximity() {
         // 500ms 窗口、4px 容差：同点快速连按命中；超时或位移过大不算。
-        assert!(is_within_double_click((100, 200), 120, (102, 198), 500, (4, 4)));
-        assert!(!is_within_double_click((100, 200), 600, (100, 200), 500, (4, 4)));
-        assert!(!is_within_double_click((100, 200), 120, (110, 200), 500, (4, 4)));
-        assert!(!is_within_double_click((100, 200), 120, (100, 210), 500, (4, 4)));
+        assert!(is_within_double_click(
+            (100, 200),
+            120,
+            (102, 198),
+            500,
+            (4, 4)
+        ));
+        assert!(!is_within_double_click(
+            (100, 200),
+            600,
+            (100, 200),
+            500,
+            (4, 4)
+        ));
+        assert!(!is_within_double_click(
+            (100, 200),
+            120,
+            (110, 200),
+            500,
+            (4, 4)
+        ));
+        assert!(!is_within_double_click(
+            (100, 200),
+            120,
+            (100, 210),
+            500,
+            (4, 4)
+        ));
+    }
+
+    #[test]
+    fn pointer_event_kinds_match_frontend_contract() {
+        // 前端 DesktopPointerEvent 按 kind === "crawl" | "crawl-end" |
+        // "teleport" 分支：标签值必须逐字一致，否则松开鼠标收不到。
+        let kinds: Vec<String> = [
+            DesktopPointer::Crawl { x: 1, y: 2 },
+            DesktopPointer::CrawlEnd { x: 3, y: 4 },
+            DesktopPointer::Teleport { x: 5, y: 6 },
+        ]
+        .iter()
+        .map(|event| {
+            serde_json::to_value(event)
+                .unwrap()
+                .get("kind")
+                .and_then(|kind| kind.as_str())
+                .expect("tagged enum")
+                .to_owned()
+        })
+        .collect();
+        assert_eq!(kinds, ["crawl", "crawl-end", "teleport"]);
     }
 }

@@ -64,9 +64,10 @@ fn request_quit(app: &AppHandle) {
 /// 设置加载完成后由 `apply_language` 更新。图标与应用图标同源（bundle icon）。
 pub fn install(app: &AppHandle) -> tauri::Result<()> {
     let menu = build_menu(app, crate::settings::DEFAULT_LANGUAGE)?;
-    let icon = app.default_window_icon().ok_or_else(|| {
-        tauri::Error::AssetNotFound("bundle icon is required for the tray".into())
-    })?.clone();
+    let icon = app
+        .default_window_icon()
+        .ok_or_else(|| tauri::Error::AssetNotFound("bundle icon is required for the tray".into()))?
+        .clone();
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon)
         .tooltip("DeepPi")

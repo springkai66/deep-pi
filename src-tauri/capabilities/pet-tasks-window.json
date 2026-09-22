@@ -1,0 +1,19 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "pet-tasks-window",
+  "description": "桌宠任务气泡浮层：读取任务列表与执行停止/继续的委托动作",
+  "windows": ["pet-tasks"],
+  "permissions": [
+    "core:default",
+    "core:event:allow-emit-to",
+    "core:event:allow-listen",
+    "core:window:allow-hide",
+    "core:window:allow-set-position",
+    "core:window:allow-set-size",
+    "core:window:allow-scale-factor",
+    "core:window:allow-outer-position",
+    "core:window:allow-inner-size",
+    "core:window:allow-outer-size",
+    "core:window:allow-available-monitors"
+  ]
+}
