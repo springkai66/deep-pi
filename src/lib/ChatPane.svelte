@@ -328,9 +328,15 @@ import type { ChatDetailLevel } from "./settings";
   let turnMenuOpen = $state(false);
   let turnMenu = $state<HTMLDivElement>();
   let turnTrigger = $state<HTMLButtonElement>();
-  /// 历史下拉面板的实测尺寸上限（null 时回退到 CSS 里的 vh/vw 兜底值）。
+  /// 历史下拉面板的实测尺寸上限（null 时回退到 CSS 里的兜底值）。
   let turnPanelMaxHeight = $state<number | null>(null);
   let turnPanelMaxWidth = $state<number | null>(null);
+  /// 面板固定高度（px）：不随轮次数量伸缩，轮次超出显示范围时在列表区内滚动；
+  /// 矮窗格下按实测剩余空间收口，保证面板完整落在聊天窗格内。
+  const TURN_PANEL_HEIGHT = 300;
+  const turnPanelHeight = $derived(
+    turnPanelMaxHeight !== null ? Math.min(TURN_PANEL_HEIGHT, turnPanelMaxHeight) : TURN_PANEL_HEIGHT,
+  );
   let flashTurnIndex = $state<number | null>(null);
   let flashTimer: ReturnType<typeof setTimeout> | null = null;
   /// 平滑滚动期间冻结「当前轮次」的测量，避免指示器在中间位置闪烁。
@@ -592,8 +598,8 @@ import type { ChatDetailLevel } from "./settings";
   }
 
   /// 面板位于 overflow:hidden 的 .chat-pane 内部，若按窗口 vh/vw 设上限，分屏/矮窗格时
-  /// 会超出窗格被硬裁剪（文字被切边、被裁掉的内容怎么滚都看不到）。改为实测「触发按钮
-  /// → 窗格边界」的剩余空间封顶：面板高度跟随内容，内容超过上限才出现滚动条。
+  /// 会超出窗格被硬裁剪（文字被切边、被裁掉的内容怎么滚都看不到）。面板高度固定不随轮次
+  /// 数量伸缩，仅在实测剩余空间不足时收口：内容超出固定高度时在列表区内滚动。
   function updateTurnPanelBounds() {
     const pane = turnTrigger?.closest(".chat-pane");
     if (!turnTrigger || !(pane instanceof HTMLElement)) {
@@ -618,6 +624,21 @@ import type { ChatDetailLevel } from "./settings";
     const observer = new ResizeObserver(() => updateTurnPanelBounds());
     observer.observe(pane);
     return () => observer.disconnect();
+  });
+
+  /// 面板高度固定后轮次列表可滚动：打开面板或 Alt+↑/↓ 改变当前轮次时，把激活项
+  /// 滚入列表可视区（旧版面板高度跟随内容、全部轮次可见，此项为等价行为补偿）。
+  /// 只滚面板内的 <ul>，不波及外层聊天窗格；仅在依赖变化时触发，不干扰手动滚动。
+  $effect(() => {
+    if (!turnMenuOpen || !turnMenu) return;
+    void activeTurn;
+    const list = turnMenu.querySelector("ul");
+    const active = turnMenu.querySelector("button.active");
+    if (!(list instanceof HTMLElement) || !(active instanceof HTMLElement)) return;
+    const listRect = list.getBoundingClientRect();
+    const activeRect = active.getBoundingClientRect();
+    if (activeRect.top < listRect.top) list.scrollTop += activeRect.top - listRect.top;
+    else if (activeRect.bottom > listRect.bottom) list.scrollTop += activeRect.bottom - listRect.bottom;
   });
 
   onMount(() => {
@@ -1776,7 +1797,7 @@ import type { ChatDetailLevel } from "./settings";
         </button>
         {#if turnMenuOpen}
           <div class="turn-panel" bind:this={turnMenu}
-            style:max-height={turnPanelMaxHeight !== null ? `${turnPanelMaxHeight}px` : undefined}
+            style:height={`${turnPanelHeight}px`}
             style:max-width={turnPanelMaxWidth !== null ? `${turnPanelMaxWidth}px` : undefined}>
             <p class="turn-panel-head">{t("共 {total} 轮 · Alt+↑ / Alt+↓ 快速切换", { total: turnCount })}</p>
             <ul>
@@ -1787,9 +1808,6 @@ import type { ChatDetailLevel } from "./settings";
                     <span class="turn-no">#{turn.number}</span>
                     <span class="turn-body">
                       <span class="turn-summary">{turn.summary}</span>
-                      {#if turnDurationLabels.get(turn.number)}
-                        <span class="turn-duration">{t("耗时 {duration}", { duration: turnDurationLabels.get(turn.number) ?? "" })}</span>
-                      {/if}
                     </span>
                     {#if turn.timeLabel}<span class="turn-time">{turn.timeLabel}</span>{/if}
                   </button>
@@ -2288,11 +2306,11 @@ import type { ChatDetailLevel } from "./settings";
   .turn-trigger { display: flex; align-items: center; gap: 5px; width: auto; height: 24px; max-width: 240px; padding: 0 8px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-alt); color: var(--text-muted); font-size: 11px; }
   .turn-trigger:hover, .turn-trigger[aria-expanded="true"] { background: var(--surface-hover); border-color: var(--border-strong); color: var(--text); }
   .turn-label { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-  /* 尺寸上限的兜底值（视口单位）；实际渲染时由 updateTurnPanelBounds 按窗格剩余空间
-     用内联样式收口：面板完整落在窗格内，高度跟随内容，超高才滚动。 */
-  .turn-panel { position: absolute; top: calc(100% + 6px); right: 0; z-index: 40; width: 340px; max-width: min(380px, 92vw); max-height: min(420px, 70vh); overflow-y: auto; overflow-x: hidden; padding: 8px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--surface-raised); box-shadow: 0 10px 26px #0006; }
-  .turn-panel-head { margin: 0; padding: 2px 10px 8px; color: var(--text-muted); font-size: 10px; }
-  .turn-panel ul { display: flex; flex-direction: column; gap: 4px; margin: 0; padding: 0; list-style: none; }
+  /* 高度固定不随轮次数量伸缩（300px，矮窗格时由内联样式按实测剩余空间收口）；
+     标题固定在顶部，轮次列表超出固定高度时在列表区内滚动。 */
+  .turn-panel { position: absolute; top: calc(100% + 6px); right: 0; z-index: 40; display: flex; flex-direction: column; width: 340px; max-width: min(380px, 92vw); height: 300px; overflow: hidden; padding: 8px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--surface-raised); box-shadow: 0 10px 26px #0006; }
+  .turn-panel-head { flex-shrink: 0; margin: 0; padding: 2px 10px 8px; color: var(--text-muted); font-size: 10px; }
+  .turn-panel ul { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; display: flex; flex-direction: column; gap: 4px; margin: 0; padding: 0; list-style: none; }
   .turn-panel button { display: flex; align-items: flex-start; gap: 10px; width: 100%; padding: 8px 10px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--text); font: inherit; font-size: 12px; line-height: 1.45; text-align: left; cursor: pointer; }
   .turn-panel button:hover { background: var(--surface-hover); }
   .turn-panel button.active { border-color: var(--accent); background: var(--surface-alt); }
@@ -2300,10 +2318,6 @@ import type { ChatDetailLevel } from "./settings";
   .turn-body { display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1; }
   .turn-summary { min-width: 0; white-space: normal; word-break: break-word; color: var(--text-muted); }
   .turn-panel button.active .turn-summary { color: var(--text-strong); }
-  .turn-duration { white-space: normal; color: var(--text-muted); opacity: .75; font-size: 10px; line-height: 1.2; }
-  /* 面板内的耗时不沿用消息标签的胶囊样式，也不随纵向 flex 拉伸成整行宽条
-     （否则会横跨整行、视觉上与下一轮文字挤在一起）。 */
-  .turn-panel .turn-duration { align-self: flex-start; width: fit-content; white-space: nowrap; border: 0; padding: 0; }
   .turn-time { flex-shrink: 0; margin-left: auto; padding-top: 1px; color: var(--text-muted); font-size: 10px; white-space: nowrap; }
   .turn-rail { position: absolute; top: 50%; right: 6px; transform: translateY(-50%); z-index: 3; display: flex; flex-direction: column; align-items: center; gap: 6px; max-height: calc(100% - 24px); overflow-y: auto; padding: 4px 2px; }
   .turn-dot { width: 8px; height: 8px; flex-shrink: 0; padding: 0; border: 0; border-radius: 999px; background: var(--border-strong); opacity: .75; transition: background .15s ease, height .15s ease, opacity .15s ease; }
