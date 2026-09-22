@@ -82,6 +82,10 @@ fn default_pet_enabled() -> bool {
     true
 }
 
+fn default_pet_always_on_top() -> bool {
+    true
+}
+
 /// 未知代理模式回落 system（旧设置文件与手改配置容错）。
 fn deserialize_proxy_mode<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
@@ -117,8 +121,11 @@ fn deserialize_terminal_shell<'de, D: serde::Deserializer<'de>>(
 /// 导入主题数量上限，避免设置文件被无限撑大。
 const MAX_CUSTOM_THEMES: usize = 32;
 
+/// 默认界面语言；托盘等原生 UI 在设置尚未加载时也用它兑底。
+pub const DEFAULT_LANGUAGE: &str = "zh-CN";
+
 fn default_language() -> String {
-    "zh-CN".into()
+    DEFAULT_LANGUAGE.into()
 }
 
 /// 语言校验：只接受受支持的三个语言标识，其余收敛为默认值。
@@ -232,6 +239,9 @@ pub struct AppSettings {
     /// 启动时自动显示桌宠浮窗。
     #[serde(default = "default_pet_enabled")]
     pub pet_enabled: bool,
+    /// 桌宠浮窗是否置顶（显示在最上方；关闭后可被其他窗口遮挡）。
+    #[serde(default = "default_pet_always_on_top")]
+    pub pet_always_on_top: bool,
 }
 
 impl Default for AppSettings {
@@ -261,6 +271,7 @@ impl Default for AppSettings {
             proxy_no_proxy: String::new(),
             notify_on_task_complete: default_notify_on_task_complete(),
             pet_enabled: default_pet_enabled(),
+            pet_always_on_top: default_pet_always_on_top(),
         }
     }
 }
@@ -516,7 +527,14 @@ pub async fn save_settings(app: AppHandle, settings: AppSettings) -> Result<(), 
         let store = app.state::<SettingsStore>();
         store.save(settings)?;
         // 保存成功后立即应用：新启动的任务/会话就用新代理（已运行的会话需重启任务）。
-        crate::proxy::configure(&store.get()?);
+        let saved = store.get()?;
+        crate::proxy::configure(&saved);
+        // 桌宠置顶设置即时生效到已打开的浮窗（未打开则无操作）。
+        crate::pet::apply_always_on_top(&app, saved.pet_always_on_top);
+        // 界面语言即时生效到托盘菜单（原生 UI，须在主线程更新）。
+        let language = saved.language;
+        let tray_app = app.clone();
+        let _ = app.run_on_main_thread(move || crate::tray::apply_language(&tray_app, &language));
         Ok(())
     })
     .await

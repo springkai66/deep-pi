@@ -143,5 +143,6 @@ export const EN_MISC: Record<string, string> = {
   "有任务尽管交给我！": "Just hand me a task!",
   "咯咯——": "Beep boop—",
   "一起加油鸭！": "Let's go!",
-  "请先输入桌宠形象描述": "Describe the pet appearance first",
+  "现在没有执行中的任务": "No running tasks right now",
+  "执行中的任务": "Running tasks",
 };

@@ -204,18 +204,17 @@
     taskLimitError = value === null ? t("同时运行任务数必须为 1 到 16 的整数") : "";
     if (value !== null) updateSettings({ maxConcurrentTasks: value });
   }
-  // —— 通知与桌宠：形象预览 / 本地图片 / AI 生成 ——
-  type PetAppearance =
-    | { kind: "builtin" }
-    | { kind: "image"; mime: string; dataBase64: string };
-  let petAppearance = $state<PetAppearance>({ kind: "builtin" });
-  let petPrompt = $state("");
-  let petGenerating = $state(false);
+  // —— 通知与桌宠：形象预览 / 本地图片 ——
+  type PetAppearance = {
+    kind: "image";
+    mime: string;
+    dataBase64: string;
+    isDefault: boolean;
+  };
+  let petAppearance = $state<PetAppearance | null>(null);
   let petNotice = $state("");
   let petImageSrc = $derived(
-    petAppearance.kind === "image"
-      ? `data:${petAppearance.mime};base64,${petAppearance.dataBase64}`
-      : "",
+    petAppearance ? `data:${petAppearance.mime};base64,${petAppearance.dataBase64}` : "",
   );
 
   async function refreshPetAppearance() {
@@ -240,25 +239,6 @@
       await refreshPetAppearance();
     } catch (cause) {
       petNotice = tm(String(cause));
-    }
-  }
-
-  async function generatePetImage() {
-    if (petGenerating) return;
-    const description = petPrompt.trim();
-    if (!description) {
-      petNotice = t("请先输入桌宠形象描述");
-      return;
-    }
-    petGenerating = true;
-    petNotice = "";
-    try {
-      await nativeInvoke("generate_pet_image", { prompt: description });
-      await refreshPetAppearance();
-    } catch (cause) {
-      petNotice = tm(String(cause));
-    } finally {
-      petGenerating = false;
     }
   }
 
@@ -360,28 +340,27 @@
             <strong>{t("启动时显示桌宠")}</strong>
           </label>
           <p class="muted">{t("桌宠常驻桌面，随任务状态做动作；随时可在主窗口工具栏打开或关闭。")}</p>
+          <label class="setting-control setting-check">
+            <input type="checkbox" checked={runtime.settings.petAlwaysOnTop} aria-label={t("桌宠置顶显示")}
+              onchange={(event) => updateSettings({ petAlwaysOnTop: event.currentTarget.checked })} />
+            <strong>{t("桌宠置顶显示")}</strong>
+          </label>
+          <p class="muted">{t("桌宠浮窗显示在最上方，不被其他窗口遮挡；关闭后可被覆盖。")}</p>
           <div class="setting-control pet-appearance">
             <strong>{t("桌宠形象")}</strong>
             <div class="pet-preview-row">
               <span class="pet-preview" aria-hidden="true">
-                {#if petAppearance.kind === "image"}
+                {#if petAppearance}
                   <img src={petImageSrc} alt="" />
-                {:else}
-                  <span class="pet-preview-builtin">{t("内置机器人")}</span>
                 {/if}
               </span>
               <div class="pet-actions">
                 <button type="button" class="quiet-button" onclick={() => void choosePetImage()}>{t("选择图片…")}</button>
-                <button type="button" class="quiet-button" disabled={petGenerating}
-                  onclick={() => void generatePetImage()}>{petGenerating ? t("生成中…") : t("AI 生成…")}</button>
-                <button type="button" class="quiet-button" disabled={petAppearance.kind === "builtin"}
+                <button type="button" class="quiet-button" disabled={!petAppearance || petAppearance.isDefault}
                   onclick={() => void resetPetImage()}>{t("恢复默认")}</button>
               </div>
             </div>
-            <input type="text" aria-label={t("形象描述")} placeholder={t("例如：圆滚滚的橙色小猫，戴一顶贝雷帽")}
-              bind:value={petPrompt} maxlength="500" />
             {#if petNotice}<p class="pet-notice" role="alert">{petNotice}</p>{/if}
-            <p class="muted">{t("AI 生成使用「模型设置」里已配置的模型，让模型输出一张 Q 版 SVG 形象；生成结果自动启用。")}</p>
           </div>
         </section>
       </div>
@@ -497,6 +476,7 @@
               <option value="manual">{t("手动设置")}</option>
             </select>
           </label>
+          <p class="muted">{t("代理客户端开启虚拟网卡（TUN）模式时已在网络层透明接管流量，DeepPi 应选择「直连」，无需再配置代理。")}</p>
           {#if runtime.settings.proxyMode === "manual"}
             <label class="setting-control"><strong>{t("代理地址")}</strong>
               <input type="text" value={runtime.settings.proxyUrl} placeholder="http://127.0.0.1:7890"
@@ -592,8 +572,6 @@
     overflow: hidden; background: var(--surface);
   }
   .pet-preview img { width: 100%; height: 100%; object-fit: contain; }
-  .pet-preview-builtin { font-size: 11px; color: var(--text-muted); padding: 4px; text-align: center; }
   .pet-actions { display: flex; flex-wrap: wrap; gap: 6px; }
-  .pet-appearance input[type="text"] { width: 100%; max-width: 420px; }
   .pet-notice { color: var(--status-failed); font-size: 12px; margin: 6px 0 0; }
 </style>

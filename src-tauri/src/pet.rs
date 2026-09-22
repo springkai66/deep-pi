@@ -3,20 +3,20 @@
 //! 与看板浮窗同构：无边框窗口加载 `/pet` 预渲染页。差异点：
 //! - 位置由用户自由拖放，持久化在 `pet/pet-state.json`（物理像素），独立于
 //!   settings.json —— 主窗口保存设置是整份覆写，混进设置会互相覆盖坐标。
-//! - 形象三种来源：内置机器人（默认）、本地图片（复制进 pet 资产目录）、
-//!   AI 生成（用当前配置的模型生成 SVG，经 `call_configured_model`）。
-//!   形象变更后向桌宠窗口广播 `pet-appearance` 事件即时换装。
+//! - 形象两种来源：默认形象（随应用打包的内置图片 pet-default.jpg）、
+//!   本地图片（复制进 pet 资产目录）。形象变更后向桌宠窗口广播
+//!   `pet-appearance` 事件即时换装。
 
 use std::{
     fs,
     path::PathBuf,
-    sync::atomic::{AtomicBool, Ordering},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    sync::atomic::{AtomicBool, AtomicU32, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, WebviewUrl, WebviewWindowBuilder};
 
 use crate::message::{msg, msg_with};
 use crate::settings::SettingsStore;
@@ -31,23 +31,25 @@ const DEFAULT_MARGIN_RIGHT: i32 = 24;
 const DEFAULT_MARGIN_BOTTOM: i32 = 88;
 /// 自定义形象文件大小上限（复制进资产目录前检查）。
 const MAX_IMAGE_BYTES: u64 = 5 * 1024 * 1024;
-/// AI 生成的 SVG 大小上限。
-const MAX_GENERATED_SVG_BYTES: usize = 512 * 1024;
-/// 形象描述的长度上限（与提示词增强同量级）。
-const MAX_PROMPT_CHARS: usize = 500;
-/// 允许的自定义形象扩展名 → MIME。
-const IMAGE_MIME: [(&str, &str); 5] = [
+/// 允许的自定义形象扩展名 → MIME（与 sniff_image_extension 的返回一致）。
+const IMAGE_MIME: [(&str, &str); 6] = [
     ("png", "image/png"),
     ("jpg", "image/jpeg"),
     ("jpeg", "image/jpeg"),
     ("webp", "image/webp"),
+    ("gif", "image/gif"),
     ("svg", "image/svg+xml"),
 ];
+/// 默认桌宠形象：随应用打包的内置图片（未选择自定义形象时生效）。
+const DEFAULT_PET_IMAGE: &[u8] = include_bytes!("../assets/pet-default.jpg");
 
 /// open_pet_window 的在途创建标志：并发触发时只允许一次 build。
 static PET_OPEN_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+/// 桌宠窗口的 DPI 缩放（×1000 缓存）：壁纸钩子坐标是物理像素，窗口尺寸/
+/// 锚点是逻辑像素，换算需要它。建窗时刷新；未建窗时按 1.0 处理。
+static PET_SCALE_MILLIS: AtomicU32 = AtomicU32::new(1000);
 
-/// 桌宠持久化状态。image = None 表示内置机器人；Some(文件名) 指向
+/// 桌宠持久化状态。image = None 表示内置默认图片；Some(文件名) 指向
 /// pet 目录里的形象文件（只存文件名，杜绝路径穿越）。
 #[derive(Serialize, Deserialize, Default, PartialEq, Eq, Clone, Debug)]
 pub(crate) struct PetState {
@@ -116,12 +118,16 @@ fn pet_state(app: &AppHandle) -> Option<PetStateStore> {
     Some(PetStateStore::new(paths.pet.clone()))
 }
 
-/// 当前生效的形象：内置机器人，或某个形象文件的字节（base64 + MIME）。
+/// 当前生效的形象：内置默认图，或某个自定义形象文件的字节（base64 + MIME）。
 #[derive(Serialize, PartialEq, Eq, Debug)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum PetAppearance {
-    Builtin,
-    Image { mime: String, data_base64: String },
+    Image {
+        mime: String,
+        data_base64: String,
+        /// true 表示尚未选择自定义形象（返回的是内置默认图）。
+        is_default: bool,
+    },
 }
 
 /// 打开（或显示已存在的）桌宠浮窗。
@@ -146,6 +152,8 @@ pub fn show_pet_at_startup(app: &AppHandle) {
 }
 
 fn open_or_focus(app: &AppHandle) -> Result<(), String> {
+    // 壁纸点击监听（爬行/闪现）随桌宠启用；幂等，重复调用无副作用。
+    crate::desktop_hook::install(app.clone());
     if let Some(pet) = app.get_webview_window(PET_LABEL) {
         let _ = pet.unminimize();
         let _ = pet.show();
@@ -160,13 +168,31 @@ fn open_or_focus(app: &AppHandle) -> Result<(), String> {
     result
 }
 
+/// 当前缓存缩放（物理像素 ↔ 逻辑像素换算用）。
+fn cached_pet_scale() -> f64 {
+    PET_SCALE_MILLIS.load(Ordering::SeqCst) as f64 / 1000.0
+}
+
+/// 刷新缩放缓存（建窗时与桌面钩子手势起点调用）。
+pub(crate) fn store_pet_scale(scale: f64) {
+    PET_SCALE_MILLIS.store((scale * 1000.0).round() as u32, Ordering::SeqCst);
+}
+
+/// 当前缩放下的窗口物理尺寸（逻辑尺寸 × 缩放）。
+fn physical_pet_size(scale: f64) -> (u32, u32) {
+    (
+        (PET_WIDTH as f64 * scale).round() as u32,
+        (PET_HEIGHT as f64 * scale).round() as u32,
+    )
+}
+
 fn build_pet_window(app: &AppHandle) -> Result<(), String> {
     // 必须用无扩展名路由路径（同 board）：预渲染页 + 资产解析器回退。
     let pet = WebviewWindowBuilder::new(app, PET_LABEL, WebviewUrl::App("pet".into()))
         .title("DeepPi")
         .decorations(false)
         .transparent(true)
-        .always_on_top(true)
+        .always_on_top(pet_always_on_top(app))
         .skip_taskbar(true)
         .resizable(false)
         .maximizable(false)
@@ -178,19 +204,38 @@ fn build_pet_window(app: &AppHandle) -> Result<(), String> {
         .visible(false)
         .build()
         .map_err(|error| format!("failed to create pet window: {error}"))?;
+    // 先缓存缩放再定位：位置钳位需要物理尺寸。
+    store_pet_scale(pet.scale_factor().unwrap_or(1.0));
     position_pet(app, &pet);
     // 不抢焦点：桌宠只是陪伴，不应打断正在输入的窗口。
     let _ = pet.show();
     Ok(())
 }
 
+/// 桌宠是否置顶（设置驱动；读取失败回落置顶，保持既有行为）。
+fn pet_always_on_top(app: &AppHandle) -> bool {
+    app.try_state::<SettingsStore>()
+        .and_then(|store| store.get().ok())
+        .map(|settings| settings.pet_always_on_top)
+        .unwrap_or(true)
+}
+
+/// 应用桌宠置顶设置到已打开的浮窗（未打开则无操作）。设置保存时调用，
+/// 让「桌宠置顶显示」开关即时生效。
+pub(crate) fn apply_always_on_top(app: &AppHandle, on_top: bool) {
+    if let Some(pet) = app.get_webview_window(PET_LABEL) {
+        let _ = pet.set_always_on_top(on_top);
+    }
+}
+
 /// 计算并应用桌宠位置：优先恢复保存值（钳位），否则停靠主显示器右下角。
 fn position_pet(app: &AppHandle, pet: &tauri::WebviewWindow) {
     let monitors = collect_monitors(app);
+    let (width, height) = physical_pet_size(cached_pet_scale());
     let position = pet_state(app).map(|store| store.load());
     let (x, y) = match position {
-        Some(state) => clamp_pet_position(state.x, state.y, PET_WIDTH, PET_HEIGHT, &monitors),
-        None => default_pet_position(PET_WIDTH, PET_HEIGHT, &monitors),
+        Some(state) => clamp_pet_position(state.x, state.y, width, height, &monitors),
+        None => default_pet_position(width, height, &monitors),
     };
     let _ = pet.set_position(PhysicalPosition::new(x, y));
 }
@@ -271,6 +316,75 @@ fn default_pet_position(width: u32, height: u32, monitors: &[(i32, i32, u32, u32
     clamp_pet_position(x, y, width, height, monitors)
 }
 
+/// 桌宠本体（图片区域）中心在窗口内的锚点（逻辑像素）：窗口 210×240，
+/// 本体 150×150 贴底居中、底部留白 10px → 中心 ≈ (105, 155)。壁纸点击
+/// 坐标（物理）减去锚点×缩放即窗口左上角目标位置。
+const ANCHOR_X: f64 = 105.0;
+const ANCHOR_Y: f64 = 155.0;
+/// 任务环绕气泡模式下的窗口尺寸（逻辑像素，与前端 RING 常量一致）。
+pub(crate) const RING_WIDTH: f64 = 400.0;
+pub(crate) const RING_HEIGHT: f64 = 320.0;
+
+/// 壁纸点击坐标（物理）→ 桌宠窗口左上角目标位置（物理，锚定本体中心
+/// 并钳进屏幕）。
+pub(crate) fn anchored_pet_position(app: &AppHandle, cursor_x: i32, cursor_y: i32) -> (i32, i32) {
+    let scale = cached_pet_scale();
+    let monitors = collect_monitors(app);
+    clamp_pet_position(
+        cursor_x - (ANCHOR_X * scale).round() as i32,
+        cursor_y - (ANCHOR_Y * scale).round() as i32,
+        physical_pet_size(scale).0,
+        physical_pet_size(scale).1,
+        &monitors,
+    )
+}
+
+/// 展开/收起任务环绕气泡：改窗口尺寸（逻辑）并按缩放补偿物理位置，
+/// 保持桌宠本体在屏幕上不动。
+#[tauri::command]
+pub async fn set_pet_ring(app: AppHandle, open: bool) -> Result<(), String> {
+    let Some(pet) = app.get_webview_window(PET_LABEL) else {
+        return Ok(());
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let scale = cached_pet_scale();
+        let (width, height) = if open {
+            (RING_WIDTH, RING_HEIGHT)
+        } else {
+            (PET_WIDTH as f64, PET_HEIGHT as f64)
+        };
+        let (delta_x, delta_y) = ring_resize_delta(open);
+        let current = pet.outer_position().map_err(|error| error.to_string())?;
+        let monitors = collect_monitors(&app);
+        let (x, y) = clamp_pet_position(
+            current.x + (delta_x * scale).round() as i32,
+            current.y + (delta_y * scale).round() as i32,
+            (width * scale).round() as u32,
+            (height * scale).round() as u32,
+            &monitors,
+        );
+        pet.set_size(LogicalSize::new(width, height))
+            .map_err(|error| error.to_string())?;
+        pet.set_position(PhysicalPosition::new(x, y))
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// 展开时窗口左上角应移动的逻辑位移（收起取反）：宽 (210−400)/2 = −95，
+/// 高 240−320 = −80。展开时窗口向左上扩，本体才能停在原位。
+fn ring_resize_delta(open: bool) -> (f64, f64) {
+    let dx = (PET_WIDTH as f64 - RING_WIDTH) / 2.0;
+    let dy = PET_HEIGHT as f64 - RING_HEIGHT;
+    if open {
+        (dx, dy)
+    } else {
+        (-dx, -dy)
+    }
+}
+
 /// 保存桌宠位置（物理像素）。桌宠窗口在拖动结束后调用（前端已防抖）。
 #[tauri::command]
 pub async fn save_pet_position(app: AppHandle, x: i32, y: i32) -> Result<(), String> {
@@ -281,31 +395,34 @@ pub async fn save_pet_position(app: AppHandle, x: i32, y: i32) -> Result<(), Str
     store.save(state)
 }
 
-/// 读取当前桌宠形象（内置或形象文件字节）。形象文件丢失时自愈回落内置。
+/// 读取当前桌宠形象（自定义形象文件字节，否则内置默认图）。自定义形象
+/// 文件丢失或格式无法识别时自愈回落默认图。
 #[tauri::command]
 pub async fn get_pet_appearance(app: AppHandle) -> Result<PetAppearance, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let store = pet_state(&app).ok_or_else(|| "app state not ready".to_string())?;
         let state = store.load();
-        let Some(name) = state.image.clone() else {
-            return Ok(PetAppearance::Builtin);
-        };
-        let Some(path) = store.asset_path(&name) else {
-            return Ok(PetAppearance::Builtin);
-        };
-        let Ok(bytes) = fs::read(&path) else {
-            // 形象文件丢失（被手动清理）：回落内置并清掉悬空引用。
+        if let Some(name) = state.image.clone() {
+            if let Some(path) = store.asset_path(&name) {
+                if let Ok(bytes) = fs::read(&path) {
+                    if let Some(mime) = mime_for(&name) {
+                        return Ok(PetAppearance::Image {
+                            mime: mime.to_owned(),
+                            data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+                            is_default: false,
+                        });
+                    }
+                }
+            }
+            // 形象文件丢失/不可识别（被手动清理）：回落默认并清掉悬空引用。
             let mut healed = state;
             healed.image = None;
             let _ = store.save(healed);
-            return Ok(PetAppearance::Builtin);
-        };
-        let Some(mime) = mime_for(&name) else {
-            return Ok(PetAppearance::Builtin);
-        };
+        }
         Ok(PetAppearance::Image {
-            mime: mime.to_owned(),
-            data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+            mime: "image/jpeg".to_owned(),
+            data_base64: base64::engine::general_purpose::STANDARD.encode(DEFAULT_PET_IMAGE),
+            is_default: true,
         })
     })
     .await
@@ -349,7 +466,7 @@ pub async fn set_pet_image(app: AppHandle, path: String) -> Result<(), String> {
     .map_err(|error| error.to_string())?
 }
 
-/// 恢复内置机器人形象。
+/// 恢复默认形象（内置默认图片）。
 #[tauri::command]
 pub async fn reset_pet_image(app: AppHandle) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -358,131 +475,6 @@ pub async fn reset_pet_image(app: AppHandle) -> Result<(), String> {
     })
     .await
     .map_err(|error| error.to_string())?
-}
-
-/// 用当前配置的模型生成桌宠形象：让模型输出一个 Q 版 SVG（文本模型即可
-/// 生成，不要求图像模型），校验后存入 pet 资产目录并启用。桌宠窗口用
-/// `<img src="data:image/svg+xml">` 渲染 —— img 内嵌 SVG 天然不执行脚本。
-#[tauri::command]
-pub async fn generate_pet_image(app: AppHandle, prompt: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || generate_pet_image_sync(&app, &prompt))
-        .await
-        .map_err(|error| error.to_string())?
-}
-
-fn generate_pet_image_sync(app: &AppHandle, prompt: &str) -> Result<(), String> {
-    let prompt = prompt.trim();
-    if prompt.is_empty() {
-        return Err(msg("pet.generate.input_empty"));
-    }
-    if prompt.chars().count() > MAX_PROMPT_CHARS {
-        return Err(msg_with(
-            "pet.generate.input_too_long",
-            &[("max", &MAX_PROMPT_CHARS.to_string())],
-        ));
-    }
-    let paths = app
-        .try_state::<crate::app_paths::AppPaths>()
-        .map(|paths| paths.inner().clone())
-        .ok_or_else(|| "app state not ready".to_string())?;
-    let text = crate::provider::call_configured_model(
-        &paths,
-        PET_SVG_SYSTEM_PROMPT,
-        prompt,
-        Duration::from_secs(120),
-        4096,
-    )
-    .map_err(generate_error)?;
-    let svg = extract_svg(&text).ok_or_else(|| msg("pet.generate.no_svg"))?;
-    let store = pet_state(app).ok_or_else(|| "app state not ready".to_string())?;
-    store.ensure_dir()?;
-    let name = format!("ai-{}.svg", unix_millis());
-    fs::write(store.asset_path(&name).expect("safe generated name"), svg)
-        .map_err(|error| format!("failed to save generated pet: {error}"))?;
-    apply_appearance(app, &store, Some(name))
-}
-
-/// 桌宠形象生成的系统提示词：约束为单根 SVG、透明背景、禁止脚本。
-const PET_SVG_SYSTEM_PROMPT: &str = "你是桌宠形象设计师。用户会描述一个桌宠形象，请把它画成一个可爱的 Q 版 SVG。严格要求：只输出一个 <svg> 根元素，不要输出任何解释、注释或代码块围栏；viewBox 必须是 \"0 0 200 240\"；背景保持透明；用简洁的色块与圆润线条，形象居中、占满画布；不要包含 <script>、<foreignObject>、<image>、外部引用或任何脚本与事件属性。";
-
-/// 危险内容检测：脚本/foreignObject/内嵌位图/use 引用/任何 href（含
-/// javascript: 与外链）/事件属性（on*）。桌宠窗口虽然以 `<img>` 的安全
-/// 静态模式渲染 SVG（不执行脚本、不加载外部资源），这里仍做深度防御。
-fn svg_looks_dangerous(svg: &str) -> bool {
-    let lower = svg.to_ascii_lowercase();
-    if lower.contains("<script")
-        || lower.contains("<foreignobject")
-        || lower.contains("<image")
-        || lower.contains("<use")
-        || lower.contains("javascript:")
-        || lower.contains("data:text/html")
-    {
-        return true;
-    }
-    // 事件属性：o n 后面跟字母再跟 =（如 onload=、onerror=）。
-    let bytes = lower.as_bytes();
-    let mut i = 0;
-    while i + 1 < bytes.len() {
-        if bytes[i] == b' ' && bytes[i + 1] == b'o' {
-            let mut j = i + 2;
-            while j < bytes.len() && bytes[j].is_ascii_alphabetic() {
-                j += 1;
-            }
-            if j > i + 2 && j < bytes.len() && bytes[j] == b'=' {
-                return true;
-            }
-        }
-        i += 1;
-    }
-    // 任何 href/xlink:href（含外链与内页跳转）一律拒绝。
-    if lower.contains("href") {
-        return true;
-    }
-    // CSS 里的外链资源引用（url(#id) 本地引用除外）。
-    if lower.contains("url(") && !lower.contains("url(#") {
-        return true;
-    }
-    false
-}
-
-/// 从模型输出里提取 SVG：剥掉围栏，取第一个 <svg 到最后一个 </svg>；
-/// 拒绝含危险内容与超限体积。
-fn extract_svg(text: &str) -> Option<String> {
-    let trimmed = text.trim();
-    let start = trimmed.find("<svg")?;
-    let end = trimmed.rfind("</svg>")? + "</svg>".len();
-    if end <= start {
-        return None;
-    }
-    let svg = &trimmed[start..end];
-    if svg.len() > MAX_GENERATED_SVG_BYTES {
-        return None;
-    }
-    if svg_looks_dangerous(svg) {
-        return None;
-    }
-    Some(svg.to_owned())
-}
-
-/// 共用的模型调用错误 → 消息码映射（与提示词增强一致，Local 已是消息码）。
-fn generate_error(error: crate::provider::ChatCallError) -> String {
-    match error {
-        crate::provider::ChatCallError::ProviderUnconfigured => {
-            msg("prompt_enhance.provider_unconfigured")
-        }
-        crate::provider::ChatCallError::BaseUrlMissing => msg("prompt_enhance.base_url_missing"),
-        crate::provider::ChatCallError::Request(error) => {
-            msg_with("prompt_enhance.request_failed", &[("error", &error)])
-        }
-        crate::provider::ChatCallError::Http(status) => msg_with(
-            "prompt_enhance.http_failed",
-            &[("status", &status.to_string())],
-        ),
-        crate::provider::ChatCallError::ResponseInvalid(error) => {
-            msg_with("pet.generate.response_invalid", &[("error", &error)])
-        }
-        crate::provider::ChatCallError::Local(error) => error,
-    }
 }
 
 /// 启用新形象并广播给桌宠窗口；旧形象文件是本目录生成的资产时一并清理。
@@ -597,6 +589,20 @@ mod tests {
     }
 
     #[test]
+    fn ring_resize_keeps_figure_centered() {
+        // 展开：窗口向左上扩（宽度对称、高度向下扩展），本体保持不动。
+        assert_eq!(ring_resize_delta(true), (-95.0, -80.0));
+        assert_eq!(ring_resize_delta(false), (95.0, 80.0));
+    }
+
+    #[test]
+    fn anchors_cursor_to_figure_center() {
+        // 锚点 = 本体中心：窗口左上角 = 点击坐标 − (105, 155)×缩放。
+        assert_eq!(ANCHOR_X, 105.0);
+        assert_eq!(ANCHOR_Y, 155.0);
+    }
+
+    #[test]
     fn pet_state_store_round_trips_and_tolerates_corruption() {
         let dir = tempfile::tempdir().unwrap();
         let store = PetStateStore::new(dir.path().join("pet"));
@@ -605,7 +611,7 @@ mod tests {
             .save(PetState {
                 x: -192,
                 y: 88,
-                image: Some("ai-1.svg".into()),
+                image: Some("custom-1.png".into()),
             })
             .unwrap();
         assert_eq!(
@@ -613,7 +619,7 @@ mod tests {
             PetState {
                 x: -192,
                 y: 88,
-                image: Some("ai-1.svg".into()),
+                image: Some("custom-1.png".into()),
             }
         );
         // 损坏文件：读取回落默认值而不是报错。
@@ -625,27 +631,12 @@ mod tests {
     fn asset_path_rejects_path_traversal() {
         let dir = tempfile::tempdir().unwrap();
         let store = PetStateStore::new(dir.path().to_path_buf());
-        assert!(store.asset_path("ai-1.svg").is_some());
+        assert!(store.asset_path("custom-1.png").is_some());
         assert!(store.asset_path("../settings.json").is_none());
         assert!(store.asset_path("a\\b.svg").is_none());
         assert!(store.asset_path("C:\\evil.svg").is_none());
         assert!(store.asset_path(".hidden").is_none());
         assert!(store.asset_path("").is_none());
-    }
-
-    #[test]
-    fn extracts_svg_and_strips_surroundings() {
-        let fenced =
-            "好的，这是桌宠：\n```svg\n<svg viewBox=\"0 0 200 240\"><circle cx=\"1\"/></svg>\n```";
-        assert_eq!(
-            extract_svg(fenced).unwrap(),
-            "<svg viewBox=\"0 0 200 240\"><circle cx=\"1\"/></svg>"
-        );
-        // 无 SVG / 只有开始标签 / 超限体积 → None。
-        assert!(extract_svg("没有图形").is_none());
-        assert!(extract_svg("<svg>未闭合").is_none());
-        let huge = format!("<svg>{}</svg>", "x".repeat(MAX_GENERATED_SVG_BYTES + 1));
-        assert!(extract_svg(&huge).is_none());
     }
 
     #[test]
@@ -669,20 +660,5 @@ mod tests {
         );
         assert_eq!(sniff_image_extension(b"MZ fake exe"), None);
         assert_eq!(sniff_image_extension(b""), None);
-    }
-
-    #[test]
-    fn rejects_dangerous_svg_content() {
-        assert!(extract_svg("<svg><script>alert(1)</script></svg>").is_none());
-        assert!(extract_svg("<svg><foreignObject/></svg>").is_none());
-        assert!(extract_svg("<svg><image href='http://x'/></svg>").is_none());
-        assert!(extract_svg("<svg><a xlink:href='http://x'/></svg>").is_none());
-        assert!(extract_svg("<svg onload='x()'/> ").is_none());
-        assert!(extract_svg("<svg><rect onmouseover='x()'/></svg>").is_none());
-        assert!(extract_svg("<svg><a href='http://x'/></svg>").is_none());
-        assert!(extract_svg("<svg><use href='#x'/></svg>").is_none());
-        assert!(extract_svg("<svg><style>@import url(http://x)</style></svg>").is_none());
-        // url(#) 本地引用允许。
-        assert!(extract_svg("<svg><style>fill:url(#a)</style></svg>").is_some());
     }
 }

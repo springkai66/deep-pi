@@ -59,6 +59,8 @@ export interface AppSettings {
   notifyOnTaskComplete: boolean;
   /** 启动时自动显示桌宠浮窗。 */
   petEnabled: boolean;
+  /** 桌宠浮窗是否置顶（显示在最上方）。 */
+  petAlwaysOnTop: boolean;
 }
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
@@ -86,6 +88,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   proxyNoProxy: "",
   notifyOnTaskComplete: true,
   petEnabled: true,
+  petAlwaysOnTop: true,
 };
 
 export const FONT_SIZE_RANGE = { min: 9, max: 32 } as const;

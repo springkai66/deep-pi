@@ -594,20 +594,31 @@ fn probe(proxy: Option<ureq::Proxy>) -> Result<String, String> {
     let mut config = ureq::Agent::config_builder()
         .timeout_connect(Some(Duration::from_secs(8)))
         .timeout_global(Some(Duration::from_secs(12)))
+        // 非 2xx 不作为 Err 抱出：需要读响应体区分「GitHub 匿名限流」与真实故障。
+        .http_status_as_error(false)
         .https_only(true);
     config = config.proxy(proxy);
     let agent = config.build().new_agent();
     let started = Instant::now();
-    let response = agent
+    let mut response = agent
         .get(TEST_URL)
         .header("User-Agent", "DeepPi")
         .call()
         .map_err(|error| format!("{error}"))?;
     let status = response.status().as_u16();
-    Ok(format!(
-        "HTTP {status} · {} ms",
-        started.elapsed().as_millis()
-    ))
+    let elapsed = started.elapsed().as_millis();
+    if (200..300).contains(&status) {
+        return Ok(format!("HTTP {status} · {elapsed} ms"));
+    }
+    // GitHub 匿名额度按出口 IP 计（60 次/小时）：共享代理节点常被其他人耗尽，
+    // 403 + rate limit 响应体只说明测试端点受限，代理隧道本身是通的。
+    let body = response.body_mut().read_to_string().unwrap_or_default();
+    if status == 403 && body.contains("rate limit exceeded") {
+        return Ok(format!(
+            "连通 · {elapsed} ms · 测试端点触发 GitHub 匿名限流（共享出口节点常见），不影响 Pi/Advisor"
+        ));
+    }
+    Err(format!("目标返回 HTTP {status} · {elapsed} ms"))
 }
 
 /// 按给定配置测试代理连通性（不依赖全局状态，避免与防抖保存竞态）。

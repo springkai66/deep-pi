@@ -328,6 +328,9 @@ import type { ChatDetailLevel } from "./settings";
   let turnMenuOpen = $state(false);
   let turnMenu = $state<HTMLDivElement>();
   let turnTrigger = $state<HTMLButtonElement>();
+  /// 历史下拉面板的实测尺寸上限（null 时回退到 CSS 里的 vh/vw 兜底值）。
+  let turnPanelMaxHeight = $state<number | null>(null);
+  let turnPanelMaxWidth = $state<number | null>(null);
   let flashTurnIndex = $state<number | null>(null);
   let flashTimer: ReturnType<typeof setTimeout> | null = null;
   /// 平滑滚动期间冻结「当前轮次」的测量，避免指示器在中间位置闪烁。
@@ -587,6 +590,35 @@ import type { ChatDetailLevel } from "./settings";
     if (!(event.target instanceof Node) || turnMenu.contains(event.target) || event.target === turnTrigger) return;
     turnMenuOpen = false;
   }
+
+  /// 面板位于 overflow:hidden 的 .chat-pane 内部，若按窗口 vh/vw 设上限，分屏/矮窗格时
+  /// 会超出窗格被硬裁剪（文字被切边、被裁掉的内容怎么滚都看不到）。改为实测「触发按钮
+  /// → 窗格边界」的剩余空间封顶：面板高度跟随内容，内容超过上限才出现滚动条。
+  function updateTurnPanelBounds() {
+    const pane = turnTrigger?.closest(".chat-pane");
+    if (!turnTrigger || !(pane instanceof HTMLElement)) {
+      turnPanelMaxHeight = null;
+      turnPanelMaxWidth = null;
+      return;
+    }
+    const paneRect = pane.getBoundingClientRect();
+    const triggerRect = turnTrigger.getBoundingClientRect();
+    // 14 = 6px 定位偏移 + 8px 底部余量；极矮窗格下保底 48px 保持可滚动可用。
+    turnPanelMaxHeight = Math.max(48, Math.floor(paneRect.bottom - triggerRect.bottom - 14));
+    // 面板右缘与触发按钮对齐，可向左伸展到窗格左缘（留 4px 余量）。
+    turnPanelMaxWidth = Math.max(120, Math.floor(triggerRect.right - paneRect.left - 4));
+  }
+
+  /// 打开面板及窗格尺寸变化时重新测量，保证面板始终完整落在聊天窗格内。
+  $effect(() => {
+    if (!turnMenuOpen) return;
+    updateTurnPanelBounds();
+    const pane = turnTrigger?.closest(".chat-pane");
+    if (!(pane instanceof HTMLElement)) return;
+    const observer = new ResizeObserver(() => updateTurnPanelBounds());
+    observer.observe(pane);
+    return () => observer.disconnect();
+  });
 
   onMount(() => {
     document.addEventListener("pointerdown", closeTurnMenu, true);
@@ -1734,7 +1766,9 @@ import type { ChatDetailLevel } from "./settings";
           <ChevronDown size={13} />
         </button>
         {#if turnMenuOpen}
-          <div class="turn-panel" bind:this={turnMenu}>
+          <div class="turn-panel" bind:this={turnMenu}
+            style:max-height={turnPanelMaxHeight !== null ? `${turnPanelMaxHeight}px` : undefined}
+            style:max-width={turnPanelMaxWidth !== null ? `${turnPanelMaxWidth}px` : undefined}>
             <p class="turn-panel-head">{t("共 {total} 轮 · Alt+↑ / Alt+↓ 快速切换", { total: turnCount })}</p>
             <ul>
               {#each turns as turn (turn.index)}
@@ -2245,6 +2279,8 @@ import type { ChatDetailLevel } from "./settings";
   .turn-trigger { display: flex; align-items: center; gap: 5px; width: auto; height: 24px; max-width: 240px; padding: 0 8px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-alt); color: var(--text-muted); font-size: 11px; }
   .turn-trigger:hover, .turn-trigger[aria-expanded="true"] { background: var(--surface-hover); border-color: var(--border-strong); color: var(--text); }
   .turn-label { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  /* 尺寸上限的兜底值（视口单位）；实际渲染时由 updateTurnPanelBounds 按窗格剩余空间
+     用内联样式收口：面板完整落在窗格内，高度跟随内容，超高才滚动。 */
   .turn-panel { position: absolute; top: calc(100% + 6px); right: 0; z-index: 40; width: 340px; max-width: min(380px, 92vw); max-height: min(420px, 70vh); overflow-y: auto; overflow-x: hidden; padding: 8px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--surface-raised); box-shadow: 0 10px 26px #0006; }
   .turn-panel-head { margin: 0; padding: 2px 10px 8px; color: var(--text-muted); font-size: 10px; }
   .turn-panel ul { display: flex; flex-direction: column; gap: 4px; margin: 0; padding: 0; list-style: none; }

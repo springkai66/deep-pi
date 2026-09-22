@@ -8,6 +8,7 @@ mod board;
 mod bridge;
 mod checklist;
 mod credentials;
+mod desktop_hook;
 mod diagnostics;
 mod dialog_text;
 mod dsh;
@@ -56,6 +57,7 @@ mod snapshot;
 mod startup;
 mod task;
 mod theme;
+mod tray;
 
 pub fn credential_helper(provider_id: &str) -> Result<(), String> {
     credentials::credential_helper(provider_id)
@@ -117,6 +119,8 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle().clone();
             board::install_main_window_hooks(app.handle());
+            // 托盘在主线程创建；菜单文案在设置加载完成后按用户语言更新。
+            tray::install(app.handle())?;
             let roaming = app.path().app_data_dir()?;
             let local = app.path().app_local_data_dir()?;
             // Recovery and database migration must finish before publishing any store.
@@ -157,6 +161,12 @@ pub fn run() {
                     // 全局代理最早在这里生效：后续创建的 HTTP 客户端与子进程都会读到。
                     if let Ok(current) = settings.get() {
                         crate::proxy::configure(&current);
+                        // 托盘菜单按用户语言渲染：设置此刻才加载完成，主线程补一次更新。
+                        let language = current.language.clone();
+                        let tray_app = worker_app.clone();
+                        let _ = worker_app.run_on_main_thread(move || {
+                            tray::apply_language(&tray_app, &language);
+                        });
                     }
                     worker_app.manage(paths);
                     worker_app.manage(store);
@@ -209,7 +219,7 @@ pub fn run() {
                 pet::get_pet_appearance,
                 pet::set_pet_image,
                 pet::reset_pet_image,
-                pet::generate_pet_image,
+                pet::set_pet_ring,
                 checklist::open_checklist_window,
                 checklist::list_checklist_items,
                 checklist::add_checklist_item,

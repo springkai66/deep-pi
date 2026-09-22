@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
-import { createWindowCloseHandler, type WindowClosePorts } from "./window-close";
+import { createWindowCloseHandler, type CloseRequestSource, type WindowClosePorts } from "./window-close";
 
 it("keeps the window alive during an index transaction and allows retry after it finishes", async () => {
   let writing = true;
@@ -127,6 +127,25 @@ describe("window close", () => {
     const handler = createWindowCloseHandler(ports({ behavior: () => "minimize", prepareExit }));
     await handler({ preventDefault() {} });
     expect(prepareExit).not.toHaveBeenCalled();
+  });
+
+  it("forwards the tray source so the exit path runs even when the close behavior is minimize", async () => {
+    const sources: CloseRequestSource[] = [];
+    const calls: string[] = [];
+    const handler = createWindowCloseHandler(ports({
+      behavior: (source) => {
+        sources.push(source);
+        return source === "tray" ? "exit" : "minimize";
+      },
+      minimize: async () => { calls.push("minimize"); },
+      prepareExit: async () => { calls.push("prepare"); return true; },
+      destroy: async () => { calls.push("destroy"); },
+    }));
+    await handler({ preventDefault() {} });
+    expect(calls).toEqual(["minimize"]);
+    await handler({ preventDefault() {} }, "tray");
+    expect(sources).toEqual(["window", "tray"]);
+    expect(calls).toEqual(["minimize", "prepare", "destroy"]);
   });
 
   it("authorizes destroy and minimize only for the main Webview", () => {

@@ -650,8 +650,9 @@
     systemTheme.addEventListener("change", handleSystemThemeChange);
 
     const appWindow = getCurrentWindow();
-    const closeListener = appWindow.onCloseRequested(createWindowCloseHandler({
-      behavior: () => nativeReady ? settings.closeBehavior : "exit",
+    const requestWindowClose = createWindowCloseHandler({
+      // 托盘菜单的退出是显式退出，不受「关闭窗口行为」影响。
+      behavior: (source) => (source === "tray" || !nativeReady ? "exit" : settings.closeBehavior),
       blocked: () => diagnosticsBusy || recoveryBusy || fileWorkspace.busy() || switchingTasks.size > 0 || gitIndexBusy || settingsPackageBusy || busyRuntime !== null,
       blockedReason: () => diagnosticsBusy ? t("诊断操作正在处理，请完成或取消后再关闭窗口") : recoveryBusy || fileWorkspace.busy() ? t("项目文件正在处理，请完成后再关闭窗口") : settingsPackageBusy || busyRuntime !== null ? t("组件操作正在处理，请完成或取消后再关闭窗口") : gitIndexBusy ? t("Git 写入正在处理，请完成后再关闭窗口") : t("任务正在切换模式，请完成后再关闭窗口"),
       hasActiveTasks: () => tasks.some((task) => ["running", "waiting"].includes(task.status)),
@@ -670,7 +671,20 @@
       stopDsh: () => nativeReady ? invoke("stop_dsh") : Promise.resolve(),
       destroy: () => appWindow.destroy(),
       error: showError,
-    }));
+    });
+    const closeListener = appWindow.onCloseRequested(requestWindowClose);
+    // 托盘菜单的「退出」：复用既有关闭流程（活动任务确认、设置落盘、任务清理）。
+    // 需要弹确认框或提示时，先把可能隐藏着的主窗口亮出来，否则用户看不到对话框。
+    const trayQuitListener = listen("tray-quit", async () => {
+      const needsVisibleWindow = diagnosticsBusy || recoveryBusy || fileWorkspace.busy()
+        || switchingTasks.size > 0 || gitIndexBusy || settingsPackageBusy || busyRuntime !== null
+        || tasks.some((task) => ["running", "waiting"].includes(task.status));
+      if (needsVisibleWindow) {
+        await appWindow.show();
+        await appWindow.setFocus();
+      }
+      await requestWindowClose({ preventDefault() {} }, "tray");
+    });
     const dshTaskListener = listen<Task[]>("dsh-tasks", ({ payload }) => {
       tasks = [...tasks.filter((task) => task.agent !== "dsh"), ...payload];
     });
@@ -726,6 +740,7 @@
       observer.disconnect();
       systemTheme.removeEventListener("change", handleSystemThemeChange);
       void closeListener.then((unlisten) => unlisten());
+      void trayQuitListener.then((unlisten) => unlisten());
       void dshTaskListener.then((unlisten) => unlisten());
       void dshStatusListener.then((unlisten) => unlisten());
       void statusListener.then((unlisten) => unlisten());
@@ -1130,7 +1145,7 @@
     }
   }
 
-  /// 桌宠浮窗：透明置顶小窗，随任务状态做动作，可自定义形象或 AI 生成。
+  /// 桌宠浮窗：透明置顶小窗，随任务状态做动作，可自定义形象。
   async function openPetWindow() {
     if (!canLeaveSettings()) return;
     try {

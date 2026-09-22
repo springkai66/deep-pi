@@ -280,20 +280,18 @@ export const EN_SETTINGS: Record<string, string> = {
   "通知与桌宠": "Notifications & pet",
   "任务完成通知": "Task completion notifications",
   "启动时显示桌宠": "Show the desktop pet on startup",
+  "桌宠置顶显示": "Keep the pet on top",
+  "桌宠浮窗显示在最上方，不被其他窗口遮挡；关闭后可被覆盖。":
+    "The pet window stays above other windows. Turn it off to let windows cover the pet.",
   "任务完成或失败时发送系统通知；应用切到后台（最小化/失焦）也会提示。":
     "Send a system notification when a task completes or fails. It also pops up while the app is in the background (minimized or unfocused).",
   "桌宠常驻桌面，随任务状态做动作；随时可在主窗口工具栏打开或关闭。":
     "The pet lives on your desktop and reacts to task states. Open or close it anytime from the main-window toolbar.",
   "桌宠形象": "Pet appearance",
   "选择图片…": "Pick an image…",
-  "AI 生成…": "Generate with AI…",
-  "生成中…": "Generating…",
   "恢复默认": "Restore default",
-  "形象描述": "Appearance description",
-  "例如：圆滚滚的橙色小猫，戴一顶贝雷帽": "e.g. a chubby orange cat wearing a beret",
-  "AI 生成使用「模型设置」里已配置的模型，让模型输出一张 Q 版 SVG 形象；生成结果自动启用。":
-    "AI generation uses the model configured under Model settings and asks it to draw a chibi SVG pet; the result is applied automatically.",
+  "代理客户端开启虚拟网卡（TUN）模式时已在网络层透明接管流量，DeepPi 应选择「直连」，无需再配置代理。":
+    "When your proxy client runs in TUN (virtual adapter) mode it takes over traffic at the network layer; set DeepPi to Direct — no app-level proxy is needed.",
   "选择桌宠形象图片": "Choose a pet image",
   "图片": "Images",
-  "内置机器人": "Built-in robot",
 };

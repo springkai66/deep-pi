@@ -22,7 +22,7 @@ tauri-build = { version = "2", features = [] }
 embed-resource = "3"
 
 [dependencies]
-tauri = { version = "2", features = ["unstable"] }
+tauri = { version = "2", features = ["unstable", "tray-icon"] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -38,7 +38,7 @@ atomic-write-file = "0.3.1"
 ureq = { version = "3", default-features = false, features = ["json", "rustls"] }
 tauri-plugin-dialog = "2"
 keyring = { version = "3.6.3", default-features = false, features = ["windows-native"] }
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Diagnostics_Debug", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Memory", "Win32_UI_Controls", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
 tauri-plugin-process = "2"
 tauri-plugin-notification = "2"
 tempfile = "3.27.0"

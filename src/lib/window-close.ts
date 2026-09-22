@@ -1,8 +1,11 @@
 import { t } from "./i18n.svelte";
 import type { CloseBehavior } from "./settings";
 
+/** 关闭请求来源：窗口控制（X 按钮）或托盘菜单的「退出」。 */
+export type CloseRequestSource = "window" | "tray";
+
 export interface WindowClosePorts {
-  behavior: () => CloseBehavior;
+  behavior: (source: CloseRequestSource) => CloseBehavior;
   blocked: () => boolean;
   blockedReason?: () => string;
   hasActiveTasks: () => boolean;
@@ -19,7 +22,7 @@ export interface WindowClosePorts {
 
 export function createWindowCloseHandler(ports: WindowClosePorts) {
   let pending = false;
-  return async (event: { preventDefault(): void }) => {
+  return async (event: { preventDefault(): void }, source: CloseRequestSource = "window") => {
     // Every OS close request must be intercepted, including repeated clicks.
     event.preventDefault();
     if (pending) return;
@@ -27,7 +30,7 @@ export function createWindowCloseHandler(ports: WindowClosePorts) {
     let releaseExit: (() => void) | undefined;
     try {
       if (ports.blocked()) throw new Error(ports.blockedReason?.() ?? t("任务正在切换模式，请完成后再关闭窗口"));
-      let behavior = ports.behavior();
+      let behavior = ports.behavior(source);
       if (behavior === "ask") {
         const choice = await ports.choose();
         if (!choice || choice === "ask") return;

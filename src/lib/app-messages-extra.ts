@@ -21,26 +21,6 @@ export const APP_MESSAGES_EXTRA: Record<string, import("./app-messages").AppMess
     "zh-TW": "圖片超過 {max} MB，請換一張小一些的",
     en: "The image is larger than {max} MB. Pick a smaller one.",
   },
-  "pet.generate.input_empty": {
-    "zh-CN": "请先输入桌宠形象描述",
-    "zh-TW": "請先輸入桌寵形象描述",
-    en: "Describe the pet appearance first.",
-  },
-  "pet.generate.input_too_long": {
-    "zh-CN": "描述超过 {max} 个字符，请精简后再试",
-    "zh-TW": "描述超過 {max} 個字元，請精簡後再試",
-    en: "The description exceeds {max} characters. Shorten it and try again.",
-  },
-  "pet.generate.no_svg": {
-    "zh-CN": "模型没有返回可用的 SVG 形象，请换个描述或模型再试",
-    "zh-TW": "模型沒有回傳可用的 SVG 形象，請換個描述或模型再試",
-    en: "The model did not return a usable SVG pet. Try a different description or model.",
-  },
-  "pet.generate.response_invalid": {
-    "zh-CN": "生成结果无法解析：{error}",
-    "zh-TW": "生成結果無法解析：{error}",
-    en: "The generated result could not be parsed: {error}",
-  },
   "prompt_enhance.input_empty": {
     "zh-CN": "请先输入要增强的提示词",
     "zh-TW": "請先輸入要增強的提示詞",
