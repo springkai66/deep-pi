@@ -1038,9 +1038,10 @@ import type { ChatDetailLevel } from "./settings";
     // 同一会话重建（休眠→回车启动、重连、重启）时保留已加载的历史消息：
     // 重启恢复的是同一份 pi 会话，随后加载的 RPC 历史快照内容一致并会原样覆盖，
     // 先清空只会让会话流整屏闪烁（用户感知为「窗口全部刷新一遍」）。
-    conversation = conversation.messages.length
+    // 历史仅作为重建时的快照；跟踪它会让下面的赋值及后续消息更新反复触发初始化。
+    conversation = untrack(() => conversation.messages.length
       ? { ...emptyConversation(), messages: conversation.messages }
-      : emptyConversation();
+      : emptyConversation());
     historyOffset = 0;
     error = "";
     extensionError = "";
