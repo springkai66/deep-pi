@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Task } from "./task";
 import {
-  canContinuePetTask,
   canStopPetTask,
   createPetTaskActionClient,
   createPetTaskActionHandler,
+  isPetTaskRequest,
   visiblePetTasks,
 } from "./pet-task-actions";
 
@@ -38,20 +38,26 @@ describe("pet task action gates", () => {
     expect(canStopPetTask(task({ id: "a", archivedAt: 1 }))).toBe(false);
   });
 
-  it("continues waiting live sessions or dormant stopped ones, never running processes", () => {
-    expect(canContinuePetTask(task({ id: "a", status: "waiting" }))).toBe(true);
-    expect(canContinuePetTask(task({ id: "a", status: "cancelled", runId: null }))).toBe(true);
-    expect(canContinuePetTask(task({ id: "a", status: "cancelled" }))).toBe(false);
-    expect(canContinuePetTask(task({ id: "a" }))).toBe(false);
-    expect(canContinuePetTask(task({ id: "a", status: "completed" }))).toBe(false);
-    expect(canContinuePetTask(task({ id: "a", projectId: null }))).toBe(false);
+  it("accepts only end requests", () => {
+    // 桌宠不再暴露「继续」：旧形态的请求一律当作无效载荷丢弃。
+    expect(isPetTaskRequest({ requestId: "r", taskId: "t", runId: null, action: "stop" })).toBe(true);
+    expect(isPetTaskRequest({ requestId: "r", taskId: "t", runId: null, action: "continue" })).toBe(false);
+    expect(isPetTaskRequest({ requestId: "r", taskId: "t", runId: null, action: 1 })).toBe(false);
+    expect(isPetTaskRequest(null)).toBe(false);
   });
 
-  it("shows live tasks plus retained stopped ones and hides archived rows", () => {
+  it("shows live tasks plus retained ended ones and hides archived rows", () => {
     const running = task({ id: "run" });
     const stopped = task({ id: "stop", status: "cancelled", runId: null });
-    const retained = visiblePetTasks([running, stopped, task({ id: "old", status: "failed", runId: null })], new Set(["stop"]));
-    expect(retained.map((task) => task.id)).toEqual(["run", "stop"]);
+    const completed = task({ id: "done", status: "completed", runId: null });
+    // 三种结束方式都要能留在环上把结果讲完：被停止、失败、自然完成。
+    const retained = visiblePetTasks(
+      [running, stopped, task({ id: "failed", status: "failed", runId: null }), completed],
+      new Set(["stop", "failed", "done"]),
+    );
+    expect(retained.map((task) => task.id)).toEqual(["run", "stop", "failed", "done"]);
+    // 没登记保留项的结束任务不显示（避免每次悬停都翻出历史任务）。
+    expect(visiblePetTasks([completed], new Set()).map((task) => task.id)).toEqual([]);
     expect(visiblePetTasks([task({ id: "archived", archivedAt: 1 })], new Set(["archived"]))).toEqual([]);
   });
 });
@@ -59,7 +65,7 @@ describe("pet task action gates", () => {
 describe("pet task action handler (main webview)", () => {
   function ports(overrides: Partial<Parameters<typeof createPetTaskActionHandler>[0]> = {}) {
     const busy = new Set<string>();
-    const calls = { stop: [] as Task[], restart: [] as Task[], open: [] as Task[], prepare: 0 };
+    const calls = { stop: [] as Task[] };
     return {
       calls,
       busy,
@@ -68,9 +74,6 @@ describe("pet task action handler (main webview)", () => {
         isBusy: (id: string) => busy.has(id),
         busyChanged: (id: string, isBusy: boolean) => { if (isBusy) busy.add(id); else busy.delete(id); },
         stop: async (value: Task) => { calls.stop.push(value); },
-        restart: async (value: Task) => { calls.restart.push(value); return { ...value, runId: "run-2", status: "running" } as Task; },
-        prepareContinue: async () => { calls.prepare += 1; },
-        open: (value: Task) => { calls.open.push(value); },
         updated: () => {},
         ...overrides,
       } as Parameters<typeof createPetTaskActionHandler>[0],
@@ -88,27 +91,15 @@ describe("pet task action handler (main webview)", () => {
     expect(calls.stop).toHaveLength(1);
   });
 
-  it("continues a waiting live session without creating a duplicate process", async () => {
+  it("refuses DSH tasks, which can only be stopped from the main window", async () => {
     const { ports: hooks, calls } = ports({
-      loadTask: async (id) => task({ id, status: "waiting" }),
+      loadTask: async (id) => task({ id, agent: "dsh" }),
     });
     const handler = createPetTaskActionHandler(hooks);
-    const result = await handler({ requestId: "r1", taskId: "t1", runId: "run-1", action: "continue" });
-    expect(result.ok).toBe(true);
-    expect(calls.restart).toHaveLength(0);
-    expect(calls.open).toHaveLength(1);
-    expect(calls.open[0].runId).toBe("run-1");
-  });
-
-  it("restarts a dormant stopped session when continuing", async () => {
-    const { ports: hooks, calls } = ports({
-      loadTask: async (id) => task({ id, status: "cancelled", runId: null }),
-    });
-    const handler = createPetTaskActionHandler(hooks);
-    const result = await handler({ requestId: "r1", taskId: "t1", runId: null, action: "continue" });
-    expect(result.ok).toBe(true);
-    expect(calls.restart).toHaveLength(1);
-    expect(calls.open).toHaveLength(1);
+    const result = await handler({ requestId: "r1", taskId: "t1", runId: "run-1", action: "stop" });
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("主窗口");
+    expect(calls.stop).toHaveLength(0);
   });
 
   it("serializes per task with the shared lock and rejects reentry", async () => {
@@ -121,18 +112,17 @@ describe("pet task action handler (main webview)", () => {
     expect(busy.size).toBe(0);
   });
 
-  it("surfaces prepareContinue failures without opening the task", async () => {
-    const { ports: hooks, calls } = ports({
-      prepareContinue: async () => { throw new Error("设置操作中"); },
+  it("surfaces native stop failures without marking the task updated", async () => {
+    const updated: Task[] = [];
+    const { ports: hooks } = ports({
+      stop: async () => { throw new Error("终端未就绪"); },
+      updated: (value: Task) => { updated.push(value); },
     });
     const handler = createPetTaskActionHandler(hooks);
-    const result = await handler({
-      requestId: "r1", taskId: "t1", runId: null,
-      action: "continue",
-    });
+    const result = await handler({ requestId: "r1", taskId: "t1", runId: "run-1", action: "stop" });
     expect(result.ok).toBe(false);
-    expect(calls.restart).toHaveLength(0);
-    expect(calls.open).toHaveLength(0);
+    expect(result.error).toContain("终端未就绪");
+    expect(updated).toHaveLength(0);
   });
 });
 
@@ -161,7 +151,7 @@ describe("pet task action client", () => {
 
   it("times out unacknowledged actions", async () => {
     const client = createPetTaskActionClient(async () => {});
-    const pending = client.request("continue", task({ id: "t1" }));
+    const pending = client.request("stop", task({ id: "t1" }));
     const assertion = expect(pending).rejects.toThrow("未确认");
     await vi.advanceTimersByTimeAsync(30_000);
     await assertion;

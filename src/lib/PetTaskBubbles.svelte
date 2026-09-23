@@ -1,149 +1,261 @@
 <script lang="ts">
-  import { Play, Square } from "@lucide/svelte";
+  // 桌宠任务环：气泡围着本体排成一圈，按「花瓣依次绽放」的节奏显隐。
+  // 每张气泡只保留标题与结束按钮；状态只用左侧圆点表达，不占宽度。
+  // 本组件只做渲染与动画，生命周期与动作都在 pet-task-bubbles.ts。
+  import { Square, RotateCw } from "@lucide/svelte";
   import { t, tm } from "$lib/i18n.svelte";
-  import { statusLabels, type Task } from "$lib/task";
-  import { canContinuePetTask, canStopPetTask, type PetTaskAction } from "$lib/pet-task-actions";
+  import type { Task } from "$lib/task";
+  import { canStopPetTask } from "$lib/pet-task-actions";
   import type { PetTaskBubblesState } from "$lib/pet-task-bubbles";
+  import {
+    RING_BUBBLE_WIDTH,
+    RING_CENTER,
+    RING_ENTER_MS,
+    RING_ENTER_STAGGER_MS,
+    RING_EXIT_MS,
+    RING_EXIT_STAGGER_MS,
+    RING_TASK_LIMIT,
+    ringRadius,
+    ringSlotCount,
+    ringLayout,
+    type Monitor,
+  } from "$lib/pet-task-ring";
 
-  let { state, onAction, onRetry }: {
-    state: PetTaskBubblesState;
-    onAction: (action: PetTaskAction, task: Task) => void;
+  // 注意：prop 不能叫 state —— 那会遮蔽 Svelte 的 $state rune。
+  let { ring, monitors = [], onAction, onRetry, onKeepOpen, onLeave, onSettled }: {
+    ring: PetTaskBubblesState;
+    /** 本体中心所在屏幕的物理区域；用于把半径收进屏幕内。 */
+    monitors?: Monitor[];
+    onAction: (task: Task) => void;
     onRetry: () => void;
+    onKeepOpen: () => void;
+    onLeave: () => void;
+    /** 退场动画播完：可以真正隐藏窗口了。 */
+    onSettled: () => void;
   } = $props();
 
-  const timeLabel = $derived.by(() => {
-    void state.tasks;
-    return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  let leaving = $state(false);
+  let settleTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 每次打开都从「未就绪」重新开始，保证依次显示的动画真的重播。 */
+  let enterToken = $state(0);
+  let showToken = $state(-1);
+
+  const center = { x: RING_CENTER, y: RING_CENTER };
+  const radius = $derived(ringRadius(center, monitors));
+  const layout = $derived(ringLayout(ring.tasks, center, monitors));
+  const slots = $derived(ringSlotCount(layout));
+
+  $effect(() => {
+    if (!ring.open) return;
+    // 先以「隐藏」渲染一帧，再切到「显示」：否则元素一挂载就已经是终态，没有动画可看。
+    const token = ++enterToken;
+    showToken = -1;
+    const frame = requestAnimationFrame(() => {
+      if (token === enterToken) showToken = token;
+    });
+    return () => cancelAnimationFrame(frame);
   });
+
+  $effect(() => {
+    if (settleTimer) { clearTimeout(settleTimer); settleTimer = null; }
+    if (!ring.leaving) { leaving = false; return; }
+    leaving = true;
+    const total = slots * RING_EXIT_STAGGER_MS + RING_EXIT_MS;
+    settleTimer = setTimeout(() => {
+      settleTimer = null;
+      leaving = false;
+      onSettled();
+    }, total);
+    return () => { if (settleTimer) { clearTimeout(settleTimer); settleTimer = null; } };
+  });
+
+  const shown = $derived(showToken === enterToken && !leaving);
+  /** 结束态（已完成/失败/被停止）在环上停留后退出，这段时间不参与点击。 */
+  function ended(task: Task) {
+    return task.status !== "running" && task.status !== "waiting";
+  }
 </script>
 
-<section class="task-bubbles" aria-label={t("桌宠任务")}
-  onpointerdown={(event) => event.stopPropagation()}
+{#snippet dot(task: Task)}
+  <span class="task-dot task-dot-{task.status}" aria-hidden="true"></span>
+{/snippet}
+
+<!-- 整层不接鼠标事件：只有气泡本身可点，本体窗口与桌面照常收到点击。 -->
+<div class="ring" role="presentation"
+  onpointerenter={onKeepOpen} onpointerleave={onLeave}
   oncontextmenu={(event) => { event.preventDefault(); event.stopPropagation(); }}>
-  <header class="bubbles-header">
-    <strong>{t("执行中的任务")}</strong>
-    <span>{timeLabel}</span>
-  </header>
-  {#if state.error}
-    <div class="task-notice" role="alert">
-      <span>{tm(state.error)}</span>
+  {#if ring.open && ring.error}
+    <div class="ring-badge ring-error" class:shown class:leaving role="alert"
+      style="--x: {layout.badge ? layout.badge.x : 0}px; --y: {layout.badge ? layout.badge.y : -radius}px; --in-delay: {(slots - 1) * RING_ENTER_STAGGER_MS}ms; --out-delay: {(slots - 1) * RING_EXIT_STAGGER_MS}ms">
+      <span>{tm(ring.error)}</span>
       <button type="button" onclick={onRetry}>{t("重试")}</button>
     </div>
   {/if}
-  {#if state.loading}
-    <p class="task-notice" role="status">{t("正在读取任务…")}</p>
-  {:else if !state.tasks.length && !state.error}
-    <p class="task-notice" role="status">{t("现在没有执行中的任务")}</p>
+
+  {#each layout.bubbles as bubble, index (bubble.task.id)}
+    {@const busy = ring.pending.includes(bubble.task.id)}
+    {@const failure = ring.actionErrors[bubble.task.id] ?? ""}
+    {@const done = ended(bubble.task)}
+    <article class="task-bubble" class:shown class:leaving class:busy class:done
+      data-task={bubble.task.id}
+      style="--x: {bubble.x}px; --y: {bubble.y}px; width: {RING_BUBBLE_WIDTH}px; --in-delay: {index * RING_ENTER_STAGGER_MS}ms; --out-delay: {index * RING_EXIT_STAGGER_MS}ms"
+      aria-label={bubble.task.title} aria-busy={busy}>
+      {#if failure}
+        <span class="task-failure" role="alert">{tm(failure)}</span>
+        <button type="button" class="retry-button" onclick={() => onAction(bubble.task)}>{t("重试")}</button>
+      {:else}
+        {@render dot(bubble.task)}
+        <strong class="task-title" title={bubble.task.title}>{bubble.task.title || t("未命名任务")}</strong>
+        {#if !busy && !done && canStopPetTask(bubble.task)}
+          <button type="button" class="stop-button"
+            aria-label={t("结束任务：{title}", { title: bubble.task.title })}
+            title={t("停止当前执行，保留会话")}
+            onclick={() => onAction(bubble.task)}>
+            <Square size={11} aria-hidden="true" />
+          </button>
+        {/if}
+      {/if}
+    </article>
+  {/each}
+
+  {#if layout.badge}
+    <div class="ring-badge" class:shown class:leaving
+      style="--x: {layout.badge.x}px; --y: {layout.badge.y}px; --in-delay: {layout.badge.delayMs}ms; --out-delay: {(slots - 1) * RING_EXIT_STAGGER_MS}ms">
+      {t("还有 {count} 个任务", { count: layout.badge.count })}
+    </div>
   {/if}
-  <div class="task-list">
-    {#each state.tasks as task (task.id)}
-      {@const busy = state.pending.includes(task.id)}
-      <article class="task-bubble" aria-label={task.title} aria-busy={busy}>
-        <span class="task-dot task-dot-{task.status}" aria-hidden="true"></span>
-        <div class="task-text">
-          <strong class="task-title" title={task.title}>{task.title || t("未命名任务")}</strong>
-          <span class="task-meta">
-            {task.agent.toUpperCase()} · {t(task.status === "cancelled" ? "已停止" : statusLabels[task.status])}
-            {#if busy} · {t("正在处理…")}{/if}
-            {#if task.agent === "dsh"} · {t("DSH 任务请在主窗口操作")}{/if}
-          </span>
-        </div>
-        <div class="task-actions">
-          <button type="button" class="icon-button" disabled={busy || !canStopPetTask(task)}
-            aria-label={t("停止任务：{title}", { title: task.title })}
-            title={t(task.agent === "dsh" ? "DSH 任务请在主窗口操作" : "停止当前执行，保留会话")}
-            onclick={() => onAction("stop", task)}>
-            <Square size={12} aria-hidden="true" />
-          </button>
-          <button type="button" class="icon-button" disabled={busy || !canContinuePetTask(task)}
-            aria-label={t("继续任务：{title}", { title: task.title })}
-            title={t(task.agent === "dsh" ? "DSH 任务请在主窗口操作" : "恢复并打开原会话，继续输入")}
-            onclick={() => onAction("continue", task)}>
-            <Play size={12} aria-hidden="true" />
-          </button>
-        </div>
-      </article>
-    {/each}
-  </div>
-</section>
+
+  {#if ring.loading && !ring.tasks.length}
+    <div class="ring-badge ring-loading" role="status" style="--y: -{radius}px">
+      <RotateCw size={11} aria-hidden="true" />
+      <span>{t("正在读取任务…")}</span>
+    </div>
+  {/if}
+</div>
 
 <style>
-  .task-bubbles {
-    position: absolute;
-    inset: 8px;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    overflow-y: auto;
-    overscroll-behavior: contain;
-    padding: 10px;
+  :global(html, body) { overflow: hidden; }
+
+  .ring {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    user-select: none;
+    -webkit-user-select: none;
     font-family: var(--text-font);
     font-size: 12px;
   }
-  .bubbles-header {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    padding: 0 3px;
-    color: var(--text);
-  }
-  .bubbles-header span { color: var(--text-muted); font-size: 10px; }
-  .task-list {
-    display: flex;
-    flex-direction: column;
-    gap: 7px;
-    align-items: flex-start;
+
+  /* —— 中心：与本体中心重合，故以 50%/50% 定位再叠圈的偏移 ——
+     位移用独立的 translate 属性、缩放用 scale 属性，两者互不覆盖，
+     这样「淡出只改不透明度、不改位置」才不会被位移写死。
+     时长写死在这里（不能用 {RING_ENTER_MS}：Svelte 会把样式里的花括号
+     当表达式解析），与 pet-task-ring.ts 的一致性由 pet-task-ring.test.ts 守住。 */
+  .task-bubble,
+  .ring-badge {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    pointer-events: auto;
+    translate: calc(-50% + var(--x, 0px)) calc(-50% + var(--y, 0px));
+    opacity: 0;
+    scale: 0.86;
+    transition: opacity 180ms ease-out, scale 180ms ease-out;
   }
   .task-bubble {
-    width: fit-content;
-    min-width: 200px;
-    max-width: 100%;
-  }
-  .task-bubble, .task-notice {
     display: flex;
     align-items: center;
-    gap: 8px;
-    min-height: 48px;
-    padding: 8px 10px;
+    gap: 7px;
+    width: 168px;
+    height: 32px;
+    padding: 0 7px 0 9px;
     border: 1px solid var(--border-strong);
-    border-radius: 14px;
+    border-radius: 16px;
     background: var(--surface);
     color: var(--text);
-    box-shadow: 0 4px 12px rgb(0 0 0 / 22%);
+    box-shadow: 0 4px 12px rgb(0 0 0 / 26%);
+    box-sizing: border-box;
   }
-  .task-notice { margin: 0; overflow-wrap: anywhere; }
-  .task-notice button {
-    margin-left: auto;
-    flex-shrink: 0;
-    border: 1px solid var(--border-strong);
-    border-radius: 6px;
-    padding: 3px 9px;
-    background: var(--surface);
-    color: var(--text);
-    cursor: pointer;
+  .shown { opacity: 1; scale: 1; transition-delay: var(--in-delay, 0ms); }
+  .leaving {
+    opacity: 0;
+    scale: 0.86;
+    transition-duration: 140ms;
+    transition-delay: var(--out-delay, 0ms);
+    pointer-events: none;
   }
-  .task-dot { flex-shrink: 0; width: 9px; height: 9px; border-radius: 50%; background: var(--accent); }
+
+  .task-dot { flex-shrink: 0; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
   .task-dot-running { background: var(--status-running, var(--accent)); }
   .task-dot-waiting { background: #f6c945; }
   .task-dot-cancelled, .task-dot-failed { background: var(--status-failed); }
-  .task-text { min-width: 0; flex: 0 1 auto; display: flex; flex-direction: column; gap: 2px; }
-  .task-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
-  .task-meta { color: var(--text-muted); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .task-actions { display: flex; gap: 5px; flex-shrink: 0; }
-  .icon-button {
+  .task-dot-completed { background: var(--status-completed, #3fb950); }
+  .task-title {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .stop-button {
     display: inline-flex;
+    flex-shrink: 0;
     align-items: center;
     justify-content: center;
-    width: 28px;
-    height: 28px;
+    width: 20px;
+    height: 20px;
     padding: 0;
     border: 1px solid var(--border-strong);
-    border-radius: 8px;
+    border-radius: 50%;
     background: var(--surface);
-    color: var(--text);
+    color: var(--text-muted);
     cursor: pointer;
   }
-  .icon-button:hover:not(:disabled) { background: var(--surface-hover); }
-  .icon-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-  .icon-button:disabled { opacity: .4; cursor: not-allowed; }
+  .stop-button:hover { background: var(--surface-hover); color: var(--text-strong); }
+  .stop-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .task-bubble.busy { opacity: 0.45; pointer-events: none; }
+  /* 结束态停留：看得见结果，但不给点击。 */
+  .task-bubble.done { opacity: 0.62; }
+  .task-failure { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--status-failed); font-size: 11px; }
+  .retry-button {
+    flex-shrink: 0;
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    padding: 2px 7px;
+    background: var(--surface);
+    color: var(--text);
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .retry-button:hover { background: var(--surface-hover); }
+
+  .ring-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    max-width: 220px;
+    padding: 4px 10px;
+    border: 1px solid var(--border-strong);
+    border-radius: 999px;
+    background: var(--surface);
+    color: var(--text-muted);
+    box-shadow: 0 4px 12px rgb(0 0 0 / 26%);
+    font-size: 11px;
+    white-space: nowrap;
+  }
+  .ring-error { color: var(--text); border-color: var(--status-failed); }
+  .ring-error button {
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    padding: 1px 7px;
+    background: var(--surface);
+    color: var(--text);
+    font-size: 11px;
+    cursor: pointer;
+  }
+  /* 读取中：不参与依次显示的次序，直接可见。 */
+  .ring-loading { pointer-events: none; opacity: 1; scale: 1; }
 </style>

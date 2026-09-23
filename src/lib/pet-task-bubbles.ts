@@ -1,25 +1,71 @@
+/**
+ * 桌宠任务环的控制器：悬停生命周期、任务快照、原生窗口显隐、
+ * 单任务动作与失败提示，全部收在这一处，页面只做渲染。
+ *
+ * 两个窗口共用本控制器，但用法不同：
+ * - 桌宠本体窗口只关心 `enter()` / `close()`——「悬停即打开环」；
+ * - 浮层窗口负责「鼠标是否还在环上」的宽限期与退场动画完成后的真正隐藏。
+ */
+
 import type { Task } from "./task";
-import { canContinuePetTask, canStopPetTask, visiblePetTasks, type PetTaskAction } from "./pet-task-actions";
+import { canStopPetTask, visiblePetTasks, type PetTaskAction } from "./pet-task-actions";
+import { ringOverflowCount } from "./pet-task-ring";
 
 export interface PetTaskBubblesState {
+  /** 环是否显示（退场动画期间仍为 true，见 leaving）。 */
   open: boolean;
+  /** 正在依次消失；视图据此播放退场，播完调用 finishClose()。 */
+  leaving: boolean;
   loading: boolean;
   tasks: Task[];
+  /** 已下发、尚未确认的任务 id。 */
   pending: string[];
+  /** 按任务 id 记录的动作失败原因（其中 id → 时间戳 的部分仅供内部计时）。 */
+  actionErrors: Record<string, string>;
+  /** 环上某任务进入结束态的时刻；用于「结束后停留几秒再消失」。 */
+  endedAt: Record<string, number>;
+  /** 列表读取失败（环级提示，与单任务动作失败区分开）。 */
   error: string;
 }
+
 interface Ports {
   load(): Promise<Task[]>;
+  /** open=true 显示浮层，false 隐藏；force 用于窗口销毁前的兜底隐藏。 */
   resize(open: boolean, force?: boolean): Promise<void>;
   action(action: PetTaskAction, task: Task): Promise<void>;
   changed(state: PetTaskBubblesState): void;
   loaded?(tasks: Task[]): void;
 }
 
-/** Hover lifetime, fresh snapshots and native size transitions in one place. */
-export function createPetTaskBubbles(ports: Ports, leaveMs = 400, refreshMs = 1500) {
-  let state: PetTaskBubblesState = { open: false, loading: false, tasks: [], pending: [], error: "" };
+export interface PetTaskBubblesOptions {
+  /** 鼠标离开后、开始退场前的宽限期：留出走到气泡上的时间。 */
+  leaveMs?: number;
+  /** 任务快照轮询间隔。 */
+  refreshMs?: number;
+  /** 结束后气泡在环上停留的时长，然后按退场规则消失。 */
+  endedHoldMs?: number;
+}
+
+/** 结束状态（含被停止）在环上停留多久。 */
+const ENDED_HOLD_MS = 2500;
+
+/** 悬停生命周期、任务快照与原生显隐都收在这里。 */
+export function createPetTaskBubbles(ports: Ports, options: PetTaskBubblesOptions = {}) {
+  const leaveMs = options.leaveMs ?? 400;
+  const refreshMs = options.refreshMs ?? 1500;
+  const endedHoldMs = options.endedHoldMs ?? ENDED_HOLD_MS;
+  let state: PetTaskBubblesState = {
+    open: false,
+    leaving: false,
+    loading: false,
+    tasks: [],
+    pending: [],
+    actionErrors: {},
+    endedAt: {},
+    error: "",
+  };
   let desiredOpen = false;
+  /** 指针在环上（浮层内）：即使在退场中也要把环拉回来。 */
   let inside = false;
   let disposed = false;
   let generation = 0;
@@ -27,29 +73,65 @@ export function createPetTaskBubbles(ports: Ports, leaveMs = 400, refreshMs = 15
   let resizeQueue: Promise<void> = Promise.resolve();
   let leaveTimer: ReturnType<typeof setTimeout> | undefined;
   let pollTimer: ReturnType<typeof setTimeout> | undefined;
+  let heldFadeTimer: ReturnType<typeof setTimeout> | undefined;
+  /** 最近一次发布给视图的元素数，退场动画时长按它算。 */
+  let slotCount = 0;
   const retained = new Set<string>();
   const pending = new Set<string>();
+  const actionErrors = new Map<string, string>();
 
   function publish(patch: Partial<PetTaskBubblesState>) {
     if (disposed) return;
-    state = { ...state, ...patch, pending: [...pending] };
+    state = {
+      ...state,
+      ...patch,
+      pending: [...pending],
+      actionErrors: Object.fromEntries(actionErrors),
+    };
+    // 退场动画时长按「下一次渲染会有几个元素」算，含溢出角标。
+    slotCount = state.tasks.length + (ringOverflowCount(state.tasks.length) > 0 ? 1 : 0);
     ports.changed(state);
   }
+
+  /** 动作失败会就地展示错误：此时不能偷偷把环收掉，否则用户永远看不到失败原因。 */
+  function hasActionError() {
+    return [...actionErrors.values()].some((message) => message.length > 0);
+  }
+
   function clearTimers() {
     clearTimeout(leaveTimer);
     clearTimeout(pollTimer);
+    clearTimeout(heldFadeTimer);
   }
+
   function resize(open: boolean, force = false) {
     const job = resizeQueue.then(() => ports.resize(open, force));
     resizeQueue = job.catch(() => {});
     return job;
   }
+
   function poll() {
     clearTimeout(pollTimer);
     if (desiredOpen && !disposed) pollTimer = setTimeout(() => { void refresh(); }, refreshMs);
   }
+
+  /**
+   * 结束的任务在环上停留 endedHoldMs 后，再按退场规则逐条淡出。
+   * 计时只在首次观测到结束态时启动，刷新不会把它推后。
+   */
+  function scheduleHeldFade(tasks: Task[]) {
+    clearTimeout(heldFadeTimer);
+    const now = Date.now();
+    const ended = tasks.filter((task) => isEndedTask(task));
+    if (!ended.length) return;
+    // 用「观测到结束的时刻」而不是后端的 completedAt：后者可能是几分钟前，
+    // 打开环时不该让一个早就结束的任务立刻消失。
+    const firstSeen = Math.min(...ended.map((task) => state.endedAt[task.id] ?? now));
+    heldFadeTimer = setTimeout(() => { void close(ended.length); }, Math.max(0, endedHoldMs - (now - firstSeen)));
+  }
+
   async function refresh() {
-    if (!desiredOpen || !state.open || disposed) return;
+    if (!desiredOpen || !state.open || disposed || state.leaving) return;
     const cycle = generation;
     const read = ++readVersion;
     clearTimeout(pollTimer);
@@ -57,7 +139,19 @@ export function createPetTaskBubbles(ports: Ports, leaveMs = 400, refreshMs = 15
       const tasks = await ports.load();
       if (disposed || cycle !== generation || read !== readVersion) return;
       ports.loaded?.(tasks);
-      publish({ tasks: visiblePetTasks(tasks, retained), loading: false });
+      // 刚结束的任务要留在环上把结果讲完：先把它们登记进保留集，
+      // 再据此过滤，否则从 running 变 completed 的那一帧气泡会直接消失。
+      const now = Date.now();
+      for (const task of tasks) {
+        if (task.archivedAt == null && isEndedTask(task)) retained.add(task.id);
+      }
+      const visible = visiblePetTasks(tasks, retained);
+      const nextEndedAt: Record<string, number> = {};
+      for (const task of visible) {
+        if (isEndedTask(task)) nextEndedAt[task.id] = state.endedAt[task.id] ?? now;
+      }
+      publish({ tasks: visible, loading: false, endedAt: nextEndedAt });
+      scheduleHeldFade(visible);
     } catch {
       if (disposed || cycle !== generation || read !== readVersion) return;
       publish({ loading: false, error: "无法读取任务，请重试" });
@@ -65,33 +159,66 @@ export function createPetTaskBubbles(ports: Ports, leaveMs = 400, refreshMs = 15
       if (cycle === generation && read === readVersion) poll();
     }
   }
-  async function close(force = false) {
+
+  /** 真正把浮层窗口藏起来；退场动画播完由视图调用。 */
+  async function finishClose() {
+    if (!state.open) return;
+    // 退场途中指针又回到环上：撤销退场，保持显示（重新开启会打断动画）。
+    if (inside && desiredOpen) {
+      publish({ leaving: false });
+      return;
+    }
+    clearTimeout(leaveTimer);
+    clearTimeout(heldFadeTimer);
+    publish({ open: false, leaving: false, loading: false });
+    try {
+      await resize(false);
+    } catch {
+      publish({ error: "桌宠窗口调整失败，请重试" });
+    }
+  }
+
+  /**
+   * 开始退场：先播动画（leaving），由视图在 ringExitMs 之后调用 finishClose()。
+   * 环上没有元素时无可播内容，直接收窗口。
+   */
+  async function close(slots?: number) {
     if (!desiredOpen && !state.open) return;
+    const count = slots ?? slotCount;
     desiredOpen = false;
     generation++;
     readVersion++;
     clearTimers();
-    publish({ open: false, loading: false });
-    try { await resize(false, force); } catch {
-      publish({ error: "桌宠窗口调整失败，请重试" });
+    if (count > 0 && state.open) {
+      publish({ leaving: true, loading: false });
+      return;
     }
+    await finishClose();
   }
+
   function leave() {
     inside = false;
     clearTimeout(leaveTimer);
-    if (pending.size === 0) leaveTimer = setTimeout(() => { void close(); }, leaveMs);
+    if (pending.size === 0 && !hasActionError()) {
+      leaveTimer = setTimeout(() => { void close(); }, leaveMs);
+    }
   }
+
   function keepOpen() {
     inside = true;
+    // 退场途中指针回到环上：这不只是「保持」，而是撤销关闭。
+    if (state.leaving) desiredOpen = true;
     clearTimeout(leaveTimer);
   }
+
   async function enter() {
     if (disposed) return;
-    keepOpen();
-    if (desiredOpen) return;
+    // 已经在显示（或正在退场被拉回）：只需续上宽限期，不重播打开流程。
+    if (desiredOpen) { keepOpen(); return; }
     desiredOpen = true;
+    inside = true;
     const cycle = ++generation;
-    publish({ loading: true, error: "", tasks: [] });
+    publish({ leaving: false, loading: true, error: "", endedAt: {} });
     try {
       await resize(true);
       if (disposed || cycle !== generation) return;
@@ -100,33 +227,39 @@ export function createPetTaskBubbles(ports: Ports, leaveMs = 400, refreshMs = 15
     } catch {
       if (disposed || cycle !== generation) return;
       desiredOpen = false;
-      publish({ open: false, loading: false, error: "桌宠窗口调整失败，请重试" });
+      publish({ open: false, leaving: false, loading: false, error: "桌宠窗口调整失败，请重试" });
       // Even partial native resize failures must be undone before the next open.
       await resize(false).catch(() => {});
     }
   }
+
   async function act(action: PetTaskAction, task: Task) {
     if (disposed || pending.has(task.id)) return;
-    if (!(action === "stop" ? canStopPetTask(task) : canContinuePetTask(task))) return;
+    if (!canStopPetTask(task)) return;
     pending.add(task.id);
-    retained.add(task.id); // Keep a stopped task's bubble available for Continue.
+    retained.add(task.id); // Keep a stopped task's bubble available for its end notice.
     ++readVersion; // A pre-action snapshot must not overwrite the action result.
     clearTimeout(leaveTimer);
+    actionErrors.delete(task.id);
     publish({ error: "" });
     try {
       await ports.action(action, task);
     } catch (cause) {
-      publish({ error: cause instanceof Error ? cause.message : String(cause) });
+      actionErrors.set(task.id, cause instanceof Error ? cause.message : String(cause));
+      publish({});
     } finally {
       // Refresh before unlocking, including after an unconfirmed/timeout result.
       await refresh();
       pending.delete(task.id);
       publish({});
-      if (!inside) leave();
+      // 指针已经离开：补一次退场。动作进行中 leave() 只登记了意图，
+      // 没有真的开始退场——这里不补，环就会一直挂在屏幕上。
+      if (!inside && !hasActionError()) void close();
     }
   }
+
   return {
-    enter, keepOpen, leave, close, refresh, act,
+    enter, keepOpen, leave, close, finishClose, refresh, act,
     async retry() {
       publish({ error: "", loading: true });
       if (state.open) await refresh(); else await enter();
@@ -141,4 +274,9 @@ export function createPetTaskBubbles(ports: Ports, leaveMs = 400, refreshMs = 15
       if (needsClose) void resize(false, true).catch(() => {});
     },
   };
+}
+
+/** 结束态：任务已不在运行/等待，气泡只剩「最后看一眼」的价值。 */
+export function isEndedTask(task: Pick<Task, "status">): boolean {
+  return task.status !== "running" && task.status !== "waiting";
 }

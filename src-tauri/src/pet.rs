@@ -229,7 +229,7 @@ fn build_pet_window(app: &AppHandle) -> Result<(), String> {
     let owner = app.clone();
     pet.on_window_event(move |event| {
         if matches!(event, tauri::WindowEvent::Destroyed) {
-            let _ = update_task_hover(false, true);
+            let _ = update_task_hover(false);
             if let Some(popup) = owner.get_webview_window(PET_TASKS_LABEL) {
                 let _ = popup.destroy();
             }
@@ -351,10 +351,10 @@ fn default_pet_position(width: u32, height: u32, monitors: &[(i32, i32, u32, u32
 /// 坐标（物理）减去锚点×缩放即窗口左上角目标位置。
 const ANCHOR_X: f64 = 105.0;
 const ANCHOR_Y: f64 = 155.0;
-/// 独立任务气泡窗口：不再通过改变桌宠窗口大小展开，避免透明 WebView 闪烁。
+/// 独立任务环浮层：不再通过改变桌宠窗口大小展开，避免透明 WebView 闪烁。
+/// 窗口是正方形，边长固定；中心与本体中心重合，气泡沿圆周排布。
 pub const PET_TASKS_LABEL: &str = "pet-tasks";
-const TASKS_WIDTH: f64 = 420.0;
-const TASKS_HEIGHT: f64 = 280.0;
+const TASKS_SIZE: f64 = 420.0;
 static TASKS_BUILD_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Serialize)]
@@ -362,19 +362,16 @@ static TASKS_BUILD_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 pub struct PetTaskHover {
     revision: u64,
     hovered: bool,
-    force_close: bool,
 }
 static TASK_HOVER: Mutex<PetTaskHover> = Mutex::new(PetTaskHover {
     revision: 0,
     hovered: false,
-    force_close: false,
 });
 
-fn update_task_hover(hovered: bool, force_close: bool) -> Result<PetTaskHover, String> {
+fn update_task_hover(hovered: bool) -> Result<PetTaskHover, String> {
     let mut state = TASK_HOVER.lock().map_err(|error| error.to_string())?;
     state.revision += 1;
     state.hovered = hovered;
-    state.force_close = force_close;
     Ok(state.clone())
 }
 
@@ -400,16 +397,13 @@ pub(crate) fn anchored_pet_position(app: &AppHandle, cursor_x: i32, cursor_y: i3
     )
 }
 
-/// 转发本体悬停状态；仅创建隐藏的气泡窗口，不移动/缩放桌宠本身。
-/// 气泡页面先注册监听，再读带版本的快照，避免首次载入遗漏移出事件。
+/// 转发本体悬停状态；仅创建隐藏的浮层窗口，不移动/缩放桌宠本身。
+/// 浮层页面先注册监听，再读带版本的快照，避免首次载入遗漏移出事件。
 #[tauri::command]
-pub async fn set_pet_ring(
-    app: AppHandle,
-    open: bool,
-    force_close: Option<bool>,
-) -> Result<(), String> {
-    let state = update_task_hover(open, force_close.unwrap_or(false))?;
-    let _ = app.emit_to(PET_TASKS_LABEL, "pet-task-hover", state);
+pub async fn set_pet_ring(app: AppHandle, open: bool) -> Result<(), String> {
+    let state = update_task_hover(open)?;
+    let _ = app.emit_to(PET_TASKS_LABEL, "pet-task-hover", state.clone());
+    let _ = app.emit_to(PET_LABEL, "pet-task-hover", state);
     if !open || app.get_webview_window(PET_TASKS_LABEL).is_some() {
         return Ok(());
     }
@@ -433,7 +427,7 @@ pub async fn set_pet_ring(
                 .minimizable(false)
                 .focused(false)
                 .visible(false)
-                .inner_size(TASKS_WIDTH, TASKS_HEIGHT)
+                .inner_size(TASKS_SIZE, TASKS_SIZE)
                 .build()
                 .map_err(|error| error.to_string())?;
         if app.get_webview_window(PET_LABEL).is_none() {
@@ -448,35 +442,16 @@ pub async fn set_pet_ring(
     result
 }
 
-fn task_popup_position(
-    pet: (i32, i32, u32, u32),
-    size: (u32, u32),
-    gap: i32,
-    monitors: &[(i32, i32, u32, u32)],
-) -> (i32, i32) {
+/// 浮层窗口左上角（物理像素）：窗口中心对齐桌宠窗口中心。
+///
+/// 本体在其窗口内贴底居中，而窗口整体只有 210×240，所以「窗口中心」与
+/// 「本体中心」相差不到一个本体的高度——环照样把本体围在正中。这里刻意
+/// **不钳位**：钳位会让窗口中心偏离本体中心，圈就歪了，与「环绕桌宠」
+/// 的前提直接冲突。允许窗口探出屏幕，让贴边一侧的气泡自然被裁掉即可。
+fn ring_window_position(pet: (i32, i32, u32, u32), size: (u32, u32)) -> (i32, i32) {
     let (x, y, width, height) = pet;
-    let top = monitors
-        .iter()
-        .find(|(mx, my, mw, mh)| {
-            let cx = x + width as i32 / 2;
-            let cy = y + height as i32 / 2;
-            cx >= *mx && cx < mx + *mw as i32 && cy >= *my && cy < my + *mh as i32
-        })
-        .map(|(_, my, _, _)| *my)
-        .unwrap_or(0);
-    let above = y - size.1 as i32 - gap;
-    let preferred_y = if above >= top {
-        above
-    } else {
-        y + height as i32 + gap
-    };
-    clamp_pet_position(
-        x + (width as i32 - size.0 as i32) / 2,
-        preferred_y,
-        size.0,
-        size.1,
-        monitors,
-    )
+    let center = (x + width as i32 / 2, y + height as i32 / 2);
+    (center.0 - size.0 as i32 / 2, center.1 - size.1 as i32 / 2)
 }
 
 /// 只由任务浮层执行显示/隐藏。切换时桌宠本体的尺寸、位置、图片节点不变。
@@ -503,20 +478,15 @@ pub async fn set_pet_tasks_visible(
         let pos = pet.outer_position().map_err(|error| error.to_string())?;
         let size = pet.inner_size().map_err(|error| error.to_string())?;
         let target = (
-            (TASKS_WIDTH * scale).round() as u32,
-            (TASKS_HEIGHT * scale).round() as u32,
+            (TASKS_SIZE * scale).round() as u32,
+            (TASKS_SIZE * scale).round() as u32,
         );
-        let (x, y) = task_popup_position(
-            (pos.x, pos.y, size.width, size.height),
-            target,
-            (8.0 * scale).round() as i32,
-            &collect_monitors(&app),
-        );
+        let (x, y) = ring_window_position((pos.x, pos.y, size.width, size.height), target);
         popup
             .set_position(PhysicalPosition::new(x, y))
             .map_err(|error| error.to_string())?;
         popup
-            .set_size(LogicalSize::new(TASKS_WIDTH, TASKS_HEIGHT))
+            .set_size(LogicalSize::new(TASKS_SIZE, TASKS_SIZE))
             .map_err(|error| error.to_string())?;
         popup.show().map_err(|error| error.to_string())
     })
@@ -724,20 +694,35 @@ mod tests {
     }
 
     #[test]
-    fn task_popup_uses_space_above_or_below_without_moving_pet() {
-        let monitors = [(0, 0, 1920, 1080)];
+    fn ring_window_centers_on_the_pet_without_clamping() {
+        // 屏幕中央：浮层中心与桌宠窗口中心重合。
         assert_eq!(
-            task_popup_position((500, 600, 210, 240), (420, 280), 8, &monitors),
-            (395, 312)
+            ring_window_position((500, 600, 210, 240), (420, 420)),
+            (500 + 105 - 210, 600 + 120 - 210)
         );
+        // 默认停靠点（主屏右下角）：刻意不钳进屏幕——钳位会让圈偏离本体中心，
+        // 与「环绕桌宠」冲突；贴边一侧的气泡让窗口探出屏幕即可。
         assert_eq!(
-            task_popup_position((500, 10, 210, 240), (420, 280), 8, &monitors),
-            (395, 258)
+            ring_window_position((1686, 752, 210, 240), (420, 420)),
+            (1686 + 105 - 210, 752 + 120 - 210)
         );
-        let monitors = [(-1920, -200, 1920, 1080)];
+        // 负坐标的多显示器：同样只做居中换算。
         assert_eq!(
-            task_popup_position((-1900, 300, 315, 360), (630, 420), 12, &monitors),
-            (-1920, -132)
+            ring_window_position((-1900, -180, 315, 360), (630, 630)),
+            (-1900 + 157 - 315, -180 + 180 - 315)
+        );
+    }
+
+    #[test]
+    fn ring_window_center_matches_its_expected_size() {
+        assert_eq!(TASKS_SIZE, 420.0);
+        // 浮层窗口尺寸必须与前端 pet-task-ring.ts 的 RING_WINDOW 一致：
+        // 前端按窗口中心排版，后端按窗口中心定位。
+        let frontend = std::fs::read_to_string("../src/lib/pet-task-ring.ts")
+            .expect("read pet-task-ring.ts");
+        assert!(
+            frontend.contains("export const RING_WINDOW = 420"),
+            "RING_WINDOW must mirror TASKS_SIZE: {frontend}"
         );
     }
 

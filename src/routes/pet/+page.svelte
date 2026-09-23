@@ -1,9 +1,12 @@
 <script lang="ts">
   // 桌宠浮窗：透明、置顶、不进任务栏的小窗口。
   // 交互：抓着桌宠/顶部拖动条拖动位置（防抖持久化），悬停窗口任意处显示
-  // 关闭按钮；悬停本体显示可停止/继续的任务气泡；任务完成时庆祝、
-  // 失败时沮丧（pet-state）。
-  // 形象来自 get_pet_appearance：默认内置图片或本地自定义图片。
+  // 关闭按钮；悬停本体让任务环依次绽放，任务完成时庆祝、失败时沮丧
+  // （pet-state）。形象来自 get_pet_appearance：默认内置图片或本地自定义图片。
+  //
+  // 任务环画在独立的浮层窗口里（见 pet-tasks 路由）：本体窗口的尺寸、位置
+  // 与图片节点在悬停期间完全不变，避免透明 WebView 改尺寸闪烁；本体只负责
+  // 上报「指针进/出本体」，环的宽限与退场动画由浮层自己收尾。
   import { invoke } from "@tauri-apps/api/core";
   import { PhysicalPosition } from "@tauri-apps/api/dpi";
   import { listen } from "@tauri-apps/api/event";
@@ -21,9 +24,9 @@
   import { t, tm } from "$lib/i18n.svelte";
   import type { AppSettings } from "$lib/settings";
   import type { Task } from "$lib/task";
-  import { createPetTaskBubbles } from "$lib/pet-task-bubbles";
 
   type PetAppearance = { kind: "image"; mime: string; dataBase64: string; isDefault: boolean };
+  type PetTaskHover = { revision: number; hovered: boolean };
 
   let tasks: Task[] = $state([]);
   let appearance = $state<PetAppearance | null>(null);
@@ -37,13 +40,13 @@
   let moodTimer: ReturnType<typeof setTimeout> | null = null;
   let moveSaveTimer: ReturnType<typeof setTimeout> | null = null;
   let reloadTimer: ReturnType<typeof setTimeout> | null = null;
-  // 悬停转发给独立的任务浮层窗口；本体窗口尺寸、位置与图片节点保持不变（避免闪烁）。
-  const petTasks = createPetTaskBubbles({
-    load: async () => [],
-    resize: (open) => invoke<void>("set_pet_ring", { open }),
-    action: async () => {},
-    changed: () => {},
-  });
+
+  /** 本体只上报「指针进了还是出了」，环的显隐、宽限与退场都由浮层窗口负责。 */
+  function reportHover(hovered: boolean) {
+    void invoke<void>("set_pet_ring", { open: hovered }).catch(() => {
+      /* 浮层不可用时忽略：悬停只是看任务，不该打断桌宠本身 */
+    });
+  }
 
   // —— 气泡队列：多条提示（多任务完成/悬停问候等）依次播放，不互相覆盖 ——
   const bubbleQueue: { text: string; duration: number }[] = [];
@@ -113,11 +116,18 @@
     }, PET_TRANSIENT_MS);
   }
 
+  /** 拖动/爬行都意味着指针不在本体上了：先把环收掉。 */
+  function ringClose() {
+    hover = false;
+    reportHover(false);
+  }
+
   function startDrag(event: PointerEvent) {
     if (event.button !== 0) return;
     event.preventDefault();
-    void petTasks.close(true).then(() => getCurrentWindow().startDragging())
-      .catch(() => { /* 窗口已销毁时忽略 */ });
+    // 拖动意味着指针已经离开「悬停看任务」的语义：先把环收掉再拖窗口。
+    ringClose();
+    void getCurrentWindow().startDragging().catch(() => { /* 窗口已销毁时忽略 */ });
   }
 
   function schedulePositionSave(position: { x: number; y: number }) {
@@ -146,7 +156,8 @@
   let lastKnownPosition: { x: number; y: number } | null = null;
 
   function onDesktopPointer(event: DesktopPointerEvent) {
-    void petTasks.close(true);
+    // 爬行/闪现都从壁纸开始，指针此刻不在本体上：环该收起来了。
+    ringClose();
     if (event.kind === "teleport") {
       stopCrawlLoop();
       crawl = null;
@@ -226,6 +237,11 @@
       listen("pet-appearance", () => void refreshAppearance()),
       listen<DesktopPointerEvent>("desktop-pointer", ({ payload }) => onDesktopPointer(payload)),
     ];
+    // 指针进入/离开本体：本地控制关闭按钮的显隐；浮层据此判断宽限期起点。
+    const hovered = listen<PetTaskHover>("pet-task-hover", ({ payload }) => {
+      if (payload.hovered) hover = true;
+    });
+    unlisteners.push(hovered);
     // 记录窗口位置（爬行起点用）；拖动/爬行停住后防抖保存位置。
     unlisteners.push(getCurrentWindow().onMoved(({ payload }) => {
       lastKnownPosition = { x: payload.x, y: payload.y };
@@ -241,8 +257,11 @@
       void refreshWindowAppearance();
       scheduleReload(80);
     }));
+    // 窗口重建而指针已经压在本体上时，用快照补一次悬停上报（浮层由此打开）。
+    void invoke<PetTaskHover>("get_pet_task_hover")
+      .then((state) => { if (state.hovered) { hover = true; reportHover(true); } })
+      .catch(() => { /* 快照读不到就等下一次 pointerenter */ });
     return () => {
-      petTasks.dispose();
       for (const unlisten of unlisteners) void unlisten.then((dispose) => dispose()).catch(() => {});
       if (moodTimer) clearTimeout(moodTimer);
       if (bubbleQueueTimer) clearTimeout(bubbleQueueTimer);
@@ -276,9 +295,10 @@
     {#if bubble}
       <div class="pet-bubble" role="status">{tm(bubble)}</div>
     {/if}
-    <!-- 悬停转发给独立任务浮层；本体窗口尺寸、位置与图片节点保持不变（避免闪烁）。 -->
+    <!-- 悬停上报给独立任务浮层；本体窗口尺寸、位置与图片节点保持不变（避免闪烁）。 -->
     <div class="pet-figure pet-{mood}" class:pet-walk={Boolean(crawl)} role="img" aria-label={t("桌宠，悬停查看任务")}
-      onpointerenter={() => void petTasks.enter()}
+      onpointerenter={() => { hover = true; reportHover(true); }}
+      onpointerleave={ringClose}
       onpointerdown={startDrag}>
       {#if appearance}
         <img class="pet-image" src={imageSrc} alt={t("桌宠")} draggable="false" />

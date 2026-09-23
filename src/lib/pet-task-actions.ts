@@ -2,12 +2,21 @@ import type { Task } from "./task";
 
 export const PET_TASK_ACTION_EVENT = "pet-task-action";
 export const PET_TASK_RESULT_EVENT = "pet-task-result";
-export type PetTaskAction = "stop" | "continue";
+/** 桌宠只提供「结束」：继续任务请回到主窗口。 */
+export type PetTaskAction = "stop";
+/** 主窗口执行的完整动作集：继续不在桌宠上暴露，但主窗口仍然需要它。 */
+export type TaskAction = PetTaskAction | "continue";
 export interface PetTaskRequest {
   requestId: string;
   taskId: string;
   runId: string | null;
   action: PetTaskAction;
+}
+export interface TaskActionRequest {
+  requestId: string;
+  taskId: string;
+  runId: string | null;
+  action: TaskAction;
 }
 export interface PetTaskResult {
   requestId: string;
@@ -21,15 +30,23 @@ export function canStopPetTask(task: Task): boolean {
     && (task.status === "running" || task.status === "waiting");
 }
 
-export function canContinuePetTask(task: Task): boolean {
+/** 继续的适用面：等输入的活动会话，或已停止但可重启的休眠任务。 */
+export function canContinueTask(task: Task): boolean {
   return task.agent === "pi" && task.archivedAt == null && !!task.projectId
-    && (task.status === "waiting" || ((task.status === "cancelled" || task.status === "failed") && !task.runId));
+    && (task.status === "waiting"
+      || ((task.status === "cancelled" || task.status === "failed") && !task.runId));
 }
 
+/**
+ * 环上显示哪些任务：运行中/等待输入，加上「刚结束且需要给出结束提示」的
+ * 保留项（被停止、失败或自然完成）。调用方负责在任务进入结束态的瞬间把
+ * id 加进 retained，之后由控制器停留几秒再淡出。
+ */
 export function visiblePetTasks(tasks: Task[], retained: ReadonlySet<string>): Task[] {
   return tasks.filter((task) => task.archivedAt == null && (
     task.status === "running" || task.status === "waiting"
-    || (retained.has(task.id) && (task.status === "cancelled" || task.status === "failed"))
+    || (retained.has(task.id)
+      && (task.status === "cancelled" || task.status === "failed" || task.status === "completed"))
   ));
 }
 
@@ -45,18 +62,19 @@ interface ActionPorts {
   updated(task: Task): void;
 }
 
+/** 只接桌宠能发出的载荷：凡是带 continue 的旧形态请求一律视为无效。 */
 export function isPetTaskRequest(value: unknown): value is PetTaskRequest {
   if (!value || typeof value !== "object") return false;
   const request = value as Partial<PetTaskRequest>;
   return typeof request.requestId === "string" && request.requestId.length > 0
     && typeof request.taskId === "string" && request.taskId.length > 0
     && (request.runId === null || typeof request.runId === "string")
-    && (request.action === "stop" || request.action === "continue");
+    && request.action === "stop";
 }
 
 /** Execute only in the main webview; existing native run-id guards remain intact. */
 export function createPetTaskActionHandler(ports: ActionPorts) {
-  return async (request: PetTaskRequest): Promise<PetTaskResult> => {
+  return async (request: TaskActionRequest): Promise<PetTaskResult> => {
     const result = { requestId: request.requestId, taskId: request.taskId };
     if (ports.isBusy(request.taskId)) return { ...result, ok: false, error: "任务正在处理，请稍后重试" };
     ports.busyChanged(request.taskId, true);
@@ -76,11 +94,11 @@ export function createPetTaskActionHandler(ports: ActionPorts) {
         const stopped = await ports.loadTask(task.id);
         if (stopped) ports.updated(stopped);
       } else {
-        if (!canContinuePetTask(task)) throw new Error("任务状态已改变，请刷新后重试");
+        if (!canContinueTask(task)) throw new Error("任务状态已改变，请刷新后重试");
         await ports.prepareContinue();
         // Navigation may await window operations; recheck before starting a run.
         task = await current();
-        if (!canContinuePetTask(task)) throw new Error("任务状态已改变，请刷新后重试");
+        if (!canContinueTask(task)) throw new Error("任务状态已改变，请刷新后重试");
         // A waiting live session already exists: never create a duplicate process.
         const resumed = task.runId ? task : await ports.restart(task);
         ports.updated(resumed);
