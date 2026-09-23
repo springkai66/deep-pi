@@ -1418,6 +1418,14 @@ mod tests {
         assert_eq!(contents, ["root", "leaf"]);
     }
 
+    /// 连续两次写入可能落在同一 mtime 刻度内，「按修改时间取最新」会退化为
+    /// 目录序的平局裁决（CI 上偶发）。显式把 mtime 拨开，让规则被确定性验证。
+    fn backdate_mtime(path: &Path, offset_secs: u64) {
+        let file = File::options().append(true).open(path).unwrap();
+        file.set_modified(SystemTime::now() - std::time::Duration::from_secs(offset_secs))
+            .unwrap();
+    }
+
     #[test]
     fn find_session_file_locates_by_id_suffix_and_prefers_the_latest() {
         let root = tempfile::tempdir().unwrap();
@@ -1425,18 +1433,21 @@ mod tests {
         fs::create_dir_all(&directory).unwrap();
         let old = directory.join("2026-09-20T10-00-00-000Z_abc12345.jsonl");
         fs::write(&old, "{}").unwrap();
+        backdate_mtime(&old, 120);
         assert_eq!(
             find_session_file(root.path(), "abc12345").unwrap(),
             Some(old.clone())
         );
         let newer = directory.join("2026-09-20T11-00-00-000Z_abc12345.jsonl");
         fs::write(&newer, "{}").unwrap();
+        backdate_mtime(&newer, 60);
         assert_eq!(
             find_session_file(root.path(), "abc12345").unwrap(),
             Some(newer)
         );
-        // 重写旧文件后它的修改时间最新，验证“同 id 多文件取最新”的规则。
+        // 重写旧文件并把它的修改时间拨到最新，验证“同 id 多文件取最新”的规则。
         fs::write(&old, "{\"x\":1}").unwrap();
+        backdate_mtime(&old, 0);
         assert_eq!(
             find_session_file(root.path(), "abc12345").unwrap(),
             Some(old)
