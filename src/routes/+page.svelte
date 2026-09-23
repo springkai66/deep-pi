@@ -2,6 +2,9 @@
   import { createDialogQueue } from "$lib/dialog";
   import { createWindowCloseHandler } from "$lib/window-close";
   import { loadAppStartup } from "$lib/startup";
+  import { runBoundedStep } from "$lib/bounded-step";
+  // Pi 启动请求的时间上限；见 restartTask 中关于 taskControlBusy 永久持有的说明。
+  const PI_START_TIMEOUT_MS = 60_000;
   let gitIndexBusy = $state(false);
   import { createOperationRunner, type OperationState } from "$lib/operation";
   import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
@@ -940,17 +943,17 @@
       }
       terminalTaskIds.push(task.id);
     }
-    applyPaneSelection(
-      openPane({
-        current: paneTaskIds,
-        active: activeTaskId,
-        requested: task.id,
-        available: terminalTaskIds.filter(
-          (id) => tasks.find((candidate) => candidate.id === id)?.projectId === task.projectId,
-        ),
-        capacity: paneCapacity,
-      }),
+    const available = terminalTaskIds.filter(
+      (id) => tasks.find((candidate) => candidate.id === id)?.projectId === task.projectId,
     );
+    const selection = openPane({
+      current: paneTaskIds,
+      active: activeTaskId,
+      requested: task.id,
+      available,
+      capacity: paneCapacity,
+    });
+    applyPaneSelection(selection);
   }
 
   function changeLayout(next: LayoutMode) {
@@ -1316,9 +1319,19 @@
     }
     taskControlBusy.add(task.id);
     try {
-      applyTaskRestart(task, await requestTaskRestart(task, mode));
-    } catch (error) {
-      showError(error);
+      // 启动请求必须收口：一旦它永不返回，taskControlBusy 会永久持有这个 id，
+      // 之后该任务的打开/停止/重启/关闭全都在开头的 busy 检查里静默返回，
+      // 表现就是「点任务没反应」。给请求加时间上限，超时后释放锁、可以重试。
+      const outcome = await runBoundedStep(
+        "pi_start",
+        () => requestTaskRestart(task, mode),
+        PI_START_TIMEOUT_MS,
+      );
+      if (!outcome.ok) {
+        showError(outcome.error);
+        return;
+      }
+      applyTaskRestart(task, outcome.value);
     } finally {
       taskControlBusy.delete(task.id);
     }
