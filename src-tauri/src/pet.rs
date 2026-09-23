@@ -718,8 +718,8 @@ mod tests {
         assert_eq!(TASKS_SIZE, 420.0);
         // 浮层窗口尺寸必须与前端 pet-task-ring.ts 的 RING_WINDOW 一致：
         // 前端按窗口中心排版，后端按窗口中心定位。
-        let frontend = std::fs::read_to_string("../src/lib/pet-task-ring.ts")
-            .expect("read pet-task-ring.ts");
+        let frontend =
+            std::fs::read_to_string("../src/lib/pet-task-ring.ts").expect("read pet-task-ring.ts");
         assert!(
             frontend.contains("export const RING_WINDOW = 420"),
             "RING_WINDOW must mirror TASKS_SIZE: {frontend}"
