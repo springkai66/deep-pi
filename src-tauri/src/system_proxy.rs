@@ -83,9 +83,7 @@ fn bypasses(host: &str, port: u16, bypass: &str) -> bool {
             }
             let (pattern, required_port) = if entry.starts_with('[') {
                 match entry.split_once(']') {
-                    Some((address, rest)) if rest.is_empty() => {
-                        (address.trim_start_matches('['), None)
-                    }
+                    Some((address, "")) => (address.trim_start_matches('['), None),
                     Some((address, rest)) if rest.starts_with(':') => {
                         match rest[1..].parse::<u16>() {
                             Ok(port) => (address.trim_start_matches('['), Some(port)),
@@ -568,5 +566,83 @@ mod tests {
     fn non_windows_stub_does_not_read_environment_proxy() {
         assert_eq!(resolve("https://example.com"), Route::Direct);
         assert!(!has_dynamic_proxy_config());
+    }
+
+    /// 真机 PAC 求值：起一个只服务 PAC 脚本的本机服务，让 WinHTTP **真正下载并    /// 执行**它。这是「跟随系统」里此前唯一没有测试覆盖的一环——静态代理与
+    /// bypass 有纯函数测试，但 PAC 的下载 + JS 求值只有跑起来才算数（见 #25）。
+    #[cfg(windows)]
+    #[test]
+    fn pac_script_is_fetched_and_evaluated_per_target() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        // 只对 proxied.test 返回代理，其余一律 DIRECT —— 正好验证「按目标」。
+        let script = "function FindProxyForURL(url, host) {\n\
+                      \x20 if (host === 'proxied.test') { return 'PROXY 127.0.0.1:9'; }\n\
+                      \x20 return 'DIRECT';\n\
+                      }";
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            // WinHTTP 可能为同一 PAC 取多次；服务若干次后自行结束。
+            for stream in listener.incoming().take(6) {
+                let Ok(mut stream) = stream else { break };
+                let mut request = [0u8; 1024];
+                let _ = stream.read(&mut request);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\n\
+                     Content-Type: application/x-ns-proxy-autoconfig\r\n\
+                     Content-Length: {}\r\n\
+                     Connection: close\r\n\r\n{script}",
+                    script.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        // 唯一查询串：避免 WinHTTP 复用上一次运行的 PAC 缓存。
+        let pac_url = format!("http://127.0.0.1:{port}/proxy.pac?v={}", std::process::id());
+
+        assert_eq!(
+            super::windows::evaluate_pac(
+                "http://proxied.test/x",
+                Some(&pac_url),
+                "http",
+                "proxied.test",
+                80
+            ),
+            Route::HttpProxy("http://127.0.0.1:9".into()),
+            "PAC 明确返回代理时必须照用"
+        );
+        assert_eq!(
+            super::windows::evaluate_pac(
+                "http://direct.test/x",
+                Some(&pac_url),
+                "http",
+                "direct.test",
+                80
+            ),
+            Route::Direct,
+            "PAC 返回 DIRECT 时不得臆造代理"
+        );
+    }
+
+    /// PAC 不可用时必须 **fail-closed**：不能因为求值失败就当作直连，
+    /// 那会在用户以为走代理时把流量泄漏出去。
+    #[cfg(windows)]
+    #[test]
+    fn unreachable_pac_fails_closed_instead_of_going_direct() {
+        // 端口 9（discard）上没有 PAC 服务。
+        let outcome = super::windows::evaluate_pac(
+            "http://example.test/x",
+            Some("http://127.0.0.1:9/proxy.pac"),
+            "http",
+            "example.test",
+            80,
+        );
+        assert!(
+            matches!(outcome, Route::Unsupported(_)),
+            "unreachable PAC must be Unsupported, got {outcome:?}"
+        );
     }
 }

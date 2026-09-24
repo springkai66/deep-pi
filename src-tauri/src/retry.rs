@@ -76,7 +76,10 @@ fn backoff_delay(attempt: u32, delays_ms: &[u64]) -> Duration {
 
 /// 通用重试驱动：op 收到 1 起始的尝试序号；is_retryable 决定 Err 是否
 /// 继续；retry_after 给出服务端要求的等待（超预算则放弃并返回错误）；
-/// sleep 可注入。可重试错误逐次记日志（不含请求体与鉴权信息）。
+/// sleep 可注入；describe 给出一条日志用的失败描述（调用方负责脱敏与限长）。
+/// 可重试错误逐次记日志（不含请求体与鉴权信息）。
+// 参数都是注入点（重试策略 + 时钟 + 描述），拆成结构体反而更难读。
+#[allow(clippy::too_many_arguments)]
 pub fn run<T, E>(
     attempts: u32,
     delays_ms: &[u64],
@@ -84,6 +87,7 @@ pub fn run<T, E>(
     mut op: impl FnMut(u32) -> Result<T, E>,
     is_retryable: &dyn Fn(&E) -> bool,
     retry_after: &dyn Fn(&E) -> Option<Duration>,
+    describe: &dyn Fn(&E) -> String,
     sleep: &dyn Fn(Duration),
 ) -> Result<T, E> {
     let mut attempt: u32 = 1;
@@ -98,8 +102,9 @@ pub fn run<T, E>(
                     None => backoff_delay(attempt, delays_ms),
                 };
                 log::warn!(
-                    "event=network_retry attempt={attempt} delay_ms={}",
-                    delay.as_millis()
+                    "event=network_retry attempt={attempt} delay_ms={} {}",
+                    delay.as_millis(),
+                    describe(&error)
                 );
                 sleep(delay);
                 attempt += 1;
@@ -107,6 +112,92 @@ pub fn run<T, E>(
             Err(error) => return Err(error),
         }
     }
+}
+
+/// 失败类别：事后区分「DNS 失败 / TCP 连接失败 / CONNECT 被代理拒绝 / TLS
+/// 失败 / 超时 / 上游 5xx」靠的就是这一列（见 #30）。分类依据是 ureq 的
+/// Display 文案与已到达的状态码 —— 覆盖其 error.rs 中列出的几种措辞。
+fn failure_category(failure: &AttemptFailure) -> &'static str {
+    if let Some(status) = failure.status {
+        return if status == 429 {
+            "http_429"
+        } else if (500..600).contains(&status) {
+            "upstream_5xx"
+        } else {
+            "http_status"
+        };
+    }
+    let message = failure.message.to_ascii_lowercase();
+    if message.contains("proxy") && message.contains("connect") {
+        // `CONNECT proxy failed`：隧道被上游代理拒绝或不可达。
+        "proxy_connect"
+    } else if message.contains("dns") || message.contains("lookup") || message.contains("resolve") {
+        "dns"
+    } else if message.contains("tls")
+        || message.contains("certificate")
+        || message.contains("handshake")
+    {
+        "tls"
+    } else if message.contains("timed out") || message.contains("timeout") {
+        "timeout"
+    } else if message.contains("connection") || message.contains("connect") {
+        "tcp_connect"
+    } else {
+        "other"
+    }
+}
+
+/// 日志用的失败描述：类别 + 脱敏后的路由来源 + 脱敏限长的错误文本。
+fn describe_failure(failure: &AttemptFailure) -> String {
+    format!(
+        "category={} {} error={}",
+        failure_category(failure),
+        crate::proxy::route_summary(),
+        log_text(&failure.message)
+    )
+}
+
+/// 日志文本上限：足够定位，又不至于把日志刷爆。
+const MAX_LOG_CHARS: usize = 300;
+
+/// 去掉 URL 里的 userinfo：`scheme://user:pass@host` → `scheme://[redacted]@host`。
+/// `pi_auth::redact` 只覆盖 ≥32 位的长串，**短口令不会被它处理**，而日志里
+/// 最可能出现的凭据形态就是 URL 的 userinfo，因此这里单独兜一层。
+fn strip_userinfo(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(index) = rest.find("://") {
+        let (head, tail) = rest.split_at(index + 3);
+        output.push_str(head);
+        // authority 截止到第一个 '/'、'?'、'#' 或空白。
+        let end = tail
+            .find(|character: char| ['/', '?', '#', ' ', '\t'].contains(&character))
+            .unwrap_or(tail.len());
+        let authority = &tail[..end];
+        match authority.rsplit_once('@') {
+            Some((_, host)) => {
+                output.push_str("[redacted]@");
+                output.push_str(host);
+            }
+            None => output.push_str(authority),
+        }
+        rest = &tail[end..];
+    }
+    output.push_str(rest);
+    output
+}
+
+/// 脱敏（先剥离 URL userinfo，再复用 pi_auth 的令牌规则：≥32 位
+/// `[A-Za-z0-9_-]` 连续串整体替换）并截断。凭据因此不会进入日志，
+/// 符合 SECURITY.md 的约束。
+fn log_text(text: &str) -> String {
+    let redacted = strip_userinfo(&crate::pi_auth::redact(text));
+    if redacted.chars().count() <= MAX_LOG_CHARS {
+        return redacted;
+    }
+    let mut truncated: String = redacted.chars().take(MAX_LOG_CHARS).collect();
+    truncated.push('…');
+    truncated
 }
 
 /// 网络请求重试入口：标准 3 次尝试 + 退避表 + Retry-After 上限。
@@ -120,6 +211,7 @@ pub fn retry_network<T>(
         op,
         &|failure| failure.retryable,
         &|failure| failure.retry_after,
+        &describe_failure,
         &|delay| std::thread::sleep(delay),
     )
 }
@@ -165,6 +257,7 @@ mod tests {
             },
             &|error| matches!(error, TestError::Transient(_)),
             &|_| None,
+            &|_| String::new(),
             &|delay| sleeps.borrow_mut().push(delay),
         );
         assert_eq!(result.unwrap(), "ok");
@@ -190,6 +283,7 @@ mod tests {
             },
             &|error| matches!(error, TestError::Transient(_)),
             &|_| None,
+            &|_| String::new(),
             &|delay| sleeps.borrow_mut().push(delay),
         );
         assert_eq!(result.unwrap(), "ok");
@@ -213,6 +307,7 @@ mod tests {
             },
             &|error| matches!(error, TestError::Transient(_)),
             &|_| None,
+            &|_| String::new(),
             &|_| panic!("must not sleep"),
         );
         assert!(matches!(result, Err(TestError::Fatal("bad request"))));
@@ -233,6 +328,7 @@ mod tests {
             },
             &|error| matches!(error, TestError::Transient(_)),
             &|_| None,
+            &|_| String::new(),
             &|delay| sleeps.borrow_mut().push(delay),
         );
         assert!(matches!(result, Err(TestError::Transient("still down"))));
@@ -258,6 +354,7 @@ mod tests {
             },
             &|error| matches!(error, TestError::Transient(_)),
             &|_| Some(Duration::from_secs(3)),
+            &|_| String::new(),
             &|delay| sleeps.borrow_mut().push(delay),
         );
         assert!(result.is_ok());
@@ -277,10 +374,66 @@ mod tests {
             },
             &|error| matches!(error, TestError::Transient(_)),
             &|_| Some(Duration::from_secs(60)),
+            &|_| String::new(),
             &|_| panic!("must not sleep beyond budget"),
         );
         assert!(result.is_err());
         assert_eq!(calls, 1);
+    }
+
+    /// #30：日志描述必须含**失败类别**与**代理模式**，且不含凭据。
+    /// 这三种故障此前在日志里完全无法区分。
+    #[test]
+    fn failure_description_carries_category_and_route_without_secrets() {
+        let failure = |message: &str, status: Option<u16>| AttemptFailure {
+            message: message.into(),
+            retryable: true,
+            status,
+            retry_after: None,
+        };
+        // 隧道被上游代理拒绝 —— 与 DNS/TCP 失败必须分开。
+        let described =
+            describe_failure(&failure("CONNECT proxy failed: connection refused", None));
+        assert!(described.contains("category=proxy_connect"), "{described}");
+        // 每一次日志都带当前生效的模式与（脱敏的）来源。
+        assert!(described.contains("mode="), "{described}");
+        assert!(described.contains("route="), "{described}");
+        // 其余类别各自成类。
+        assert!(
+            describe_failure(&failure("bad gateway", Some(503))).contains("category=upstream_5xx")
+        );
+        assert!(describe_failure(&failure("too many requests", Some(429)))
+            .contains("category=http_429"));
+        assert!(describe_failure(&failure("dns lookup failed", None)).contains("category=dns"));
+        assert!(
+            describe_failure(&failure("connection timed out", None)).contains("category=timeout")
+        );
+        assert!(describe_failure(&failure("tls handshake failed", None)).contains("category=tls"));
+        assert!(
+            describe_failure(&failure("connection refused", None)).contains("category=tcp_connect")
+        );
+
+        // 凭据与查询串绝不出现：短口令靠 userinfo 剥离，长令牌靠 redact。
+        let token = "a".repeat(40);
+        let described = describe_failure(&failure(
+            &format!("failed for http://user:secret@proxy.local:8080/path?token={token}"),
+            None,
+        ));
+        assert!(!described.contains("secret"), "{described}");
+        assert!(!described.contains(&token), "{described}");
+        // 查询串的**值**必须消失；参数名保留（它不是凭据，且有助于定位）。
+        assert!(
+            !described.contains(&format!("token={token}")),
+            "{described}"
+        );
+        assert!(
+            described.contains("[redacted]@proxy.local:8080"),
+            "{described}"
+        );
+
+        // 超长文本被截断，避免刷爆日志。
+        let capped = log_text(&"err ".repeat(200));
+        assert_eq!(capped.chars().count(), MAX_LOG_CHARS + 1);
     }
 
     #[test]

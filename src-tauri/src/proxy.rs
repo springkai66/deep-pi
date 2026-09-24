@@ -11,10 +11,15 @@
 //!   HTTP_PROXY 或 `ProxyEnable=0` 的残留 ProxyServer 劫持；系统未启用显式
 //!   代理时走 OS 网络栈，透明 TUN 仍可接管流量。
 //! - 手动：显式地址 + `NODE_USE_ENV_PROXY=1` + NO_PROXY。
+//!
 //! 旧版 direct 设置在读取时迁移到跟随系统，不再作为单独的选项。
 //!
 //! 例外地址始终合并本地默认（localhost/127.0.0.1/::1/[::1]），否则开启代理后
 //! 本地目标（DSH 本地 API、Ollama 等本地 Provider）会被错误送进代理。
+//!
+//! `ALL_PROXY` 的语义是**一律不读**：它不受本模块的两种模式管理，留着它会让
+//! 部分客户端（curl/git 约定）绕过我们注入的地址、也让「切模式」重新变得不可控。
+//! 因此手动与系统模式都会显式清除大小写两份，中继模式下子进程也一并清除。
 //!
 //! 中继（`crate::proxy_relay`）：子进程的代理环境在 spawn 那一刻冻结，DSH 侧的
 //! 代理策略在进程启动时也只解析一次，所以「切换模式」本身无法触达已运行的子
@@ -503,16 +508,30 @@ fn build_ureq_proxy(url: &str, no_proxy: &str) -> Option<ureq::Proxy> {
     builder.build().ok()
 }
 
+/// 代理构造的**唯一**入口（#29）：真实请求（`ureq_proxy()`）与「测试连接」
+/// （`proxy_test`）都必须经过这里，否则按钮会拿一条与 DSH 不同的路径去报「通」。
+/// 例外地址一律合并本地默认——回环调用不能被送进代理。
+fn proxy_for_mode(
+    mode: &str,
+    manual_url: &str,
+    no_proxy: &str,
+) -> Result<Option<ureq::Proxy>, String> {
+    let no_proxy = combined_no_proxy(no_proxy);
+    match normalize_mode(mode) {
+        "manual" => {
+            let url = validate_url(manual_url)?;
+            Ok(build_ureq_proxy(&url, &no_proxy))
+        }
+        // 跟随系统：以当前启用的 Windows 系统设置为准，不读继承的环境代理。
+        _ => Ok(detect_system_proxy().and_then(|url| build_ureq_proxy(&url, &no_proxy))),
+    }
+}
+
 /// ureq 代理与中继读取同一来源：手动地址，或已启用的 Windows 系统代理。
 /// 不读取进程继承的代理环境变量（其中可能是已关闭的旧端口）。
 pub fn ureq_proxy() -> Option<ureq::Proxy> {
     let state = snapshot();
-    let url = if state.mode == "manual" {
-        Some(state.url)
-    } else {
-        detect_system_proxy()
-    };
-    url.and_then(|url| build_ureq_proxy(&url, &combined_no_proxy(&state.no_proxy)))
+    proxy_for_mode(&state.mode, &state.url, &state.no_proxy).unwrap_or(None)
 }
 
 /// 当前全局代理地址；不代表 PAC/按域名分流的最终出站路由。
@@ -522,6 +541,44 @@ pub fn current_url() -> Option<String> {
         Some(state.url).filter(|url| !url.is_empty())
     } else {
         detect_system_proxy()
+    }
+}
+
+/// 当前生效的例外地址（用户设置 + 本地默认）。供**不经中继**的短命子进程
+/// （npm 安装）使用：它们只拿到一个代理地址，若不一起给出例外列表，本地与
+/// 内网 registry 会被错误送进代理（见 #29）。
+pub fn current_no_proxy() -> String {
+    let state = snapshot();
+    combined_no_proxy(&state.no_proxy)
+}
+
+/// 代理地址脱敏：只留 `host:port`。`Url::host_str()` 不含 userinfo，查询串与
+/// 路径也被丢弃，因此凭据不可能出现在日志里（见 SECURITY.md）。
+fn redacted_proxy_address(url: &str) -> Option<String> {
+    let parsed = Url::parse(url.trim()).ok()?;
+    let host = parsed.host_str()?;
+    Some(match parsed.port_or_known_default() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_owned(),
+    })
+}
+
+/// 事件日志用的路由摘要：当前模式 + 脱敏后的代理来源。
+///
+/// 存在的意义是让事后日志能区分「代理没在监听」「代理拒绝」「目标不可达」
+/// 这三种完全不同的故障（见 #30）；`route=os` 表示系统未启用显式代理，由
+/// 操作系统网络栈出网（含透明 TUN）。
+pub(crate) fn route_summary() -> String {
+    let state = snapshot();
+    if state.mode == "manual" {
+        return match redacted_proxy_address(&state.url) {
+            Some(address) => format!("mode=manual route=proxy:{address}"),
+            None => "mode=manual route=direct(no address)".to_owned(),
+        };
+    }
+    match detect_system_proxy().and_then(|url| redacted_proxy_address(&url)) {
+        Some(address) => format!("mode=system route=proxy:{address}"),
+        None => "mode=system route=os".to_owned(),
     }
 }
 
@@ -641,20 +698,12 @@ fn probe(proxy: Option<ureq::Proxy>) -> Result<String, String> {
     Err(format!("目标返回 HTTP {status} · {elapsed} ms"))
 }
 
-/// 按给定配置测试代理连通性（不依赖全局状态，避免与防抖保存竞态）。
+/// 按给定配置测试代理连通性。**与真实请求共用 `proxy_for_mode`**（#29）：
+/// 同一份配置必须构造出同一个代理，否则「测试连接」会与实际行为不符。
 #[tauri::command]
 pub async fn proxy_test(mode: String, url: String) -> Result<String, String> {
-    let proxy = match normalize_mode(&mode) {
-        "manual" => {
-            let url = validate_url(&url)?;
-            Some(
-                ureq::Proxy::new(&url)
-                    .map_err(|error| format!("proxy address is invalid: {error}"))?,
-            )
-        }
-        // 测试和真实请求共用系统设置；不能报告旧环境代理「连通」却让 DSH 失败。
-        _ => detect_system_proxy().and_then(|url| build_ureq_proxy(&url, "")),
-    };
+    let no_proxy = snapshot().no_proxy;
+    let proxy = proxy_for_mode(&mode, &url, &no_proxy)?;
     tauri::async_runtime::spawn_blocking(move || probe(proxy))
         .await
         .map_err(|error| error.to_string())?
@@ -994,6 +1043,65 @@ mod tests {
         assert_eq!(parse_windows_proxy_server("socks=127.0.0.1:1080"), None);
         assert_eq!(parse_windows_proxy_server(""), None);
         assert_eq!(parse_windows_proxy_server("host:not-a-port"), None);
+    }
+
+    /// #28 回归：in-process 客户端（dsh_api / market / 本地 Provider）的回环
+    /// 例外不能再丢。旧实现走 `ureq::Proxy::try_from_env()`，只带环境里的
+    /// NO_PROXY，于是「system 模式 + 环境代理 + 无 NO_PROXY」会把 127.0.0.1
+    /// 的本地调用送进代理。现在 `ureq_proxy()` 一律经 `build_ureq_proxy` 构造，
+    /// 本地默认始终被合并——这条断言就是防止有人再把 try_from_env 放回来。
+    #[test]
+    fn in_process_proxy_always_keeps_local_loopback_exception() {
+        for user in ["", "corp.internal", "mine.local, corp.internal"] {
+            let proxy =
+                build_ureq_proxy("http://127.0.0.1:7890", &combined_no_proxy(user)).unwrap();
+            for local in [
+                "http://127.0.0.1:11434/",
+                "http://localhost:53255/",
+                "http://[::1]:1420/",
+            ] {
+                assert!(
+                    proxy.is_no_proxy(&local.parse().unwrap()),
+                    "user={user} local={local} must bypass the proxy"
+                );
+            }
+            assert!(
+                !proxy.is_no_proxy(&"https://api.github.com/".parse().unwrap()),
+                "user={user}: remote targets must still use the proxy"
+            );
+        }
+    }
+
+    /// #29：真实请求与「测试连接」必须走**同一个**构造入口，并且例外地址
+    /// 逐项一致。此前按钮用 `ureq::Proxy::new`（完全不带 NO_PROXY），而真实
+    /// 请求带合并后的例外列表——同一个配置可能一个报「通」、一个全断。
+    #[test]
+    fn probe_and_real_requests_build_the_same_proxy() {
+        let build = |mode: &str, url: &str, no_proxy: &str| {
+            proxy_for_mode(mode, url, no_proxy)
+                .expect("valid configuration")
+                .expect("proxy should be constructed")
+        };
+        let probe = build("manual", "http://127.0.0.1:7890", "corp.internal");
+        let real = build("manual", "http://127.0.0.1:7890", "corp.internal");
+        for url in [
+            "http://127.0.0.1:11434/",
+            "http://localhost:53255/",
+            "http://corp.internal/pkg",
+            "https://api.github.com/",
+        ] {
+            let parsed = url.parse().unwrap();
+            assert_eq!(
+                probe.is_no_proxy(&parsed),
+                real.is_no_proxy(&parsed),
+                "bypass decision must match for {url}"
+            );
+        }
+        // 非法手动地址：两边都必须**报错**，不能一边静默不用代理。
+        assert!(proxy_for_mode("manual", "not-a-url", "").is_err());
+        assert!(proxy_for_mode("manual", "", "").is_err());
+        // 旧版 direct 值已被迁移为跟随系统，不再有第三种分支。
+        assert!(proxy_for_mode("direct", "", "").is_ok());
     }
 
     #[test]

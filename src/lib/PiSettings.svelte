@@ -515,8 +515,8 @@
               {#if proxyTestResult}<span class="proxy-state" role="status">{proxyTestResult}</span>{/if}
             </div>
           </div>
-          <p class="muted">{t("代理作用于 Pi / DSH 子进程（含模型请求与 Advisor）、运行时下载、扩展市场与 DeepPi 自身的模型调用；Provider 单独配置的代理优先。跟随系统以 Windows 系统代理设置为准，不把残留的 HTTP_PROXY 当作系统设置；手动设置可覆盖系统代理。已打开的会话需重启任务后生效，应用内更新检查需重启应用。")}</p>
-          <p class="muted">{t("为让已打开的会话在切换代理后立即生效，子进程统一指向本机回环中继；中继只支持 http:// 上游代理，填 https:// 代理地址时该特性不生效，已打开的会话仍需重启任务。")}</p>
+          <p class="muted">{t("代理作用于 Pi / DSH 子进程（含模型请求与 Advisor）、运行时下载、扩展市场与 DeepPi 自身的模型调用；Provider 单独配置的代理优先。跟随系统以 Windows 系统代理设置为准，不把残留的 HTTP_PROXY 当作系统设置；手动设置可覆盖系统代理。已打开的 Pi/DSH 会话无需重启（见下），应用内更新检查需重启应用。")}</p>
+          <p class="muted">{t("子进程始终指向本机回环中继，因此切换模式或改变系统代理后，新请求立即走新路径，无需重启已打开的会话；中继按请求目标解析系统设置（含 PAC 与按协议分流）。唯一例外是手动填写 https:// 上游代理：中继只承载 http:// 上游，此时已打开的会话仍需重启任务。")}</p>
         </section>
       </div>
       <div class="settings-panel" hidden={category !== "advanced"}>

@@ -530,10 +530,7 @@ fn read_head_raw<R: BufRead>(reader: &mut R) -> std::io::Result<Option<(u16, Vec
         .and_then(|code| code.parse::<u16>().ok());
     let mut lines = vec![first];
     let mut total = 0usize;
-    loop {
-        let Some(line) = read_line_bounded(reader, MAX_HEADER_BYTES)? else {
-            break;
-        };
+    while let Some(line) = read_line_bounded(reader, MAX_HEADER_BYTES)? {
         let trimmed = line.trim_end_matches(['\r', '\n']).to_string();
         if trimmed.is_empty() {
             break;

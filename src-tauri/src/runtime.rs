@@ -249,6 +249,11 @@ fn runtime_update_cache_path(paths: &AppPaths) -> PathBuf {
 /// 事件日志单条失败文本的上限：足够定位，又不至于把日志刷爆。
 const MAX_LOG_ERROR_CHARS: usize = 300;
 
+/// registry 元数据读取上限（兜底）。请求已带 `Accept: …install-v1+json`
+/// 只要缩写元数据，实测最大 246 KB；这里留足余量，避免包长大后再次
+/// 出现「每个组件都读不出最新版本 → 只能吃离线缓存」。
+const MAX_REGISTRY_BODY_BYTES: u64 = 8 * 1024 * 1024;
+
 /// 日志用的失败文本：先按 pi_auth 的令牌规则脱敏（≥32 位的 `[A-Za-z0-9_-]`
 /// 连续串整体替换，避免把凭据写进日志），再截断长度。
 fn redacted_log_text(text: &str) -> String {
@@ -378,6 +383,10 @@ fn fetch_latest_from_registry(
     crate::retry::retry_network(|_attempt| {
         let mut response = agent
             .get(&format!("{registry}/{encoded}"))
+            // npm 的**缩写元数据**（corgi 格式）：只含版本清单与 dist-tags，
+            // 正是这里唯一需要的东西。完整元数据里塞满了每个版本的完整
+            // package.json，dshmarket 已达 568 KB，会撑爆下面的读取上限（#30）。
+            .header("Accept", "application/vnd.npm.install-v1+json")
             .call()
             .map_err(|error| crate::retry::AttemptFailure {
                 message: format!("update check failed: {error}"),
@@ -389,7 +398,9 @@ fn fetch_latest_from_registry(
         body = response
             .body_mut()
             .with_config()
-            .limit(512 * 1024)
+            // 上限是兜底，不是主要防线：缩写元数据实测 pi 92 KB / dsh 144 KB /
+            // dshmarket 246 KB，留出足够余量应对日后的包增长。
+            .limit(MAX_REGISTRY_BODY_BYTES)
             .lossy_utf8(true)
             .read_to_string()
             .map_err(|error| crate::retry::AttemptFailure {
@@ -642,7 +653,15 @@ fn npm_install_with_registry(
         // 地址在 spawn 时就解析好了，走中继只会多一跳而不会让「运行中切换代理」
         // 变得更好（本来就每次重新解析）。中继存在的意义是让长命的 DSH/Pi 会话
         // 保持恒定地址，那条路径由 apply_to_command 负责。
-        command.env("HTTP_PROXY", &proxy).env("HTTPS_PROXY", &proxy);
+        //
+        // 例外地址必须一起给：只给代理不给 NO_PROXY，本地与内网 registry
+        // （127.0.0.1 / localhost / 内网域名）会被错误送进代理（#29）。
+        let no_proxy = crate::proxy::current_no_proxy();
+        command
+            .env("HTTP_PROXY", &proxy)
+            .env("HTTPS_PROXY", &proxy)
+            .env("NO_PROXY", &no_proxy)
+            .env("no_proxy", &no_proxy);
     }
     // 心跳：大依赖树下载可能超过 1 分钟，界面阶段文本不刷新会让用户以为卡死。
     // 每 10s 上报一次已用时长；安装结束或取消后立即停止。
@@ -2035,5 +2054,53 @@ mod tests {
             capped.chars().count()
         );
         assert!(capped.ends_with('…'));
+    }
+
+    /// 回归（#30 实机发现）：registry 元数据必须按**缩写格式**请求，且读取上限
+    /// 不能把大包挡在门外。此前 `dshmarket` 的完整元数据 568 KB 超过 512 KB
+    /// 上限，三个源全部失败 → 读不到最新版本 → 只能吃离线缓存（实机日志
+    /// `component=dshmarket … larger than request limit: 524288`）。
+    #[test]
+    fn registry_metadata_is_requested_abbreviated_and_survives_large_bodies() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        // 假 registry：记录 Accept 头，并返回一个**超过旧上限**的响应体。
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen_accept = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let recorder = seen_accept.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(2) {
+                let Ok(mut stream) = stream else { break };
+                let mut request = vec![0u8; 4096];
+                let read = stream.read(&mut request).unwrap_or(0);
+                let text = String::from_utf8_lossy(&request[..read]).to_ascii_lowercase();
+                if let Some(line) = text.lines().find(|line| line.starts_with("accept:")) {
+                    *recorder.lock().unwrap() = line.to_owned();
+                }
+                let padding = "x".repeat(700 * 1024);
+                let body = format!(r#"{{"padding":"{padding}","dist-tags":{{"latest":"1.2.3"}}}}"#);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+
+        let version = super::fetch_latest_from_registry(
+            &format!("http://127.0.0.1:{port}"),
+            "dshmarket",
+            None,
+        )
+        .expect("a large-but-abbreviated registry response must still parse");
+        assert_eq!(version, "1.2.3");
+        let accept = seen_accept.lock().unwrap().clone();
+        assert!(
+            accept.contains("application/vnd.npm.install-v1+json"),
+            "must request abbreviated metadata, saw: {accept}"
+        );
     }
 }

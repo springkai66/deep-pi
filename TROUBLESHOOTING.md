@@ -64,12 +64,37 @@ DeepPi v1.0 只安装并验证 **DSH 0.1.1-rc.2**。DSH 0.1.5-rc.1 起启动 URL
 
 扩展与 dshmarket 的原地修改会先建立持久化快照。应用意外退出后，下次启动会在创建会话前恢复未提交快照。若提示 `pending package recovery`，请关闭并重新启动 DeepPi；恢复失败时保留日志及 `backups\operation-*`，不要继续修改包目录。旧格式快照只保留用于人工诊断，不自动重放。
 
-没有网络时，设置页可能显示带“离线缓存”的旧检查结果；旧结果最多保留 7 天，不代表当前 registry 状态。需要代理时，可在设置页选择“跟随系统”（自动检测 Windows 系统代理）或“手动设置”；开发环境也可在启动前设置 `HTTPS_PROXY` 或 `HTTP_PROXY`。
+没有网络时，设置页可能显示带“离线缓存”的旧检查结果；旧结果最多保留 7 天，不代表当前 registry 状态。
 
-```powershell
-$env:HTTPS_PROXY = "https://proxy.example.com:8443"
-pnpm tauri dev
+代理只有两种模式，默认是“跟随系统”：
+
+- **跟随系统**（默认）：以 **Windows 当前启用的系统代理设置**（WinHTTP/Internet 设置，含按协议分流、PAC/WPAD 与例外列表）为准，并且**按请求目标**解析。系统未启用显式代理时不强制设置应用层代理，直接走操作系统路由（开启 TUN 的代理软件在这一层透明接管）。进程启动时继承的 `HTTP_PROXY`/`HTTPS_PROXY`、以及注册表里 `ProxyEnable=0` 时残留的 `ProxyServer` **都不是**系统设置来源，会被忽略——这正是“宿主机环境里带着旧代理，应用被钉在已关闭端口上”的根因。
+- **手动设置**：显式指定代理地址，覆盖系统设置。地址不接受凭据与查询串。
+
+需要让 Pi/DSH 换用另一条路径时，改设置即可：子进程拿到的是本机回环中继的恒定地址，模式变化在中继上游即时生效，**无需重启已打开的会话**。例外是 `https://` 上游代理（中继只承载 `http://` 上游），此时已打开的任务仍需重启；日志里会出现 `event=proxy_relay status=unsupported_upstream`。
+
+开发环境想让应用走某个代理，请用设置页的“手动设置”，**不要**依赖启动前设置的 `HTTPS_PROXY`——跟随系统模式下它会被有意忽略。
+
+### 怎么从日志区分「代理没在监听」和「代理拒绝」
+
+重试日志每次都会带上失败类别与当前路由来源（`src-tauri/src/retry.rs`）：
+
 ```
+event=network_retry attempt=1 delay_ms=600 category=<类别> mode=<manual|system> route=<os|proxy:host:port> error=<脱敏文本>
+```
+
+- `route=os` → 系统未启用显式代理，走操作系统路由；此时失败通常是目标本身不可达或 TUN 未工作。
+- `route=proxy:127.0.0.1:7890` + `category=tcp_connect` → **代理没在监听**（端口没人接）。
+- `route=proxy:...` + `category=proxy_connect` → 代理在监听但**拒绝了 CONNECT**（规则拦截、需要认证、上游节点故障）。
+- `category=dns` / `category=tls` / `category=timeout` / `category=upstream_5xx` → 分别是域名解析、TLS 握手、超时、上游网关故障，与代理可达性无关。
+
+运行时更新检查的失败同样逐组件落盘原因：
+
+```
+event=runtime_update_check status=component_failed component=<node|pi|dsh|dshmarket> error=<脱敏文本>
+```
+
+日志中的代理地址只保留 `host:port`，URL 的 userinfo 与查询串的值会被替换为 `[redacted]`，不会写出凭据。
 
 ## DeepPi 自身更新失败
 
