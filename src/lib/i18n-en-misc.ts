@@ -151,6 +151,7 @@ export const EN_MISC: Record<string, string> = {
   "暂无进行中任务": "No tasks in progress",
   "未命名任务": "Untitled task",
   "还有 {count} 个任务": "{count} more tasks",
+  "在主窗口打开：{title}": "Open in the main window: {title}",
   "结束任务：{title}": "End task: {title}",
   "停止当前执行，保留会话": "Stop the current run; keep the session",
   "DSH 任务请在主窗口操作": "Manage DSH tasks from the main window",

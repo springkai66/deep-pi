@@ -216,6 +216,7 @@ pub fn run() {
                 board::open_board_window,
                 pet::open_pet_window,
                 pet::save_pet_position,
+                pet::fit_pet_window,
                 pet::get_pet_appearance,
                 pet::set_pet_image,
                 pet::reset_pet_image,

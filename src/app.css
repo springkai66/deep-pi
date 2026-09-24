@@ -110,8 +110,7 @@ select:focus-visible {
 
 .app-shell {
   display: grid;
-  --rail-w: 48px;
-  grid-template-columns: var(--rail-w) var(--sidebar-w, 260px) minmax(0, 1fr);
+  grid-template-columns: var(--sidebar-w, 260px) minmax(0, 1fr);
   grid-template-rows: var(--topbar-h, 32px) minmax(0, 1fr);
   width: 100vw;
   height: 100vh;
@@ -121,22 +120,19 @@ select:focus-visible {
 }
 
 @media (min-width: 1101px) {
-  .app-shell { grid-template-columns: var(--rail-w) var(--sidebar-w, 260px) minmax(0, 1fr) var(--files-w, 260px); }
-  .app-shell.files-hidden { grid-template-columns: var(--rail-w) var(--sidebar-w, 260px) minmax(0, 1fr); }
-  .app-shell.files-visible.git-visible { grid-template-columns: var(--rail-w) var(--sidebar-w, 260px) minmax(0, 1fr) var(--files-w, 260px) var(--git-w, 300px); }
-  .app-shell.files-hidden.git-visible { grid-template-columns: var(--rail-w) var(--sidebar-w, 260px) minmax(0, 1fr) var(--git-w, 300px); }
-  .app-shell.sidebar-hidden { grid-template-columns: var(--rail-w) minmax(0, 1fr) var(--files-w, 260px); }
-  .app-shell.sidebar-hidden.files-hidden { grid-template-columns: var(--rail-w) minmax(0, 1fr); }
-  .app-shell.sidebar-hidden.files-visible.git-visible { grid-template-columns: var(--rail-w) minmax(0, 1fr) var(--files-w, 260px) var(--git-w, 300px); }
-  .app-shell.sidebar-hidden.files-hidden.git-visible { grid-template-columns: var(--rail-w) minmax(0, 1fr) var(--git-w, 300px); }
+  .app-shell { grid-template-columns: var(--sidebar-w, 260px) minmax(0, 1fr) var(--files-w, 260px); }
+  .app-shell.files-hidden { grid-template-columns: var(--sidebar-w, 260px) minmax(0, 1fr); }
+  .app-shell.files-visible.git-visible { grid-template-columns: var(--sidebar-w, 260px) minmax(0, 1fr) var(--files-w, 260px) var(--git-w, 300px); }
+  .app-shell.files-hidden.git-visible { grid-template-columns: var(--sidebar-w, 260px) minmax(0, 1fr) var(--git-w, 300px); }
+  .app-shell.sidebar-hidden { grid-template-columns: minmax(0, 1fr) var(--files-w, 260px); }
+  .app-shell.sidebar-hidden.files-hidden { grid-template-columns: minmax(0, 1fr); }
+  .app-shell.sidebar-hidden.files-visible.git-visible { grid-template-columns: minmax(0, 1fr) var(--files-w, 260px) var(--git-w, 300px); }
+  .app-shell.sidebar-hidden.files-hidden.git-visible { grid-template-columns: minmax(0, 1fr) var(--git-w, 300px); }
 }
 
 .app-shell.dsh-mode {
-  grid-template-columns: var(--rail-w) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
 }
-
-/* DSH 控制柱收起态保持 8px；展开时回落到原始栏宽（.app-shell 默认的 --rail-w）。 */
-.app-shell.dsh-mode.rail-closed { grid-template-columns: 8px minmax(0, 1fr); }
 
 .project-sidebar { display: flex; flex-direction: column; min-width: 0; min-height: 0; border-right: 1px solid var(--border); background: var(--surface-alt); }
 .sidebar-panel { flex: 1; min-height: 0; overflow: hidden; }
@@ -206,89 +202,6 @@ aside.project-sidebar, aside.file-panel, aside.git-sidebar { position: relative;
   border-bottom: 1px solid var(--border);
 }
 .app-shell.sidebar-hidden .workspace .task-tabs-shell { padding-left: 34px; }
-/* 极窄控制柱（Command Rail）：常驻左侧，承载工作区切换与设置入口。 */
-.command-rail {
-  grid-column: 1;
-  grid-row: 1 / -1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 6px;
-  min-height: 0;
-  padding: 8px 0;
-  border-right: 1px solid var(--border);
-  background: var(--page-bg);
-  z-index: 8;
-}
-
-.rail-brand {
-  display: grid;
-  place-items: center;
-  width: 30px;
-  height: 30px;
-  flex-shrink: 0;
-  margin-bottom: 2px;
-  border: 1px solid var(--accent);
-  border-radius: 9px;
-  background: color-mix(in srgb, var(--accent) 14%, transparent);
-  color: var(--accent);
-  font-size: 14px;
-  font-weight: 800;
-  line-height: 1;
-}
-
-.rail-divider { width: 22px; height: 1px; flex-shrink: 0; background: var(--border); }
-.rail-spacer { flex: 1; min-height: 0; }
-
-/*
- * 控制柱（Command Rail）：
- *  - Pi 工作区：原设计（48px 宽、仅图标，悬停提示用 title）。
- *  - DSH 工作区：默认收起成 8px 窄条（宽度让给原生 Webview），鼠标移上去/键盘聚焦时
- *    展开回原始宽度（48px、仍是纯图标，只是内容重新可见），移走即收回。
- *    展开不改变条目样式与栏宽语义，避免与原生 Webview 抢空间。
- */
-
-/* 控制柱条目：栏宽 48px 时只有图标可见（文字说明走 title/aria-label）。 */
-.rail-item {
-  position: relative;
-  display: grid;
-  place-items: center;
-  width: 32px;
-  height: 32px;
-  flex-shrink: 0;
-  padding: 0;
-  border: 0;
-  border-radius: 8px;
-  color: var(--text-muted);
-  background: transparent;
-  cursor: pointer;
-}
-/* DSH 收起态：窄条 + 内容淡出，只留可悬停/可聚焦的命中区域（留在栅格内，
-   命中区一定在原生 Webview 左侧，不会被盖住）。 */
-.command-rail.rail-collapsed {
-  width: 8px;
-  padding: 8px 0;
-  overflow: hidden;
-  border-right: 0;
-}
-.command-rail.rail-collapsed .rail-brand,
-.command-rail.rail-collapsed .rail-divider,
-.command-rail.rail-collapsed .rail-item { opacity: 0; pointer-events: none; }
-
-.rail-item:hover { color: var(--text-strong); background: var(--surface-hover); }
-.rail-item.selected { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
-
-.rail-item.selected::before {
-  content: "";
-  position: absolute;
-  left: -8px;
-  top: 7px;
-  bottom: 7px;
-  width: 3px;
-  border-radius: 0 2px 2px 0;
-  background: var(--accent);
-}
-
 /* 顶部面包屑：替代原品牌区，显示「项目 / 当前任务」。 */
 .stage-crumbs {
   display: flex;
@@ -317,9 +230,9 @@ aside.project-sidebar, aside.file-panel, aside.git-sidebar { position: relative;
 .app-shell.files-hidden .workspace .task-tabs-shell { padding-right: 34px; }
 
 .topbar {
-  grid-column: 2 / -1;
+  grid-column: 1 / -1;
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: auto auto minmax(0, 1fr);
   align-items: center;
   gap: 8px;
   padding: 0 8px;
@@ -327,13 +240,13 @@ aside.project-sidebar, aside.file-panel, aside.git-sidebar { position: relative;
   background: var(--surface);
 }
 
-.agent-switch,
+.workspace-switcher,
 .toolbar {
   display: flex;
   align-items: center;
 }
 
-.agent-switch {
+.workspace-switcher {
   display: flex;
   align-items: center;
   gap: 2px;
@@ -343,7 +256,7 @@ aside.project-sidebar, aside.file-panel, aside.git-sidebar { position: relative;
   background: var(--surface-alt);
 }
 
-.agent-switch button {
+.workspace-switcher button {
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -357,8 +270,8 @@ aside.project-sidebar, aside.file-panel, aside.git-sidebar { position: relative;
   background: transparent;
 }
 
-.agent-switch button:hover { color: var(--text); }
-.agent-switch button.selected {
+.workspace-switcher button:hover { color: var(--text); }
+.workspace-switcher button.selected {
   color: var(--accent-ink);
   background: var(--accent);
   font-weight: 700;
@@ -401,7 +314,7 @@ aside.project-sidebar, aside.file-panel, aside.git-sidebar { position: relative;
 }
 
 .toolbar button:disabled,
-.agent-switch button:disabled {
+.workspace-switcher button:disabled {
   cursor: default;
   opacity: 0.42;
 }
@@ -822,12 +735,7 @@ aside.project-sidebar, aside.file-panel, aside.git-sidebar { position: relative;
 
 @media (max-width: 900px) {
   .app-shell {
-    grid-template-columns: var(--rail-w, 48px) 220px minmax(0, 1fr);
-  }
-
-  .topbar {
-    grid-template-columns: auto auto minmax(0, 1fr);
-    gap: 8px;
+    grid-template-columns: 220px minmax(0, 1fr);
   }
 
   .terminal-grid.split,
@@ -841,15 +749,14 @@ aside.project-sidebar, aside.file-panel, aside.git-sidebar { position: relative;
 
 
 @media (max-width: 620px) {
-  .app-shell { --rail-w: 40px; grid-template-columns: var(--rail-w) minmax(150px, 38%) minmax(0, 1fr); }
-  .app-shell.sidebar-hidden { grid-template-columns: var(--rail-w) minmax(0, 1fr); }
-  .app-shell.dsh-mode { grid-template-columns: var(--rail-w) minmax(0, 1fr); }
-  /* 这条媒体查询里的 `--rail-w: 40px` 会盖掉 .app-shell 的内联值：
-     DSH 收起态在这里补回 8px，展开态回落到本媒体查询的原始栏宽（40px）。 */
-  .app-shell.dsh-mode.rail-closed { grid-template-columns: 8px minmax(0, 1fr); }
-  .app-shell.dsh-mode.rail-open { grid-template-columns: var(--rail-w) minmax(0, 1fr); }
+  .app-shell { grid-template-columns: minmax(150px, 38%) minmax(0, 1fr); }
+  .app-shell.sidebar-hidden { grid-template-columns: minmax(0, 1fr); }
+  .app-shell.dsh-mode { grid-template-columns: minmax(0, 1fr); }
 }
-  :root[data-color-scheme="light"] body,
+  /* 只压 .app-shell：body 的背景由上面的基础规则给出，这里若再以
+     `:root[data-color-scheme="light"] body`（特异性 0,2,1）强制 !important，
+     会压过桌宠/任务浮层两页声明的 `html, body { background: transparent !important }`
+     （0,0,1）——浅色模式下这两个窗口会变成不透明白底，盖住桌面与桌宠本体。 */
 :root[data-color-scheme="light"] .app-shell {
   color: var(--text) !important;
   background: var(--page-bg) !important;
@@ -863,7 +770,7 @@ aside.project-sidebar, aside.file-panel, aside.git-sidebar { position: relative;
   background: var(--surface) !important;
 }
 
-:root[data-color-scheme="light"] .agent-switch,
+:root[data-color-scheme="light"] .workspace-switcher,
 :root[data-color-scheme="light"] .terminal-pane,
 :root[data-color-scheme="light"] .terminal-pane .terminal {
   border-color: var(--border-strong) !important;
@@ -876,7 +783,7 @@ aside.project-sidebar, aside.file-panel, aside.git-sidebar { position: relative;
   color: var(--text-strong) !important;
 }
 
-:root[data-color-scheme="light"] .agent-switch button,
+:root[data-color-scheme="light"] .workspace-switcher button,
 :root[data-color-scheme="light"] .toolbar button,
 :root[data-color-scheme="light"] .task-actions button,
 :root[data-color-scheme="light"] .project-add,
@@ -905,7 +812,7 @@ aside.project-sidebar, aside.file-panel, aside.git-sidebar { position: relative;
 }
 
 
-:root[data-color-scheme="light"] .agent-switch button.selected,
+:root[data-color-scheme="light"] .workspace-switcher button.selected,
 :root[data-color-scheme="light"] .toolbar button.primary,
 :root[data-color-scheme="light"] .start-button {
   color: var(--accent-ink) !important;

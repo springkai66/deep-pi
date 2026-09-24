@@ -5,7 +5,6 @@
   // 结束动作委托给主窗口执行（PET_TASK_RESULT_EVENT 回传关联结果）。
   import { invoke } from "@tauri-apps/api/core";
   import { emitTo, listen } from "@tauri-apps/api/event";
-  import { getCurrentWindow, availableMonitors } from "@tauri-apps/api/window";
   import { onMount } from "svelte";
   import PetTaskBubbles from "$lib/PetTaskBubbles.svelte";
   import { createPetTaskBubbles, type PetTaskBubblesState } from "$lib/pet-task-bubbles";
@@ -14,12 +13,10 @@
   import { t } from "$lib/i18n.svelte";
   import type { AppSettings } from "$lib/settings";
   import type { Task } from "$lib/task";
-  import type { Monitor } from "$lib/pet-task-ring";
 
   let taskBubbles = $state<PetTaskBubblesState>({
     open: false, leaving: false, loading: false, empty: false, tasks: [], pending: [], actionErrors: {}, endedAt: {}, error: "",
   });
-  let screenAreas = $state<Monitor[]>([]);
   let hoverRevision = 0;
   let petDebug = $state(false);
 
@@ -35,10 +32,14 @@
     void invoke("set_pet_hit_rects", { rects }).catch(() => { /* 浮层不可用时忽略 */ });
   }
 
-  /** 量取当前真正可交互的元素：非 busy、非退场中的气泡 + 带重试的错误角标。 */
+  /**
+   * 量取真正可交互的元素：带按钮（打开/结束/重试）且不忙、不退场的气泡 +
+   * 带重试的错误角标。没有按钮的气泡不参与命中——否则它会吞掉点击，
+   * 既点不动也传不下去，成为死区。
+   */
   function measureHitRects(): HitRect[] {
     const nodes = document.querySelectorAll<HTMLElement>(
-      ".task-bubble:not(.busy):not(.leaving), .ring-error",
+      ".task-bubble.interactive:not(.leaving), .ring-error",
     );
     return Array.from(nodes, (node) => {
       const rect = node.getBoundingClientRect();
@@ -87,20 +88,6 @@
     changed: (state) => { taskBubbles = state; },
   });
 
-  async function refreshMonitors() {
-    try {
-      const monitors = await availableMonitors();
-      screenAreas = monitors.map((monitor) => [
-        monitor.position.x,
-        monitor.position.y,
-        monitor.size.width,
-        monitor.size.height,
-      ]);
-    } catch {
-      screenAreas = []; // 取不到屏幕信息时按半径上限渲染（宁可出屏，也不无故缩小）。
-    }
-  }
-
   onMount(() => {
     let disposed = false;
     void (async () => {
@@ -109,7 +96,6 @@
         applyAppearance(await invoke<AppSettings>("get_settings"));
       } catch { /* 启动未就绪：保持默认外观 */ }
     })();
-    void refreshMonitors();
     void invoke<boolean>("pet_debug_enabled")
       .then((enabled) => { petDebug = enabled; })
       .catch(() => { /* 查询失败按非调试处理 */ });
@@ -143,9 +129,8 @@
     };
   });
 
-  /** 指针进入本体：先取屏幕快照，再让环按收缩后的半径依次绽放。 */
+  /** 指针进入本体：让环按当前任务数量反推的半径依次绽放。 */
   async function enterRing() {
-    await refreshMonitors();
     await bubbles.enter();
   }
 </script>
@@ -156,7 +141,8 @@
 </svelte:head>
 
 {#if taskBubbles.open || taskBubbles.leaving}
-  <PetTaskBubbles ring={taskBubbles} monitors={screenAreas} debug={petDebug}
+  <PetTaskBubbles ring={taskBubbles}
+    onOpen={(task) => void bubbles.act("open", task)}
     onAction={(task) => void bubbles.act("stop", task)}
     onRetry={() => void bubbles.retry()}
     onKeepOpen={() => bubbles.keepOpen()}

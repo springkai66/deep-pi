@@ -40,7 +40,7 @@ describe("standalone pet task bubbles window", () => {
     expect(pet).toContain("fn ring_window_position");
     expect(pet).not.toContain("fn task_popup_position");
     expect(pet).toContain("ring_window_position((pos.x, pos.y, size.width, size.height), target)");
-    expect(pet).toContain("const TASKS_SIZE: f64 = 420.0;");
+    expect(pet).toContain("const TASKS_SIZE: f64 = 960.0;");
     expect(pet).toContain(".inner_size(TASKS_SIZE, TASKS_SIZE)");
     expect(pet).toContain("LogicalSize::new(TASKS_SIZE, TASKS_SIZE)");
   });

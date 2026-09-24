@@ -3,31 +3,25 @@
   // 每张气泡只保留标题与结束按钮；状态只用左侧圆点表达，不占宽度。
   // 本组件只做渲染与动画，生命周期与动作都在 pet-task-bubbles.ts。
   import { Square, RotateCw } from "@lucide/svelte";
+  import { untrack } from "svelte";
   import { t, tm } from "$lib/i18n.svelte";
   import type { Task } from "$lib/task";
   import { canStopPetTask } from "$lib/pet-task-actions";
   import type { PetTaskBubblesState } from "$lib/pet-task-bubbles";
   import {
-    RING_BUBBLE_WIDTH,
-    RING_CENTER,
     RING_ENTER_MS,
     RING_ENTER_STAGGER_MS,
     RING_EXIT_MS,
     RING_EXIT_STAGGER_MS,
-    RING_TASK_LIMIT,
-    ringRadius,
-    ringSlotCount,
     ringLayout,
-    type Monitor,
+    ringSlotCount,
   } from "$lib/pet-task-ring";
 
   // 注意：prop 不能叫 state —— 那会遮蔽 Svelte 的 $state rune。
-  let { ring, monitors = [], debug = false, onAction, onRetry, onKeepOpen, onLeave, onSettled }: {
+  let { ring, onOpen, onAction, onRetry, onKeepOpen, onLeave, onSettled }: {
     ring: PetTaskBubblesState;
-    /** 本体中心所在屏幕的物理区域；用于把半径收进屏幕内。 */
-    monitors?: Monitor[];
-    /** 调试模式（DEEPPI_PET_DEBUG=1）：浮层显示半透明红框，供人工验收目视比对。 */
-    debug?: boolean;
+    /** 点击气泡主体：在主窗口打开该任务（Pi 进任务面板，DSH 进 DSH 视图）。 */
+    onOpen: (task: Task) => void;
     onAction: (task: Task) => void;
     onRetry: () => void;
     onKeepOpen: () => void;
@@ -42,16 +36,18 @@
   let enterToken = $state(0);
   let showToken = $state(-1);
 
-  const center = { x: RING_CENTER, y: RING_CENTER };
-  const radius = $derived(ringRadius(center, monitors));
-  const layout = $derived(ringLayout(ring.tasks, center, monitors));
+  const layout = $derived(ringLayout(ring.tasks));
+  const radius = $derived(layout.radius);
   const slots = $derived(ringSlotCount(layout));
 
   $effect(() => {
     if (!ring.open) return;
     // 先以「隐藏」渲染一帧，再切到「显示」：否则元素一挂载就已经是终态，没有动画可看。
-    const token = ++enterToken;
-    showToken = -1;
+    // 写入必须 untrack：`++enterToken` 的读半边会把 enterToken 登记为本效应的依赖，
+    // 写半边又立刻作废它 → 效应无限自触发（effect_update_depth_exceeded），
+    // 反应式图被毒化，DOM 永久冻结在「正在读取任务…」，气泡与收环全部失灵。
+    const token = untrack(() => ++enterToken);
+    untrack(() => { showToken = -1; });
     const frame = requestAnimationFrame(() => {
       if (token === enterToken) showToken = token;
     });
@@ -83,7 +79,7 @@
 {/snippet}
 
 <!-- 整层不接鼠标事件：只有气泡本身可点，本体窗口与桌面照常收到点击。 -->
-<div class="ring" class:debug role="presentation"
+<div class="ring" role="presentation"
   onpointerenter={onKeepOpen} onpointerleave={onLeave}
   oncontextmenu={(event) => { event.preventDefault(); event.stopPropagation(); }}>
   {#if ring.open && ring.error}
@@ -98,17 +94,22 @@
     {@const busy = ring.pending.includes(bubble.task.id)}
     {@const failure = ring.actionErrors[bubble.task.id] ?? ""}
     {@const done = ended(bubble.task)}
-    <article class="task-bubble" class:shown class:leaving class:busy class:done
+    <article class="task-bubble" class:shown class:leaving class:busy class:done class:interactive={!busy}
       data-task={bubble.task.id}
-      title={bubble.task.agent !== "pi" ? t("DSH 任务请在主窗口操作") : undefined}
-      style="--x: {bubble.x}px; --y: {bubble.y}px; width: {RING_BUBBLE_WIDTH}px; --in-delay: {index * RING_ENTER_STAGGER_MS}ms; --out-delay: {index * RING_EXIT_STAGGER_MS}ms"
+      style="--x: {bubble.x}px; --y: {bubble.y}px; width: {layout.bubbleWidth}px; --in-delay: {index * RING_ENTER_STAGGER_MS}ms; --out-delay: {index * RING_EXIT_STAGGER_MS}ms"
       aria-label={bubble.task.title} aria-busy={busy}>
       {#if failure}
         <span class="task-failure" role="alert">{tm(failure)}</span>
         <button type="button" class="retry-button" onclick={() => onAction(bubble.task)}>{t("重试")}</button>
       {:else}
-        {@render dot(bubble.task)}
-        <strong class="task-title" title={bubble.task.title}>{bubble.task.title || t("未命名任务")}</strong>
+        <!-- 主体是一枚真按钮（不把「结束」按钮嵌进来）：点击回到主窗口对应任务。 -->
+        <button type="button" class="bubble-open"
+          title={t("在主窗口打开：{title}", { title: bubble.task.title })}
+          aria-label={t("在主窗口打开：{title}", { title: bubble.task.title })}
+          onclick={() => onOpen(bubble.task)}>
+          {@render dot(bubble.task)}
+          <strong class="task-title" title={bubble.task.title}>{bubble.task.title || t("未命名任务")}</strong>
+        </button>
         {#if !busy && !done && canStopPetTask(bubble.task)}
           <button type="button" class="stop-button"
             aria-label={t("结束任务：{title}", { title: bubble.task.title })}
@@ -199,6 +200,23 @@
   .task-dot-waiting { background: #f6c945; }
   .task-dot-cancelled, .task-dot-failed { background: var(--status-failed); }
   .task-dot-completed { background: var(--status-completed, #3fb950); }
+  /* 打开按钮：铺满气泡左侧，视觉上仍是「圆点 + 标题 + 右侧按钮」的一行。 */
+  .bubble-open {
+    display: flex;
+    flex: 1 1 auto;
+    align-items: center;
+    gap: 7px;
+    min-width: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .bubble-open:hover .task-title { color: var(--accent); }
+  .bubble-open:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
   .task-title {
     flex: 1 1 auto;
     min-width: 0;
@@ -268,10 +286,4 @@
   /* 读取中/空态：不参与依次显示的次序，直接可见，且不参与命中。 */
   .ring-loading,
   .ring-empty { pointer-events: none; opacity: 1; scale: 1; }
-
-  /* 调试红框（DEEPPI_PET_DEBUG=1）：目视核对浮层窗口边界与环的相对位置。 */
-  .ring.debug {
-    background: rgb(255 0 0 / 7%);
-    outline: 1px solid rgb(255 0 0 / 50%);
-  }
 </style>

@@ -18,7 +18,6 @@ const THEME_INDEPENDENT_TOKENS = new Set([
   "session-font",
   "code-font",
   "topbar-h",
-  "rail-w",
 ]);
 
 function styleBlock(path: string): string {

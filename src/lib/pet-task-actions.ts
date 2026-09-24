@@ -2,8 +2,8 @@ import type { Task } from "./task";
 
 export const PET_TASK_ACTION_EVENT = "pet-task-action";
 export const PET_TASK_RESULT_EVENT = "pet-task-result";
-/** 桌宠只提供「结束」：继续任务请回到主窗口。 */
-export type PetTaskAction = "stop";
+/** 桌宠气泡可发起的动作：结束 Pi 任务，或在主窗口打开该任务（Pi / DSH 都支持）。 */
+export type PetTaskAction = "stop" | "open";
 /** 主窗口执行的完整动作集：继续不在桌宠上暴露，但主窗口仍然需要它。 */
 export type TaskAction = PetTaskAction | "continue";
 export interface PetTaskRequest {
@@ -28,6 +28,14 @@ export interface PetTaskResult {
 export function canStopPetTask(task: Task): boolean {
   return task.agent === "pi" && task.archivedAt == null && !!task.runId
     && (task.status === "running" || task.status === "waiting");
+}
+
+/**
+ * 打开（跳转）适用面：未归档的任务都能在主窗口定位到——Pi 任务进任务面板，
+ * DSH 任务切到 DSH 视图。只读动作，不要求有活动运行。
+ */
+export function canOpenPetTask(task: Pick<Task, "archivedAt">): boolean {
+  return task.archivedAt == null;
 }
 
 /** 继续的适用面：等输入的活动会话，或已停止但可重启的休眠任务。 */
@@ -59,6 +67,8 @@ interface ActionPorts {
   restart(task: Task): Promise<Task>;
   prepareContinue(): Promise<void>;
   open(task: Task): void;
+  /** 把主窗口带到前台并定位到该任务（Pi 进任务面板，DSH 进 DSH 视图）。 */
+  reveal(task: Task): Promise<void> | void;
   updated(task: Task): void;
 }
 
@@ -69,13 +79,24 @@ export function isPetTaskRequest(value: unknown): value is PetTaskRequest {
   return typeof request.requestId === "string" && request.requestId.length > 0
     && typeof request.taskId === "string" && request.taskId.length > 0
     && (request.runId === null || typeof request.runId === "string")
-    && request.action === "stop";
+    && (request.action === "stop" || request.action === "open");
 }
 
 /** Execute only in the main webview; existing native run-id guards remain intact. */
 export function createPetTaskActionHandler(ports: ActionPorts) {
   return async (request: TaskActionRequest): Promise<PetTaskResult> => {
     const result = { requestId: request.requestId, taskId: request.taskId };
+    // 打开是只读动作：不占任务锁、不改任务状态，前台化失败也要如实回报。
+    if (request.action === "open") {
+      try {
+        const task = await ports.loadTask(request.taskId);
+        if (!task || !canOpenPetTask(task)) throw new Error("任务不存在或已归档");
+        await ports.reveal(task);
+        return { ...result, ok: true };
+      } catch (cause) {
+        return { ...result, ok: false, error: cause instanceof Error ? cause.message : String(cause) };
+      }
+    }
     if (ports.isBusy(request.taskId)) return { ...result, ok: false, error: "任务正在处理，请稍后重试" };
     ports.busyChanged(request.taskId, true);
     try {

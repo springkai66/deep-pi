@@ -1,7 +1,7 @@
 <script lang="ts">
-  // 桌宠浮窗：透明、置顶、不进任务栏的小窗口。
-  // 交互：抓着桌宠/顶部拖动条拖动位置（防抖持久化），悬停窗口任意处显示
-  // 关闭按钮；悬停本体让任务环依次绽放，任务完成时庆祝、失败时沮丧
+  // 桌宠浮窗：透明、置顶、不进任务栏的小窗口，尺寸贴合本体（见 fitWindowToFigure）。
+  // 交互：抓着桌宠拖动位置（防抖持久化），悬停窗口任意处显示右上角关闭
+  // 按钮；悬停本体让任务环依次绽放，任务完成时庆祝、失败时沮丧
   // （pet-state）。形象来自 get_pet_appearance：默认内置图片或本地自定义图片。
   //
   // 任务环画在独立的浮层窗口里（见 pet-tasks 路由）：本体窗口的尺寸、位置
@@ -98,6 +98,103 @@
       appearance = await invoke<PetAppearance>("get_pet_appearance");
     } catch {
       // 读取失败保留当前形象。
+    }
+  }
+
+  // —— 贴合本体：量取形象的不透明边界，把窗口收紧到本体大小 ——
+  // 窗口曾经比本体大出一圈（拖动条 + 头部留白），透明区域既挡桌面点击
+  // 又显得空。现在窗口只包住本体的不透明部分：默认形象的量测结果与
+  // pet.rs 的 PET_WIDTH/HEIGHT 一致（开窗即贴合，无跳变）；自定义形象
+  // 载入后量测并调用 fit_pet_window 动态贴合（窗口中心不动）。
+  /** 本体显示盒：形象按 contain 缩放的基准尺寸（窗口内图片的显示尺寸）。 */
+  const FIGURE_BOX = 150;
+  /** 贴合余量：左右给摇摆动画、顶部给庆祝跳跃腾空与关闭按钮留白、底部贴地。 */
+  const FIT_MARGIN_X = 4;
+  const FIT_MARGIN_TOP = 24;
+  const FIT_MARGIN_BOTTOM = 3;
+
+  /** 贴合结果：窗口尺寸与图片在窗口内的裁剪摆放（逻辑像素）；null = 未量测。 */
+  let fit = $state<{
+    width: number;
+    height: number;
+    imageX: number;
+    imageY: number;
+    imageWidth: number;
+    imageHeight: number;
+  } | null>(null);
+
+  /** 逐像素扫描 alpha，返回图片自然尺寸与不透明边界；失败返回 null。 */
+  async function measureOpaqueBox(src: string) {
+    const image = new Image();
+    image.src = src;
+    try {
+      await image.decode();
+    } catch {
+      return null;
+    }
+    const naturalWidth = image.naturalWidth;
+    const naturalHeight = image.naturalHeight;
+    if (!naturalWidth || !naturalHeight) return null;
+    const canvas = document.createElement("canvas");
+    canvas.width = naturalWidth;
+    canvas.height = naturalHeight;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    if (!context) return null;
+    context.drawImage(image, 0, 0);
+    let pixels: Uint8ClampedArray;
+    try {
+      pixels = context.getImageData(0, 0, naturalWidth, naturalHeight).data;
+    } catch {
+      return null; // 画布被污染时放弃贴合（形象来自 data URL，正常不会发生）。
+    }
+    let minX = naturalWidth;
+    let minY = naturalHeight;
+    let maxX = -1;
+    let maxY = -1;
+    for (let y = 0; y < naturalHeight; y += 1) {
+      const row = y * naturalWidth * 4;
+      for (let x = 0; x < naturalWidth; x += 1) {
+        if (pixels[row + x * 4 + 3] > 8) {
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+        }
+      }
+    }
+    if (maxX < 0) return null;
+    return { naturalWidth, naturalHeight, x: minX, y: minY, right: maxX + 1, bottom: maxY + 1 };
+  }
+
+  /** 量测并贴合：窗口缩到本体大小（中心不动），图片按裁剪框摆放。 */
+  async function fitWindowToFigure() {
+    if (!appearance) return;
+    const box = await measureOpaqueBox(imageSrc);
+    if (!box) return;
+    const scale = Math.min(FIGURE_BOX / box.naturalWidth, FIGURE_BOX / box.naturalHeight);
+    const imageWidth = box.naturalWidth * scale;
+    const imageHeight = box.naturalHeight * scale;
+    // contain 居中落点 + 不透明边界 → 本体在显示坐标系里的矩形。
+    const bodyX = (FIGURE_BOX - imageWidth) / 2 + box.x * scale;
+    const bodyY = (FIGURE_BOX - imageHeight) / 2 + box.y * scale;
+    const bodyWidth = (box.right - box.x) * scale;
+    const bodyHeight = (box.bottom - box.y) * scale;
+    const width = Math.round(bodyWidth) + FIT_MARGIN_X * 2;
+    const height = Math.round(bodyHeight) + FIT_MARGIN_TOP + FIT_MARGIN_BOTTOM;
+    // 量测异常（过小/过大）时维持现状：宁可留白也不裁掉本体。
+    if (width < 48 || height < 48 || width > 320 || height > 320) return;
+    fit = {
+      width,
+      height,
+      imageWidth: Math.round(imageWidth),
+      imageHeight: Math.round(imageHeight),
+      imageX: -(bodyX - FIT_MARGIN_X),
+      imageY: -(bodyY - FIT_MARGIN_TOP),
+    };
+    try {
+      await invoke<void>("fit_pet_window", { width, height });
+    } catch {
+      /* 窗口已关闭或量测被拒：保持当前窗口 */
     }
   }
 
@@ -225,6 +322,7 @@
       try {
         await invoke<void>("await_startup");
         await Promise.all([refreshWindowAppearance(), reloadTasks(), refreshAppearance()]);
+        await fitWindowToFigure();
       } catch {
         // 启动未就绪/读取失败：保持默认形象与待机状态。
       }
@@ -234,7 +332,12 @@
       listen("dsh-tasks", () => scheduleReload()),
       listen<PetExitEvent>("pty-exit", ({ payload }) => onTaskExit(payload)),
       listen<PetExitEvent>("rpc-task-exit", ({ payload }) => onTaskExit(payload)),
-      listen("pet-appearance", () => void refreshAppearance()),
+      listen("pet-appearance", () => {
+        void (async () => {
+          await refreshAppearance();
+          await fitWindowToFigure();
+        })();
+      }),
       listen<DesktopPointerEvent>("desktop-pointer", ({ payload }) => onDesktopPointer(payload)),
     ];
     // 指针进入/离开本体：本地控制关闭按钮的显隐；浮层据此判断宽限期起点。
@@ -284,19 +387,18 @@
 <div class="pet-window" role="presentation" oncontextmenu={(event) => event.preventDefault()}
   onpointerenter={() => { hover = true; }}
   onpointerleave={() => { hover = false; }}>
-  <!-- 顶部拖动条：常驻的抓握区（无边框窗口没有系统标题栏）。 -->
-  <div class="pet-drag-strip" data-tauri-drag-region>
+  <div class="pet-stage">
     {#if hover}
       <button type="button" class="pet-close" aria-label={t("关闭桌宠")} title={t("关闭桌宠")}
         onclick={() => void closePet()}><X size={13} aria-hidden="true" /></button>
     {/if}
-  </div>
-  <div class="pet-stage">
     {#if bubble}
       <div class="pet-bubble" role="status">{tm(bubble)}</div>
     {/if}
-    <!-- 悬停上报给独立任务浮层；本体窗口尺寸、位置与图片节点保持不变（避免闪烁）。 -->
+    <!-- 悬停上报给独立任务浮层；窗口尺寸、位置与图片节点在悬停期间保持不变。
+         窗口已贴合本体：抓着本体即可拖动（不再有独立的顶部拖动条）。 -->
     <div class="pet-figure pet-{mood}" class:pet-walk={Boolean(crawl)} role="img" aria-label={t("桌宠，悬停查看任务")}
+      style={fit ? `--fit-w: ${fit.width}px; --fit-h: ${fit.height}px; --img-w: ${fit.imageWidth}px; --img-h: ${fit.imageHeight}px; --img-x: ${fit.imageX}px; --img-y: ${fit.imageY}px` : undefined}
       onpointerenter={() => { hover = true; reportHover(true); }}
       onpointerleave={ringClose}
       onpointerdown={startDrag}>
@@ -316,15 +418,15 @@
     user-select: none;
     -webkit-user-select: none;
   }
-  .pet-drag-strip {
+  .pet-stage {
     position: relative;
-    height: 26px;
-    flex-shrink: 0;
+    flex: 1;
   }
   .pet-close {
     position: absolute;
-    top: 4px;
-    right: 6px;
+    top: 2px;
+    right: 2px;
+    z-index: 2;
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -338,33 +440,37 @@
     cursor: pointer;
   }
   .pet-close:hover { color: var(--text-strong); background: var(--surface-hover); }
-  .pet-stage {
-    position: relative;
-    flex: 1;
-    display: grid;
-    place-items: end center;
-    padding-bottom: 10px;
-  }
+  /* 贴合本体：窗口即本体盒（默认 99×119，与 pet.rs 的 PET_WIDTH/HEIGHT
+     一致），图片按量测出的裁剪框摆放，透明边不再占据窗口；顶部 24px 留白
+     既供庆祝跳跃腾空，也让关闭按钮不与本体重叠。 */
   .pet-figure {
-    position: relative;
-    width: 150px;
-    height: 150px;
+    position: absolute;
+    bottom: 0;
+    left: 50%;
+    translate: -50% 0;
+    width: var(--fit-w, 99px);
+    height: var(--fit-h, 119px);
+    overflow: hidden;
     cursor: grab;
     touch-action: none;
   }
   .pet-figure:active { cursor: grabbing; }
   .pet-image {
-    width: 100%;
-    height: 100%;
-    object-fit: contain;
+    position: absolute;
+    left: var(--img-x, -26px);
+    top: var(--img-y, -7.2px);
+    width: var(--img-w, 150px);
+    height: var(--img-h, 150px);
+    /* 显示尺寸已按 contain 算好，直接铺满裁剪框 */
+    object-fit: fill;
     -webkit-user-drag: none;
   }
   .pet-bubble {
     position: absolute;
-    bottom: 128px;
+    top: 2px;
     left: 50%;
     transform: translateX(-50%);
-    max-width: 180px;
+    max-width: calc(100% - 8px);
     padding: 5px 9px;
     border: 1px solid var(--border-strong);
     border-radius: 9px;
@@ -375,8 +481,8 @@
     font-family: var(--text-font);
     font-size: 12px;
     line-height: 1.45;
-    white-space: nowrap;
     overflow-wrap: anywhere;
+    z-index: 1;
     animation: bubble-in 150ms ease-out;
   }
   @keyframes bubble-in {

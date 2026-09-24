@@ -14,14 +14,15 @@ import {
   RING_TASK_LIMIT,
   RING_WINDOW,
   orderRingTasks,
+  ringBubbleWidth,
   ringCenteredAngle,
   ringEnterMs,
   ringExitMs,
   ringLayout,
+  ringNeededRadius,
   ringOverflowCount,
   ringRadius,
   ringSlotCount,
-  type Monitor,
 } from "./pet-task-ring";
 
 function task(overrides: Partial<Task> & { id: string }): Task {
@@ -44,11 +45,6 @@ function task(overrides: Partial<Task> & { id: string }): Task {
   } as Task;
 }
 
-/** 1080p 主屏；窗口中心落在正中时四周都宽裕。 */
-const SCREEN: Monitor[] = [[0, 0, 1920, 1080]];
-const SCREEN_CENTER = { x: 960, y: 540 };
-const ids = (tasks: Task[]) => tasks.map((value) => value.id);
-
 describe("ring task ordering", () => {
   it("puts running first, then waiting, then recently ended", () => {
     const ordered = orderRingTasks([
@@ -56,7 +52,7 @@ describe("ring task ordering", () => {
       task({ id: "wait", status: "waiting" }),
       task({ id: "run", status: "running" }),
     ]);
-    expect(ids(ordered)).toEqual(["run", "wait", "done"]);
+    expect(ordered.map((value) => value.id)).toEqual(["run", "wait", "done"]);
   });
 
   it("keeps the most recently active task first inside a tier", () => {
@@ -64,7 +60,7 @@ describe("ring task ordering", () => {
       task({ id: "old", status: "running", startedAt: 100 }),
       task({ id: "new", status: "running", startedAt: 900 }),
     ]);
-    expect(ids(ordered)).toEqual(["new", "old"]);
+    expect(ordered.map((value) => value.id)).toEqual(["new", "old"]);
   });
 
   it("falls back to the source order when timestamps are equal or missing", () => {
@@ -74,96 +70,138 @@ describe("ring task ordering", () => {
       task({ id: "b", status: "running" }),
       task({ id: "c", status: "running" }),
     ]);
-    expect(ids(ordered)).toEqual(["a", "b", "c"]);
+    expect(ordered.map((value) => value.id)).toEqual(["a", "b", "c"]);
   });
 
-  it("caps the ring and reports the remainder as overflow", () => {
-    const many = Array.from({ length: 9 }, (_, index) => task({ id: `t${index}` }));
+  it("caps the ring at 20 and reports the remainder as overflow", () => {
+    const many = Array.from({ length: 25 }, (_, index) => task({ id: `t${index}` }));
     expect(orderRingTasks(many)).toHaveLength(RING_TASK_LIMIT);
-    expect(ringOverflowCount(9)).toBe(3);
+    expect(RING_TASK_LIMIT).toBe(20);
+    expect(ringOverflowCount(25)).toBe(5);
     expect(ringOverflowCount(RING_TASK_LIMIT)).toBe(0);
     expect(ringOverflowCount(0)).toBe(0);
   });
 });
 
-describe("ring radius", () => {
-  it("uses the maximum radius when the pet sits well inside the screen", () => {
-    expect(ringRadius(SCREEN_CENTER, SCREEN)).toBe(RING_RADIUS_MAX);
+describe("ring radius follows the clock geometry", () => {
+  it("grows the radius so adjacent bubbles never overlap", () => {
+    // 圆心距 = 2r·sin(π/slots) 必须容下气泡宽度 + 间隙。
+    for (let slots = 2; slots <= RING_TASK_LIMIT + 1; slots += 1) {
+      const radius = ringRadius(slots);
+      const chord = 2 * radius * Math.sin(Math.PI / slots);
+      expect(chord).toBeGreaterThanOrEqual(ringBubbleWidth(slots));
+    }
   });
 
-  it("shrinks to fit when the pet is close to a screen edge", () => {
-    // 距右缘 180px：180 - 半个气泡高 = 164，仍高于上限，所以要按上限渲染。
-    expect(ringRadius({ x: 1740, y: 540 }, SCREEN)).toBe(RING_RADIUS_MAX);
-    // 距右缘 140px：140 - 16 = 124，落入收缩区间。
-    expect(ringRadius({ x: 1780, y: 540 }, SCREEN)).toBe(140 - RING_BUBBLE_HEIGHT / 2);
-    // 更贴边：收缩到下限后不再继续变小，避免圈缩到桌宠身上。
-    expect(ringRadius({ x: 1900, y: 540 }, SCREEN)).toBe(RING_RADIUS_MIN);
-    expect(ringRadius({ x: 1919, y: 1079 }, SCREEN)).toBe(RING_RADIUS_MIN);
+  it("narrows the bubble width as the count grows so the ring stays close", () => {
+    expect(ringBubbleWidth(1)).toBe(168);
+    expect(ringBubbleWidth(4)).toBe(168);
+    // 刻度变多后气泡收窄，环半径才不必被推远。
+    expect(ringBubbleWidth(9)).toBeLessThan(168);
+    expect(ringBubbleWidth(9)).toBeGreaterThanOrEqual(96);
+    expect(ringBubbleWidth(20)).toBeLessThanOrEqual(ringBubbleWidth(9));
+    // 下限兜底：再窄也读不出标题，此时改由半径让步。
+    expect(ringBubbleWidth(60)).toBe(96);
   });
 
-  it("keeps the maximum when no monitor contains the center", () => {
-    expect(ringRadius({ x: 5000, y: 5000 }, SCREEN)).toBe(RING_RADIUS_MAX);
-    expect(ringRadius(SCREEN_CENTER, [])).toBe(RING_RADIUS_MAX);
+  it("keeps the radius close to the target whenever the width floor allows", () => {
+    // 目标半径 175：气泡宽度没触底时，环半径不超过目标（刻度少时更近，
+    // 那是想要的效果），不会像「一味加宽半径」的旧几何那样越推越远。
+    for (let slots = 3; slots <= RING_TASK_LIMIT + 1; slots += 1) {
+      const width = ringBubbleWidth(slots);
+      const radius = ringRadius(slots);
+      if (width > 96) expect(radius).toBeLessThanOrEqual(181);
+      else expect(radius).toBeGreaterThan(175); // 触底后只能靠半径让步
+    }
+    // 典型场景：9 个任务时环明显比旧几何（半径 217）更贴近本体。
+    expect(ringRadius(9)).toBeLessThanOrEqual(180);
   });
 
-  it("measures against the edges of the monitor that contains the center", () => {
-    const two: Monitor[] = [[-1920, 0, 1920, 1080], [0, 0, 1920, 1080]];
-    expect(ringRadius({ x: -960, y: 540 }, two)).toBe(RING_RADIUS_MAX);
-    // 左侧副屏的最左缘：可用距离 60 → 落到下限。
-    expect(ringRadius({ x: -1860, y: 540 }, two)).toBe(RING_RADIUS_MIN);
+  it("keeps the needed radius inside the window bounds", () => {
+    for (let slots = 1; slots <= RING_TASK_LIMIT + 1; slots += 1) {
+      const radius = ringRadius(slots);
+      expect(radius).toBeGreaterThanOrEqual(RING_RADIUS_MIN);
+      expect(radius).toBeLessThanOrEqual(RING_RADIUS_MAX);
+      // 最宽的气泡贴窗口边缘再留余量。
+      expect(radius + ringBubbleWidth(slots) / 2).toBeLessThanOrEqual(RING_CENTER);
+    }
+  });
+
+  it("keeps the needed radius monotonic inside each bubble-width tier", () => {
+    // 跨档时气泡变窄，所需半径可以回落（168→140 那一档就是如此）；
+    // 同一档内刻度越多，需要越大的半径。
+    let previous = 0;
+    for (let slots = 1; slots <= RING_TASK_LIMIT + 1; slots += 1) {
+      const needed = ringNeededRadius(slots);
+      if (slots === 1 || ringBubbleWidth(slots) === ringBubbleWidth(slots - 1)) {
+        expect(needed).toBeGreaterThanOrEqual(previous);
+      }
+      previous = needed;
+    }
+  });
+
+  it("shrinks only when the monitor is too small for the needed radius", () => {
+    // 常规显示器装得下所需半径：按需取值，不无故收缩。
+    expect(ringRadius(RING_TASK_LIMIT, [[0, 0, 1920, 1080]])).toBe(ringNeededRadius(RING_TASK_LIMIT));
+    // 显示器装不下（中心到边不足所需半径）：收缩到可用距离，但不低于下限。
+    const tiny = [[0, 0, 500, 500]] as [number, number, number, number][];
+    expect(ringRadius(RING_TASK_LIMIT, tiny)).toBe(RING_RADIUS_MIN);
+    // 没有显示器信息：按所需半径渲染（宁可出屏，也不无故缩小）。
+    expect(ringRadius(RING_TASK_LIMIT, [])).toBe(ringNeededRadius(RING_TASK_LIMIT));
   });
 });
 
 describe("ring layout", () => {
   it("places a single task straight above the pet", () => {
-    const layout = ringLayout([task({ id: "only" })], SCREEN_CENTER, SCREEN);
+    const layout = ringLayout([task({ id: "only" })]);
     expect(layout.bubbles).toHaveLength(1);
     expect(layout.bubbles[0].x).toBe(0);
-    expect(layout.bubbles[0].y).toBe(-RING_RADIUS_MAX);
+    expect(layout.bubbles[0].y).toBe(-layout.radius);
     expect(layout.badge).toBeNull();
+    expect(layout.bubbleWidth).toBe(168);
   });
 
-  it("lays the ring out symmetrically around the vertical axis", () => {
+  it("spreads slots evenly around the full circle like clock ticks", () => {
     const tasks = ["a", "b", "c", "d"].map((id) => task({ id }));
-    const layout = ringLayout(tasks, SCREEN_CENTER, SCREEN);
-    const xs = layout.bubbles.map((bubble) => bubble.x);
-    // 4 个元素时落在正上方、正右、正下、正左。
+    const layout = ringLayout(tasks);
+    // 4 个元素时落在正上、正右、正下、正左——每个方向各占一个刻度。
     expect(layout.bubbles.map((bubble) => [bubble.x, bubble.y])).toEqual([
-      [0, -RING_RADIUS_MAX],
-      [RING_RADIUS_MAX, 0],
-      [0, RING_RADIUS_MAX],
-      [-RING_RADIUS_MAX, 0],
+      [0, -layout.radius],
+      [layout.radius, 0],
+      [0, layout.radius],
+      [-layout.radius, 0],
     ]);
-    expect(xs.reduce((sum, value) => sum + value, 0)).toBe(0);
   });
 
   it("gives the overflow badge the last slot on the ring", () => {
-    const tasks = Array.from({ length: 8 }, (_, index) => task({ id: `t${index}` }));
-    const layout = ringLayout(tasks, SCREEN_CENTER, SCREEN);
+    const tasks = Array.from({ length: 22 }, (_, index) => task({ id: `t${index}` }));
+    const layout = ringLayout(tasks);
     expect(layout.bubbles).toHaveLength(RING_TASK_LIMIT);
     expect(layout.badge?.count).toBe(2);
     expect(ringSlotCount(layout)).toBe(RING_TASK_LIMIT + 1);
-    // 角标排在第 7 位 → 延迟最晚，正好是「依次显示」的最后一个。
+    // 角标排在最后一个刻度 → 延迟最晚，正好是「依次显示」的最后一个。
     expect(layout.badge?.delayMs).toBe(RING_TASK_LIMIT * RING_ENTER_STAGGER_MS);
   });
 
-  it("keeps every bubble inside the square window", () => {
-    const tasks = Array.from({ length: RING_TASK_LIMIT }, (_, index) => task({ id: `t${index}` }));
-    // 三种落点：屏幕正中、贴近右下角（半径收缩）、贴近左上角（半径收缩）。
-    for (const center of [SCREEN_CENTER, { x: 1900, y: 1070 }, { x: 20, y: 20 }]) {
-      const layout = ringLayout(tasks, center, SCREEN);
+  it("keeps every bubble inside the square window at every count", () => {
+    for (let count = 1; count <= RING_TASK_LIMIT + 1; count += 1) {
+      const tasks = Array.from({ length: count }, (_, index) => task({ id: `t${index}` }));
+      const layout = ringLayout(tasks);
       for (const bubble of layout.bubbles) {
-        expect(Math.abs(bubble.x) + RING_BUBBLE_WIDTH / 2).toBeLessThanOrEqual(RING_CENTER);
+        expect(Math.abs(bubble.x) + layout.bubbleWidth / 2).toBeLessThanOrEqual(RING_CENTER);
         expect(Math.abs(bubble.y) + RING_BUBBLE_HEIGHT / 2).toBeLessThanOrEqual(RING_CENTER);
         // 圈的内缘必须留在桌宠本体之外，否则气泡会压在本体上。
         expect(Math.hypot(bubble.x, bubble.y)).toBeGreaterThan(75);
+      }
+      if (layout.badge) {
+        expect(Math.abs(layout.badge.x) + layout.bubbleWidth / 2).toBeLessThanOrEqual(RING_CENTER);
       }
     }
   });
 
   it("starts each slot one stagger step after the previous one", () => {
     const tasks = ["a", "b", "c"].map((id) => task({ id }));
-    const layout = ringLayout(tasks, SCREEN_CENTER, SCREEN);
+    const layout = ringLayout(tasks);
     expect(layout.bubbles.map((bubble) => bubble.delayMs)).toEqual([
       0,
       RING_ENTER_STAGGER_MS,
@@ -196,10 +234,12 @@ describe("ring animation timing", () => {
 
   it("keeps the square window big enough for the widest ring", () => {
     expect(RING_WINDOW).toBe(2 * RING_CENTER);
-    // 半径上限由气泡宽度反推：最宽处正好贴到窗口边缘（高度更小，不构成瓶颈）。
-    expect(RING_RADIUS_MAX).toBe(RING_CENTER - RING_BUBBLE_WIDTH / 2);
-    expect(RING_RADIUS_MAX + RING_BUBBLE_WIDTH / 2).toBeLessThanOrEqual(RING_CENTER);
-    expect(RING_RADIUS_MAX + RING_BUBBLE_HEIGHT / 2).toBeLessThanOrEqual(RING_CENTER);
+    // 上限之下，任何刻度数量的最宽气泡都留在窗口内。
+    for (let slots = 1; slots <= RING_TASK_LIMIT + 1; slots += 1) {
+      const radius = ringRadius(slots);
+      expect(radius + ringBubbleWidth(slots) / 2).toBeLessThanOrEqual(RING_CENTER);
+      expect(radius + RING_BUBBLE_HEIGHT / 2).toBeLessThanOrEqual(RING_CENTER);
+    }
     // 下限仍要留在本体之外。
     expect(RING_RADIUS_MIN).toBeGreaterThan(75 + RING_BUBBLE_HEIGHT / 2);
   });
@@ -213,7 +253,7 @@ describe("ring stylesheet mirrors the ring constants", () => {
   it("uses the same enter/exit durations and bubble width", () => {
     expect(component).toContain(`transition: opacity ${RING_ENTER_MS}ms ease-out, scale ${RING_ENTER_MS}ms ease-out;`);
     expect(component).toContain(`transition-duration: ${RING_EXIT_MS}ms;`);
-    // 按钮与文字都按这个宽度排版：CSS 宽度必须等于布局宽度。
+    // CSS 里的 168px 是最宽档兜底值；实际宽度由布局按数量内联给出。
     expect(component).toContain("width: 168px;");
     expect(RING_BUBBLE_WIDTH).toBe(168);
   });

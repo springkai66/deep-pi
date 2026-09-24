@@ -3,6 +3,7 @@
   import type { Snippet } from "svelte";
   import { onMount } from "svelte";
   import { invoke as nativeInvoke } from "@tauri-apps/api/core";
+  import { getVersion } from "@tauri-apps/api/app";
   import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
   import { CODE_FONT_OPTIONS, CHAT_DETAIL_LEVELS, FONT_SIZE_RANGE, cssAppFontFamily, cssCodeFontFamily, appFontPreviewStack, codeFontPreviewStack, type AppSettings, type ExternalEditor } from "./settings";
   import FontSelect from "./FontSelect.svelte";
@@ -77,10 +78,15 @@
     }
   }
   let systemFonts = $state<string[]>([]);
+  /// 应用版本号（tauri.conf.json 的 version，安装/更新后随之变化）。
+  let appVersion = $state("");
   onMount(() => {
     void nativeInvoke<string[]>("list_system_fonts")
       .then((fonts) => { systemFonts = fonts; })
       .catch(() => { /* 字体枚举失败时保留“系统默认”选项 */ });
+    void getVersion()
+      .then((version) => { appVersion = version; })
+      .catch(() => { /* 版本号读取失败时留空，不影响设置页其余功能 */ });
   });
 
   const activeTheme = $derived(resolveTheme(runtime.settings.theme, runtime.settings.customThemes ?? []));
@@ -362,6 +368,10 @@
             </div>
             {#if petNotice}<p class="pet-notice" role="alert">{petNotice}</p>{/if}
           </div>
+        </section>
+        <section class="settings-group" aria-labelledby="about-heading">
+          <h3 id="about-heading">{t("关于")}</h3>
+          <p class="muted">DeepPi {appVersion}</p>
         </section>
       </div>
       <div class="settings-panel" hidden={category !== "appearance"}>

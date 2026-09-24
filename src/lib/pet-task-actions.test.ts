@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Task } from "./task";
 import {
+  canOpenPetTask,
   canStopPetTask,
   createPetTaskActionClient,
   createPetTaskActionHandler,
@@ -38,12 +39,20 @@ describe("pet task action gates", () => {
     expect(canStopPetTask(task({ id: "a", archivedAt: 1 }))).toBe(false);
   });
 
-  it("accepts only end requests", () => {
+  it("accepts stop and open requests but still drops continue ones", () => {
     // 桌宠不再暴露「继续」：旧形态的请求一律当作无效载荷丢弃。
     expect(isPetTaskRequest({ requestId: "r", taskId: "t", runId: null, action: "stop" })).toBe(true);
+    expect(isPetTaskRequest({ requestId: "r", taskId: "t", runId: null, action: "open" })).toBe(true);
     expect(isPetTaskRequest({ requestId: "r", taskId: "t", runId: null, action: "continue" })).toBe(false);
     expect(isPetTaskRequest({ requestId: "r", taskId: "t", runId: null, action: 1 })).toBe(false);
     expect(isPetTaskRequest(null)).toBe(false);
+  });
+
+  it("opens any live or ended task but not archived rows", () => {
+    expect(canOpenPetTask(task({ id: "a" }))).toBe(true);
+    expect(canOpenPetTask(task({ id: "a", agent: "dsh" }))).toBe(true);
+    expect(canOpenPetTask(task({ id: "a", status: "completed", runId: null }))).toBe(true);
+    expect(canOpenPetTask(task({ id: "a", archivedAt: 1 }))).toBe(false);
   });
 
   it("shows live tasks plus retained ended ones and hides archived rows", () => {
@@ -65,7 +74,7 @@ describe("pet task action gates", () => {
 describe("pet task action handler (main webview)", () => {
   function ports(overrides: Partial<Parameters<typeof createPetTaskActionHandler>[0]> = {}) {
     const busy = new Set<string>();
-    const calls = { stop: [] as Task[] };
+    const calls = { stop: [] as Task[], reveal: [] as Task[] };
     return {
       calls,
       busy,
@@ -74,11 +83,49 @@ describe("pet task action handler (main webview)", () => {
         isBusy: (id: string) => busy.has(id),
         busyChanged: (id: string, isBusy: boolean) => { if (isBusy) busy.add(id); else busy.delete(id); },
         stop: async (value: Task) => { calls.stop.push(value); },
+        reveal: async (value: Task) => { calls.reveal.push(value); },
         updated: () => {},
         ...overrides,
       } as Parameters<typeof createPetTaskActionHandler>[0],
     };
   }
+
+  it("opens any task without touching the shared busy lock", async () => {
+    const { ports: hooks, calls, busy } = ports({
+      loadTask: async (id) => task({ id, agent: "dsh", status: "waiting", runId: null }),
+    });
+    const handler = createPetTaskActionHandler(hooks);
+    const opened = await handler({ requestId: "r1", taskId: "t1", runId: null, action: "open" });
+    expect(opened.ok).toBe(true);
+    expect(calls.reveal.map((value) => value.id)).toEqual(["t1"]);
+    // 打开是只读动作：不占锁，随后的停止请求会走到自己的校验（而不是被锁挡回）。
+    expect(busy.size).toBe(0);
+    const stopped = await handler({ requestId: "r2", taskId: "t1", runId: null, action: "stop" });
+    expect(stopped.ok).toBe(false);
+    expect(stopped.error).not.toContain("任务正在处理");
+  });
+
+  it("reports missing or archived tasks instead of opening them", async () => {
+    const { ports: hooks, calls } = ports({
+      loadTask: async (id) => (id === "gone" ? undefined : task({ id, archivedAt: 7 })),
+    });
+    const handler = createPetTaskActionHandler(hooks);
+    const missing = await handler({ requestId: "r1", taskId: "gone", runId: null, action: "open" });
+    expect(missing.ok).toBe(false);
+    const archived = await handler({ requestId: "r2", taskId: "old", runId: null, action: "open" });
+    expect(archived.ok).toBe(false);
+    expect(calls.reveal).toHaveLength(0);
+  });
+
+  it("surfaces reveal failures (main window busy with settings)", async () => {
+    const { ports: hooks } = ports({
+      reveal: async () => { throw new Error("主窗口正在处理设置操作，请稍后继续"); },
+    });
+    const handler = createPetTaskActionHandler(hooks);
+    const result = await handler({ requestId: "r1", taskId: "t1", runId: null, action: "open" });
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("设置操作");
+  });
 
   it("stops a live session and rejects stale run ids", async () => {
     const { ports: hooks, calls } = ports();

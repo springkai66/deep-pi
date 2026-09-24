@@ -2,6 +2,8 @@ export const SHORTCUTS = {
   tasks: { key: "p", primary: true, shift: true, scope: "host" },
   files: { key: "p", primary: true, shift: false, scope: "host" },
   settings: { key: ",", primary: true, shift: false, scope: "host" },
+  workspacePi: { key: "1", primary: true, shift: false, scope: "host" },
+  workspaceDsh: { key: "2", primary: true, shift: false, scope: "host" },
   sidebar: { key: "b", primary: true, shift: false, scope: "workspace" },
   composer: { key: "l", primary: true, shift: false, scope: "composer" },
   save: { key: "s", primary: true, shift: false, scope: "editor" },

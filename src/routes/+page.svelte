@@ -150,19 +150,12 @@
   let settingsOpen = $state(false);
   let shellOpen = $state(false);
   let settingsDialog = $state<HTMLElement>();
-  /**
-   * 控制柱悬停展开态：DSH 工作区下控制柱默认收起（把宽度让给原生 Webview），
-   * 鼠标移上去/键盘聚焦时展开，移走即收回。
-   */
-  let railExpanded = $state(false);
   let settingsCategory = $state<SettingsCategory>("general");
   let diagnosticsBusy = $state(false);
   let dshBusy = $state(false);
   let settingsPackageBusy = $state(false);
   let activeAgent = $state<"pi" | "dsh">("pi");
   let isDshStarting = $state(false);
-  /** DSH 工作区且未悬停时，控制柱收起成窄条（宽度让给原生 Webview）。 */
-  const railCollapsed = $derived(activeAgent === "dsh" && view === "workspace" && !railExpanded);
   let dshHostError = $state<string | null>(null);
   let dialogRequest = $state<DialogRequest | null>(null);
   const dialogs = createDialogQueue((request) => { dialogRequest = request; });
@@ -214,6 +207,16 @@
       activeAgent = "pi";
       boardView = false;
       applyTaskRestart(tasks.find((candidate) => candidate.id === task.id) ?? task, task);
+    },
+    // 桌宠气泡点击「打开」：把主窗口带到前台并定位任务——Pi 进任务面板，
+    // DSH 切到 DSH 视图（openTask 内部分流）。
+    reveal: async (task) => {
+      if (!canLeaveSettings()) throw new Error(t("主窗口正在处理设置操作，请稍后继续"));
+      const main = getCurrentWindow();
+      if (await main.isMinimized()) await main.unminimize();
+      await main.show();
+      await main.setFocus();
+      openTask(task);
     },
   });
   // Assigned through `bind:this` on the workspace element below; oxlint does not
@@ -375,6 +378,11 @@
       openedFile = null;
       openedDiff = null;
       void tick().then(() => { composerFocusToken++; });
+    }
+    else if (command === "workspacePi" || command === "workspaceDsh") {
+      // 设置对话框打开时顶栏整体 inert，键盘切换保持同一语义。
+      if (settingsOpen) return;
+      void (command === "workspacePi" ? showPi() : showDsh());
     }
     else sidebarVisible = !sidebarVisible;
   }
@@ -1013,8 +1021,8 @@
       : t("{id} 未安装", { id });
   }
 
-  /** 控制柱按钮的悬停提示：始终带可读说明，有运行时版本信息时追加在后面。 */
-  function railTitle(label: string, id: RuntimeComponent["id"]): string {
+  /** 工作区切换按钮的悬停提示：始终带可读说明，有运行时版本信息时追加在后面。 */
+  function workspaceTitle(label: string, id: RuntimeComponent["id"]): string {
     const runtime = runtimeTitle(id);
     return runtime ? `${label} · ${runtime}` : label;
   }
@@ -1449,27 +1457,17 @@
   </section>
 {/if}
 
-  <div style={`--sidebar-w:${sidebarWidth ?? 260}px; --files-w:${filesWidth ?? 260}px; --git-w:${gitWidth ?? 300}px`} class:dsh-mode={activeAgent === "dsh"} class:rail-closed={railCollapsed} class:sidebar-hidden={!showSidebar} class:files-hidden={!showFiles} class:files-visible={showFiles} class:git-visible={showGit} class="app-shell" inert={closingWindow || startupPending || !!startupFailure || settingsOpen} aria-busy={closingWindow || startupPending}>
-  <nav class="command-rail" class:rail-collapsed={railCollapsed}
-    aria-label={t("工作区导航")}
-    onmouseenter={() => { railExpanded = true; }}
-    onmouseleave={() => { railExpanded = false; }}
-    onfocusin={() => { railExpanded = true; }}
-    onfocusout={() => { railExpanded = false; }}>
-    <div class="rail-brand" title="DeepPi" aria-hidden="true">π</div>
-    <div class="rail-divider"></div>
-    <button type="button" class="rail-item" class:selected={activeAgent === "pi" && view === "workspace"}
-      aria-label={t("Pi 工作区")} aria-pressed={activeAgent === "pi" && view === "workspace"}
-      title={railTitle(t("Pi 工作区"), "pi")} onclick={showPi}><Bot size={18} /></button>
-    <button type="button" class="rail-item" class:selected={activeAgent === "dsh"}
-      aria-label={t("DSH 工作区")} aria-pressed={activeAgent === "dsh"}
-      title={railTitle(t("DSH 工作区"), "dsh")} onclick={showDsh}><Globe size={18} /></button>
-    <div class="rail-spacer"></div>
-    <button type="button" class="rail-item" class:selected={settingsOpen}
-      aria-label={t("设置")} aria-pressed={settingsOpen} aria-keyshortcuts={shortcutAria("settings")}
-      title={`${t("设置")} (${shortcutLabel("settings")})`} onclick={openSettings}><Settings2 size={18} /></button>
-  </nav>
+  <div style={`--sidebar-w:${sidebarWidth ?? 260}px; --files-w:${filesWidth ?? 260}px; --git-w:${gitWidth ?? 300}px`} class:dsh-mode={activeAgent === "dsh"} class:sidebar-hidden={!showSidebar} class:files-hidden={!showFiles} class:files-visible={showFiles} class:git-visible={showGit} class="app-shell" inert={closingWindow || startupPending || !!startupFailure || settingsOpen} aria-busy={closingWindow || startupPending}>
   <header class="topbar">
+    <!-- 工作区切换器：两种工作区下位置恒定，替代已删除的控制柱（ADR-0001）。 -->
+    <div class="workspace-switcher" role="group" aria-label={t("工作区切换")}>
+      <button type="button" class:selected={activeAgent === "pi"}
+        aria-label={t("Pi 工作区")} aria-pressed={activeAgent === "pi"}
+        title={workspaceTitle(t("Pi 工作区"), "pi")} onclick={showPi}><Bot size={14} /></button>
+      <button type="button" class:selected={activeAgent === "dsh"}
+        aria-label={t("DSH 工作区")} aria-pressed={activeAgent === "dsh"}
+        title={workspaceTitle(t("DSH 工作区"), "dsh")} onclick={showDsh}><Globe size={14} /></button>
+    </div>
     <div class="stage-crumbs">
       {#if activeAgent === "pi" && selectedProject}
         <span class="crumb-project"><span class="crumb-dot"></span>{selectedProject.name}</span>
@@ -1497,6 +1495,8 @@
         onclick={() => void openChecklistWindow()}><ClipboardList size={16} /></button>
       <button type="button" aria-label={t("桌宠")} title={t("显示桌宠")}
         onclick={() => void openPetWindow()}><Cat size={16} /></button>
+      <button type="button" aria-label={t("打开应用设置")} aria-keyshortcuts={shortcutAria("settings")}
+        title={`${t("设置")} (${shortcutLabel("settings")})`} onclick={openSettings}><Settings2 size={16} /></button>
     </div>
   </header>
   <aside class="project-sidebar" class:panel-hidden={!showSidebar} aria-label={t("项目侧栏")}>

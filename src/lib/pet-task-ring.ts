@@ -1,26 +1,37 @@
 /**
  * 桌宠任务环（纯几何 + 时序）。
  *
- * 气泡像花瓣一样围着桌宠本体排成一圈：浮层窗口（`pet-tasks`）是正方形，
- * 窗口中心与本体中心重合，气泡沿圆周均匀分布，圆周以内留给桌宠本体。
- * 本模块只做算术，不碰 DOM 也不碰 Tauri，便于直接覆盖边界情况：
- * 屏幕角落的半径收缩、单任务、满员、溢出角标的落位。
+ * 气泡像时钟刻度一样围着桌宠本体均匀排成一圈：浮层窗口（`pet-tasks`）是
+ * 正方形，窗口中心与本体中心重合，气泡沿圆周均匀分布，圆周以内留给本体。
+ * 相邻气泡的圆心距随半径增大，因此半径按「刻度数量」反推——任务越多，
+ * 气泡越窄、环越大，保证任何数量下气泡互不重叠、各自占住一个方向。
+ * 本模块只做算术，不碰 DOM 也不碰 Tauri。
  */
 
 import type { Task } from "./task";
 
 /** 浮层窗口逻辑边长（与 pet.rs 的 TASKS_SIZE 必须一致）。 */
-export const RING_WINDOW = 420;
-/** 窗口中心：本体中心在窗口内的锚点（本体贴窗口底部居中）。 */
+export const RING_WINDOW = 960;
+/** 窗口中心：本体中心与窗口中心重合（贴合窗口）。 */
 export const RING_CENTER = RING_WINDOW / 2;
-/** 气泡卡片尺寸（逻辑像素）；宽度同时是布局宽度与 CSS 宽度，两者必须一致。 */
+/** 最宽档的气泡宽度（≤7 个任务时）；宽度同时是布局宽度与 CSS 兜底宽度。 */
 export const RING_BUBBLE_WIDTH = 168;
 export const RING_BUBBLE_HEIGHT = 32;
-/** 环半径范围：上限由「气泡最宽处不超出窗口」反推，下限保证最坏情况下仍不与本体（视觉半径约 75）重叠。 */
+/** 环半径下限：保证最坏情况下仍不与本体（视觉半径约 75）重叠。 */
 export const RING_RADIUS_MIN = 110;
-export const RING_RADIUS_MAX = RING_WINDOW / 2 - RING_BUBBLE_WIDTH / 2;
+/** 环半径上限：最宽气泡贴窗口边缘再留 8px 余量。 */
+export const RING_RADIUS_MAX = 400;
+/** 相邻气泡圆心距至少比气泡宽度多出的间隙。 */
+const RING_GAP = 8;
+/**
+ * 目标半径：气泡宁可窄一点，也要让环贴近本体——刻度多时按这个半径反推
+ * 气泡宽度，而不是把环越推越远。
+ */
+const RING_RADIUS_TARGET = 175;
+/** 气泡宽度下限：再窄就读不出标题了，此时改由半径让步（环变大）。 */
+const RING_BUBBLE_WIDTH_MIN = 96;
 /** 环上最多的任务气泡数；超出的任务汇总成角标。 */
-export const RING_TASK_LIMIT = 6;
+export const RING_TASK_LIMIT = 20;
 
 /* ------------------------------------------------------------------ *
  * 时序
@@ -49,7 +60,6 @@ export function ringOverflowCount(total: number): number {
  * 超过上限时保留前 RING_TASK_LIMIT 个——先到先得的是「最需要你知道」的任务。
  */
 export function orderRingTasks(tasks: Task[]): Task[] {
-  const tiers = ["running", "waiting", "ended"] as const;
   const tierOf = (task: Task) =>
     task.status === "running" ? 0 : task.status === "waiting" ? 1 : 2;
   const recent = (task: Task) => task.completedAt ?? task.startedAt ?? task.createdAt ?? 0;
@@ -70,31 +80,50 @@ export function orderRingTasks(tasks: Task[]): Task[] {
  * 几何
  * ------------------------------------------------------------------ */
 
-/** 显示器物理区域 (x, y, width, height)。 */
-export type Monitor = [number, number, number, number];
+/**
+ * 气泡宽度按刻度数量反推：以「目标半径」下相邻气泡恰好不相邻为目标，
+ * 刻度越多气泡越窄（下限 96px），从而让环始终贴着本体——而不是靠把环
+ * 越推越远来避免重叠。刻度很少时回到最宽档 168px。
+ */
+export function ringBubbleWidth(slots: number): number {
+  if (slots <= 1) return RING_BUBBLE_WIDTH;
+  const fit = 2 * RING_RADIUS_TARGET * Math.sin(Math.PI / slots) - RING_GAP;
+  return Math.round(Math.max(RING_BUBBLE_WIDTH_MIN, Math.min(RING_BUBBLE_WIDTH, fit)));
+}
 
 /**
- * 自适应半径：本体中心到屏幕四边的最小可用距离决定环能有多大。
- * 贴边时收缩（下限 RING_RADIUS_MIN），宽裕时不超过 RING_RADIUS_MAX。
- * 没有显示器信息（查询失败）时按上限处理——此时宁可允许出屏，也不无故缩小。
+ * 不重叠所需的环半径：相邻气泡圆心距 = 2r·sin(π/slots)，须 ≥ 宽度 + 间隙。
+ * 单刻度（或 0）没有相邻概念，直接取下限；结果钳在 [下限, 上限] 内。
  */
-export function ringRadius(center: { x: number; y: number }, monitors: Monitor[]): number {
-  if (!monitors.length) return RING_RADIUS_MAX;
+export function ringNeededRadius(slots: number): number {
+  if (slots <= 1) return RING_RADIUS_MIN;
+  const width = ringBubbleWidth(slots);
+  const needed = Math.ceil((width + RING_GAP) / (2 * Math.sin(Math.PI / slots)));
+  return Math.max(RING_RADIUS_MIN, Math.min(RING_RADIUS_MAX, needed));
+}
+
+/**
+ * 环半径：按「不重叠所需半径」取值，钳在 [下限, 上限] 内。显示器信息
+ * 仅用于在贴边时进一步收缩（下限兜底），没有则按所需半径渲染。
+ */
+export function ringRadius(slots: number, monitors: [number, number, number, number][] = []): number {
+  const needed = ringNeededRadius(slots);
+  if (!monitors.length) return Math.min(needed, RING_RADIUS_MAX);
   const monitor = monitors.find(
     ([x, y, width, height]) =>
-      center.x >= x && center.x < x + width && center.y >= y && center.y < y + height,
+      RING_CENTER >= x && RING_CENTER < x + width && RING_CENTER >= y && RING_CENTER < y + height,
   );
-  if (!monitor) return RING_RADIUS_MAX;
+  if (!monitor) return Math.min(needed, RING_RADIUS_MAX);
   const [x, y, width, height] = monitor;
   const available = Math.min(
-    center.x - x,
-    x + width - center.x,
-    center.y - y,
-    y + height - center.y,
+    RING_CENTER - x,
+    x + width - RING_CENTER,
+    RING_CENTER - y,
+    y + height - RING_CENTER,
   );
   return Math.max(
     RING_RADIUS_MIN,
-    Math.min(RING_RADIUS_MAX, available - RING_BUBBLE_HEIGHT / 2),
+    Math.min(needed, RING_RADIUS_MAX, available - RING_BUBBLE_HEIGHT / 2),
   );
 }
 
@@ -120,6 +149,8 @@ export interface RingBubbleSlot extends RingSlot {
 
 export interface RingLayout {
   radius: number;
+  /** 本圈气泡的宽度（按刻度数量分档，见 ringBubbleWidth）。 */
+  bubbleWidth: number;
   bubbles: RingBubbleSlot[];
   /** 溢出角标：位置 + 剩余任务数；任务未超上限时为 null。 */
   badge: (RingSlot & { count: number }) | null;
@@ -131,19 +162,19 @@ export function ringStaggerMs(index: number, stepMs: number): number {
 }
 
 /**
- * 布局整圈：先定半径，再把任务和（可能的）溢出角标一起均匀铺在圆周上。
- * 有角标时它占正上方，任务从它两侧对称铺开——最后显示的是角标，
- * 「依次显示」讲的就是「一朵朵花开，最后告诉你还剩几朵」。
+ * 布局整圈：先按刻度数量定半径与气泡宽度，再把任务和（可能的）溢出角标
+ * 一起均匀铺在圆周上。有角标时它占最后一个位置——「依次显示」讲的就是
+ * 「一朵朵花开，最后告诉你还剩几朵」。
  */
 export function ringLayout(
   tasks: Task[],
-  center: { x: number; y: number },
-  monitors: Monitor[],
+  monitors: [number, number, number, number][] = [],
 ): RingLayout {
-  const radius = ringRadius(center, monitors);
   const visible = orderRingTasks(tasks);
   const overflow = ringOverflowCount(tasks.length);
   const slots = visible.length + (overflow > 0 ? 1 : 0);
+  const radius = ringRadius(slots, monitors);
+  const bubbleWidth = ringBubbleWidth(slots);
   const at = (index: number): RingSlot => {
     const angle = ringCenteredAngle(index, slots);
     return {
@@ -154,7 +185,7 @@ export function ringLayout(
   };
   const bubbles = visible.map((task, index) => ({ task, ...at(index) }));
   const badge = overflow > 0 ? { ...at(slots - 1), count: overflow } : null;
-  return { radius, bubbles, badge };
+  return { radius, bubbleWidth, bubbles, badge };
 }
 
 /** 入场总时长：最后一个元素的起始延迟 + 它自己的淡入。 */

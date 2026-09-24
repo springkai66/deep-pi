@@ -28,9 +28,13 @@ use crate::settings::SettingsStore;
 
 /// 桌宠窗口标签。能力清单（capabilities/pet-window.json）按它授权。
 pub const PET_LABEL: &str = "pet";
-/// 桌宠窗口尺寸（物理像素近似值；逻辑像素按 DPI 换算的差异可接受）。
-pub const PET_WIDTH: u32 = 210;
-pub const PET_HEIGHT: u32 = 240;
+/// 桌宠窗口尺寸（逻辑像素）：贴合默认形象的不透明区域。默认 GIF 为
+/// 500×500、不透明边界 303×307（居中），按 150×150 显示（×0.3）后本体
+/// 约 91×92；四周只留功能余量——左右各 4px（摇摆动画）、顶部 24px
+/// （庆祝跳跃腾空 + 关闭按钮留白）、底部 3px（贴地），即 91+8 × 92+24+3。
+/// 自定义形象由前端量取不透明边界后调用 fit_pet_window 动态贴合。
+pub const PET_WIDTH: u32 = 99;
+pub const PET_HEIGHT: u32 = 119;
 /// 默认停靠边距：右缘留 24px，底部留 88px（常见任务栏高度 + 余量）。
 const DEFAULT_MARGIN_RIGHT: i32 = 24;
 const DEFAULT_MARGIN_BOTTOM: i32 = 88;
@@ -350,15 +354,11 @@ fn default_pet_position(width: u32, height: u32, monitors: &[(i32, i32, u32, u32
     clamp_pet_position(x, y, width, height, monitors)
 }
 
-/// 桌宠本体（图片区域）中心在窗口内的锚点（逻辑像素）：窗口 210×240，
-/// 本体 150×150 贴底居中、底部留白 10px → 中心 ≈ (105, 155)。壁纸点击
-/// 坐标（物理）减去锚点×缩放即窗口左上角目标位置。
-const ANCHOR_X: f64 = 105.0;
-const ANCHOR_Y: f64 = 155.0;
 /// 独立任务环浮层：不再通过改变桌宠窗口大小展开，避免透明 WebView 闪烁。
 /// 窗口是正方形，边长固定；中心与本体中心重合，气泡沿圆周排布。
+/// 边长按「20 个刻度不重叠」反推（见前端 pet-task-ring.ts 的 RING_WINDOW）。
 pub const PET_TASKS_LABEL: &str = "pet-tasks";
-const TASKS_SIZE: f64 = 420.0;
+const TASKS_SIZE: f64 = 960.0;
 static TASKS_BUILD_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Serialize)]
@@ -387,18 +387,65 @@ pub fn get_pet_task_hover() -> Result<PetTaskHover, String> {
         .map_err(|error| error.to_string())
 }
 
-/// 壁纸点击坐标（物理）→ 桌宠窗口左上角目标位置（物理，锚定本体中心
-/// 并钳进屏幕）。
+/// 壁纸点击坐标（物理）→ 桌宠窗口左上角目标位置（物理）。窗口贴合本体后
+/// 本体中心即窗口中心：左上角 = 光标 − 物理尺寸的一半，再钳进屏幕。
 pub(crate) fn anchored_pet_position(app: &AppHandle, cursor_x: i32, cursor_y: i32) -> (i32, i32) {
     let scale = cached_pet_scale();
+    let size = physical_pet_size(scale);
     let monitors = collect_monitors(app);
-    clamp_pet_position(
-        cursor_x - (ANCHOR_X * scale).round() as i32,
-        cursor_y - (ANCHOR_Y * scale).round() as i32,
-        physical_pet_size(scale).0,
-        physical_pet_size(scale).1,
-        &monitors,
-    )
+    let (x, y) = anchored_window_origin((cursor_x, cursor_y), size);
+    clamp_pet_position(x, y, size.0, size.1, &monitors)
+}
+
+/// 窗口中心对准光标：左上角 = 光标 − 物理尺寸的一半。
+fn anchored_window_origin(cursor: (i32, i32), physical: (u32, u32)) -> (i32, i32) {
+    (cursor.0 - physical.0 as i32 / 2, cursor.1 - physical.1 as i32 / 2)
+}
+
+/// 前端量取形象不透明边界后请求贴合：把窗口缩放到 {width,height}（逻辑
+/// 像素），同时平移位置使「窗口中心」不动——贴合窗口的本体中心即窗口
+/// 中心，本体在屏幕上就原地缩放，不发生跳动。
+#[tauri::command]
+pub async fn fit_pet_window(
+    webview: tauri::Webview,
+    app: AppHandle,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    if webview.label() != PET_LABEL {
+        return Err("pet window fit requires the pet webview".into());
+    }
+    // 量测异常（极小/超大）时拒绝，维持当前窗口，宁可留白也不裁掉本体。
+    if !width.is_finite() || !height.is_finite()
+        || !(32.0..=320.0).contains(&width)
+        || !(32.0..=320.0).contains(&height)
+    {
+        return Err("pet fit size out of range".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(pet) = app.get_webview_window(PET_LABEL) else {
+            return Ok(());
+        };
+        let scale = pet.scale_factor().map_err(|error| error.to_string())?;
+        let position = pet.outer_position().map_err(|error| error.to_string())?;
+        let size = pet.inner_size().map_err(|error| error.to_string())?;
+        let new_width = (width * scale).round() as i32;
+        let new_height = (height * scale).round() as i32;
+        // 尺寸未变（含 ±1px 的 DPI 取整差）时不动，避免开机重复调整。
+        if (size.width as i32 - new_width).abs() <= 1
+            && (size.height as i32 - new_height).abs() <= 1
+        {
+            return Ok(());
+        }
+        pet.set_size(LogicalSize::new(width, height))
+            .map_err(|error| error.to_string())?;
+        let x = position.x + (size.width as i32 - new_width) / 2;
+        let y = position.y + (size.height as i32 - new_height) / 2;
+        pet.set_position(PhysicalPosition::new(x, y))
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 /// 确保任务浮层存在（幂等）：已存在返回 false；桌宠窗口缺失时不建。
@@ -475,9 +522,9 @@ pub async fn set_pet_ring(app: AppHandle, open: bool) -> Result<(), String> {
 
 /// 浮层窗口左上角（物理像素）：窗口中心对齐桌宠窗口中心。
 ///
-/// 本体在其窗口内贴底居中，而窗口整体只有 210×240，所以「窗口中心」与
-/// 「本体中心」相差不到一个本体的高度——环照样把本体围在正中。这里刻意
-/// **不钳位**：钳位会让窗口中心偏离本体中心，圈就歪了，与「环绕桌宠」
+/// 窗口贴合本体后，本体中心与窗口中心重合（顶部动画余量带来约 7px 的
+/// 固定偏差，相对 110px 起的环半径可忽略），环正好把本体围在正中。这里
+/// 刻意**不钳位**：钳位会让窗口中心偏离本体中心，圈就歪了，与「环绕桌宠」
 /// 的前提直接冲突。允许窗口探出屏幕，让贴边一侧的气泡自然被裁掉即可。
 fn ring_window_position(pet: (i32, i32, u32, u32), size: (u32, u32)) -> (i32, i32) {
     let (x, y, width, height) = pet;
@@ -835,12 +882,15 @@ mod tests {
         // 主显示器 1920×1080：桌宠贴右下角时不出屏。
         let monitors = [(0, 0, 1920, 1080)];
         assert_eq!(
-            clamp_pet_position(5000, 5000, 210, 240, &monitors),
-            (1920 - 210, 1080 - 240)
+            clamp_pet_position(5000, 5000, PET_WIDTH, PET_HEIGHT, &monitors),
+            (1920 - PET_WIDTH as i32, 1080 - PET_HEIGHT as i32)
         );
-        assert_eq!(clamp_pet_position(-50, -50, 210, 240, &monitors), (0, 0));
         assert_eq!(
-            clamp_pet_position(100, 100, 210, 240, &monitors),
+            clamp_pet_position(-50, -50, PET_WIDTH, PET_HEIGHT, &monitors),
+            (0, 0)
+        );
+        assert_eq!(
+            clamp_pet_position(100, 100, PET_WIDTH, PET_HEIGHT, &monitors),
             (100, 100)
         );
     }
@@ -850,47 +900,60 @@ mod tests {
         // 左侧负坐标副屏：中心落在其内 → 钳进副屏。
         let monitors = [(-1920, 0, 1920, 1080), (0, 0, 1920, 1080)];
         assert_eq!(
-            clamp_pet_position(-2000, 100, 210, 240, &monitors),
+            clamp_pet_position(-2000, 100, PET_WIDTH, PET_HEIGHT, &monitors),
             (-1920, 100)
         );
         // 中心在所有屏幕之外最远处 → 最近的主屏。
         assert_eq!(
-            clamp_pet_position(9000, 100, 210, 240, &monitors),
-            (1920 - 210, 100)
+            clamp_pet_position(9000, 100, PET_WIDTH, PET_HEIGHT, &monitors),
+            (1920 - PET_WIDTH as i32, 100)
         );
     }
 
     #[test]
     fn pins_to_monitor_origin_when_monitor_is_smaller_than_pet() {
-        let monitors = [(0, 0, 100, 80)];
-        assert_eq!(clamp_pet_position(10, 10, 210, 240, &monitors), (0, 0));
+        let monitors = [(0, 0, 50, 80)];
+        assert_eq!(
+            clamp_pet_position(10, 10, PET_WIDTH, PET_HEIGHT, &monitors),
+            (0, 0)
+        );
     }
 
     #[test]
     fn passes_through_without_monitors() {
-        assert_eq!(clamp_pet_position(-7, 9, 210, 240, &[]), (-7, 9));
+        assert_eq!(
+            clamp_pet_position(-7, 9, PET_WIDTH, PET_HEIGHT, &[]),
+            (-7, 9)
+        );
     }
 
     #[test]
     fn defaults_to_bottom_right_of_primary_monitor() {
         let monitors = [(-1920, 0, 1920, 1080), (0, 0, 1920, 1080)];
-        let (x, y) = default_pet_position(210, 240, &monitors);
-        assert_eq!(x, 1920 - 210 - 24);
-        assert_eq!(y, 1080 - 240 - 88);
+        let (x, y) = default_pet_position(PET_WIDTH, PET_HEIGHT, &monitors);
+        assert_eq!(x, 1920 - PET_WIDTH as i32 - 24);
+        assert_eq!(y, 1080 - PET_HEIGHT as i32 - 88);
     }
 
     #[test]
     fn ring_window_centers_on_the_pet_without_clamping() {
         // 屏幕中央：浮层中心与桌宠窗口中心重合。
         assert_eq!(
-            ring_window_position((500, 600, 210, 240), (420, 420)),
-            (500 + 105 - 210, 600 + 120 - 210)
+            ring_window_position((500, 600, PET_WIDTH, PET_HEIGHT), (420, 420)),
+            (
+                500 + PET_WIDTH as i32 / 2 - 210,
+                600 + PET_HEIGHT as i32 / 2 - 210
+            )
         );
         // 默认停靠点（主屏右下角）：刻意不钳进屏幕——钳位会让圈偏离本体中心，
         // 与「环绕桌宠」冲突；贴边一侧的气泡让窗口探出屏幕即可。
+        let docked = default_pet_position(PET_WIDTH, PET_HEIGHT, &[(0, 0, 1920, 1080)]);
         assert_eq!(
-            ring_window_position((1686, 752, 210, 240), (420, 420)),
-            (1686 + 105 - 210, 752 + 120 - 210)
+            ring_window_position((docked.0, docked.1, PET_WIDTH, PET_HEIGHT), (420, 420)),
+            (
+                docked.0 + PET_WIDTH as i32 / 2 - 210,
+                docked.1 + PET_HEIGHT as i32 / 2 - 210
+            )
         );
         // 负坐标的多显示器：同样只做居中换算。
         assert_eq!(
@@ -901,13 +964,13 @@ mod tests {
 
     #[test]
     fn ring_window_center_matches_its_expected_size() {
-        assert_eq!(TASKS_SIZE, 420.0);
+        assert_eq!(TASKS_SIZE, 960.0);
         // 浮层窗口尺寸必须与前端 pet-task-ring.ts 的 RING_WINDOW 一致：
         // 前端按窗口中心排版，后端按窗口中心定位。
         let frontend =
             std::fs::read_to_string("../src/lib/pet-task-ring.ts").expect("read pet-task-ring.ts");
         assert!(
-            frontend.contains("export const RING_WINDOW = 420"),
+            frontend.contains("export const RING_WINDOW = 960"),
             "RING_WINDOW must mirror TASKS_SIZE: {frontend}"
         );
     }
@@ -973,10 +1036,26 @@ mod tests {
     }
 
     #[test]
-    fn anchors_cursor_to_figure_center() {
-        // 锚点 = 本体中心：窗口左上角 = 点击坐标 − (105, 155)×缩放。
-        assert_eq!(ANCHOR_X, 105.0);
-        assert_eq!(ANCHOR_Y, 155.0);
+    fn anchors_cursor_to_window_center() {
+        // 窗口贴合本体后本体中心即窗口中心：左上角 = 光标 − 物理尺寸的一半。
+        assert_eq!(
+            anchored_window_origin((500, 600), (PET_WIDTH, PET_HEIGHT)),
+            (500 - PET_WIDTH as i32 / 2, 600 - PET_HEIGHT as i32 / 2)
+        );
+        // 奇数尺寸向下取整：99/2 = 49。
+        assert_eq!(anchored_window_origin((0, 0), (99, 113)), (-49, -56));
+    }
+
+    #[test]
+    fn default_size_matches_frontend_fit_defaults() {
+        // 后端开窗尺寸必须与前端贴合兜底值一致（默认形象量测结果）：
+        // 前端在量测完成前按这组 CSS 变量渲染，避免开窗瞬间跳变。
+        let page =
+            std::fs::read_to_string("../src/routes/pet/+page.svelte").expect("read pet page");
+        assert!(
+            page.contains("var(--fit-w, 99px)") && page.contains("var(--fit-h, 119px)"),
+            "frontend fit fallback must mirror PET_WIDTH/PET_HEIGHT: {page}"
+        );
     }
 
     #[test]

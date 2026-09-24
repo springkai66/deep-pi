@@ -8,7 +8,7 @@
  */
 
 import type { Task } from "./task";
-import { canStopPetTask, visiblePetTasks, type PetTaskAction } from "./pet-task-actions";
+import { canOpenPetTask, canStopPetTask, visiblePetTasks, type PetTaskAction } from "./pet-task-actions";
 import { ringOverflowCount } from "./pet-task-ring";
 
 export interface PetTaskBubblesState {
@@ -266,9 +266,11 @@ export function createPetTaskBubbles(ports: Ports, options: PetTaskBubblesOption
 
   async function act(action: PetTaskAction, task: Task) {
     if (disposed || pending.has(task.id)) return;
-    if (!canStopPetTask(task)) return;
+    if (action === "stop" && !canStopPetTask(task)) return;
+    if (action === "open" && !canOpenPetTask(task)) return;
     pending.add(task.id);
-    retained.add(task.id); // Keep a stopped task's bubble available for its end notice.
+    // 被停止的任务要留在环上把结果讲完；打开只是跳转，不需要保留项。
+    if (action === "stop") retained.add(task.id);
     ++readVersion; // A pre-action snapshot must not overwrite the action result.
     clearTimeout(leaveTimer);
     actionErrors.delete(task.id);
@@ -283,9 +285,9 @@ export function createPetTaskBubbles(ports: Ports, options: PetTaskBubblesOption
       await refresh();
       pending.delete(task.id);
       publish({});
-      // 指针已经离开：补一次退场。动作进行中 leave() 只登记了意图，
-      // 没有真的开始退场——这里不补，环就会一直挂在屏幕上。
-      if (!inside && !hasActionError()) void close();
+      // 打开成功即由主窗口接管：环退场。失败则留在环上把原因讲完；
+      // 停止动作沿用原规则——指针已经离开就补一次退场。
+      if (!hasActionError() && (action === "open" || !inside)) void close();
     }
   }
 

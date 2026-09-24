@@ -156,6 +156,7 @@ export const EN_CHAT: Record<string, string> = {
   "高级与诊断": "Advanced & Diagnostics",
 
   // —— 设置页：通用 ——
+  "关于": "About",
   "应用行为": "App behavior",
   "关闭窗口": "Close window",
   "关闭窗口行为": "Close window behavior",

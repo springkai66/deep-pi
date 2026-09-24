@@ -1,4 +1,5 @@
-export type NavigationCommand = "tasks" | "files" | "settings" | "sidebar" | "composer";
+export type NavigationCommand =
+  | "tasks" | "files" | "settings" | "sidebar" | "composer" | "workspacePi" | "workspaceDsh";
 
 export function matchesSearch(value: string, query: string): boolean {
   const needle = Array.from(query.trim().toLocaleLowerCase());

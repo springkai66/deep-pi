@@ -25,7 +25,7 @@ function task(overrides: Partial<Task> & { id: string }): Task {
 function harness(options: Parameters<typeof createPetTaskBubbles>[1] = {}) {
   const states: PetTaskBubblesState[] = [];
   const resizes: { open: boolean; force: boolean }[] = [];
-  const actions: { id: string }[] = [];
+  const actions: { id: string; action: string }[] = [];
   let nextTasks: Task[] = [];
   let loadFailure: string | null = null;
   let gateLoad = false;
@@ -45,8 +45,8 @@ function harness(options: Parameters<typeof createPetTaskBubbles>[1] = {}) {
       if (!gateResize) return Promise.resolve();
       return new Promise((resolve, reject) => resizeQueue.push({ resolve, reject }));
     },
-    action: async (_action, value) => {
-      actions.push({ id: value.id });
+    action: async (kind, value) => {
+      actions.push({ id: value.id, action: kind });
       if (actionFailure) throw new Error(actionFailure);
       if (gateAction) await new Promise<void>((resolve) => actionQueue.push(resolve));
     },
@@ -169,7 +169,7 @@ describe("pet task bubble controller", () => {
     await tick();
     // 动作结束后指针已经离开：补上退场，不允许环挂在屏幕上。
     expect(app.states.at(-1)?.leaving).toBe(true);
-    expect(app.actions).toEqual([{ id: "t1" }]);
+    expect(app.actions).toEqual([{ id: "t1", action: "stop" }]);
     expect(app.resizes.filter((resize) => !resize.open)).toHaveLength(0);
     await app.bubbles.finishClose();
     await tick();
@@ -193,7 +193,7 @@ describe("pet task bubble controller", () => {
     app.resolveLoads([task({ id: "post-action" })]);
     await acting;
     expect(app.states.at(-1)?.tasks.map((value) => value.id)).toEqual(["post-action"]);
-    expect(app.actions).toEqual([{ id: "t1" }]);
+    expect(app.actions).toEqual([{ id: "t1", action: "stop" }]);
   });
 
   it("rolls the native window back when opening fails", async () => {
@@ -407,6 +407,43 @@ describe("per-task action errors", () => {
     app.failActions(null);
     await app.bubbles.act("stop", task({ id: "t1" }));
     expect(app.states.at(-1)?.actionErrors.t1).toBeUndefined();
-    expect(app.actions).toEqual([{ id: "t1" }, { id: "t1" }]);
+    expect(app.actions).toEqual([
+      { id: "t1", action: "stop" },
+      { id: "t1", action: "stop" },
+    ]);
+  });
+
+  it("opens any non-archived task and retires the ring on success", async () => {
+    const app = harness();
+    const entering = app.bubbles.enter();
+    await tick();
+    await entering;
+    app.setTasks([task({ id: "dsh-1", agent: "dsh", status: "waiting", runId: null })]);
+    await app.bubbles.act("open", task({ id: "dsh-1", agent: "dsh", status: "waiting", runId: null }));
+    await tick();
+    expect(app.actions).toEqual([{ id: "dsh-1", action: "open" }]);
+    // 打开成功后主窗口接管：环直接退场，不再挂在桌面上。
+    expect(app.states.at(-1)?.leaving).toBe(true);
+  });
+
+  it("ignores open requests for archived tasks", async () => {
+    const app = harness();
+    const entering = app.bubbles.enter();
+    await tick();
+    await entering;
+    await app.bubbles.act("open", task({ id: "old", archivedAt: 7 }));
+    expect(app.actions).toEqual([]);
+  });
+
+  it("keeps the ring open when opening fails so the reason stays visible", async () => {
+    const app = harness();
+    const entering = app.bubbles.enter();
+    await tick();
+    await entering;
+    app.setTasks([task({ id: "t1" })]);
+    app.failActions("主窗口正在处理设置操作");
+    await app.bubbles.act("open", task({ id: "t1" }));
+    expect(app.states.at(-1)?.actionErrors.t1).toContain("设置操作");
+    expect(app.states.at(-1)?.leaving).toBe(false);
   });
 });
