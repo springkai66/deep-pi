@@ -6,17 +6,20 @@
 //! 因此手动模式必须同时注入该变量；ureq/reqwest（更新器、市场、运行时下载）
 //! 则从进程环境变量读取。
 //!
-//! 三种模式的目标行为：
-//! - 跟随系统：优先读取代理环境变量；未设置时检测 Windows 系统代理
-//!   （注册表 `Internet Settings`，要求 `ProxyEnable=1`，避免残留配置劫持
-//!   全部流量），把结果注入子进程并交给各 HTTP 客户端。TUN 模式在网络层
-//!   透明接管，无需（也无法）在应用层干预。
-//! - 直连：清除全部代理变量；宿主进程额外写入 `NO_PROXY=*`，让不走
-//!   `apply_to_command` 的 in-process 客户端（tauri 更新器的 reqwest）也直连。
+//! 两种模式的目标行为：
+//! - 跟随系统（默认）：以 Windows 当前已启用的系统代理设置为准，不受继承的旧
+//!   HTTP_PROXY 或 `ProxyEnable=0` 的残留 ProxyServer 劫持；系统未启用显式
+//!   代理时走 OS 网络栈，透明 TUN 仍可接管流量。
 //! - 手动：显式地址 + `NODE_USE_ENV_PROXY=1` + NO_PROXY。
+//! 旧版 direct 设置在读取时迁移到跟随系统，不再作为单独的选项。
 //!
 //! 例外地址始终合并本地默认（localhost/127.0.0.1/::1/[::1]），否则开启代理后
 //! 本地目标（DSH 本地 API、Ollama 等本地 Provider）会被错误送进代理。
+//!
+//! 中继（`crate::proxy_relay`）：子进程的代理环境在 spawn 那一刻冻结，DSH 侧的
+//! 代理策略在进程启动时也只解析一次，所以「切换模式」本身无法触达已运行的子
+//! 进程。应用运行中会把两种模式的子进程统一指向一个本机回环中继，地址恒定；
+//! 切换模式只改中继的上游，已运行的 DSH/Pi 会话立即改走新路径，无需重启。
 
 use std::{
     process::Command,
@@ -26,6 +29,7 @@ use std::{
 
 use tauri::Url;
 
+use crate::proxy_relay::Upstream;
 use crate::settings::AppSettings;
 
 /// 手动模式允许的代理地址最长长度。
@@ -46,8 +50,6 @@ const PROXY_VARIABLES: [&str; 8] = [
 ];
 /// 手动/跟随系统注入时写入代理地址的键。
 const PROXY_ADDRESS_KEYS: [&str; 4] = ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"];
-/// 判断「环境已有代理」时检查的键（与 pi 桥接注入的判定保持一致）。
-const PROXY_ENV_LOOKUP_KEYS: [&str; 4] = ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"];
 /// 例外地址本地默认：本地目标永不经代理，本地 Provider/DSH 不因代理而失联。
 const LOCAL_NO_PROXY_DEFAULTS: [&str; 4] = ["localhost", "127.0.0.1", "::1", "[::1]"];
 
@@ -72,18 +74,12 @@ static STATE: RwLock<ProxyState> = RwLock::new(ProxyState {
     saved_env: Vec::new(),
 });
 
-/// 规范化代理模式；未知值回落 `system`（跟随进程/系统环境变量）。
+/// 仅保留「跟随系统」与「手动」；旧版 direct 设置迁移到 system。
 pub fn normalize_mode(mode: &str) -> &'static str {
     match mode {
-        "direct" => "direct",
         "manual" => "manual",
         _ => "system",
     }
-}
-
-/// 当前生效的代理模式（规范化后）。
-pub(crate) fn current_mode() -> &'static str {
-    normalize_mode(&snapshot().mode)
 }
 
 /// 校验手动代理地址：`scheme://host[:port]`，允许 http/https，不允许凭据与查询串。
@@ -157,18 +153,6 @@ fn restore_env(saved: &[(String, Option<String>)]) {
     }
 }
 
-/// 恢复保存的、新模式不再管理的键（手动模式不管 ALL_PROXY）。
-fn restore_unmanaged(saved: &[(String, Option<String>)], managed: &[&str]) {
-    for (key, value) in saved {
-        if !managed.contains(&key.as_str()) {
-            match value {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
-            }
-        }
-    }
-}
-
 /// 合并多份例外地址列表与本地默认，去重保序。
 fn merged_no_proxy(parts: &[&str]) -> String {
     let mut entries: Vec<&str> = Vec::new();
@@ -214,8 +198,8 @@ pub fn configure(settings: &AppSettings) {
         .unwrap_or_default();
     let mut saved = old_saved;
     if state.mode == "system" {
-        // 切回「跟随系统」：恢复用户原始环境（同时清掉我们写入的键），
-        // 避免模式切换永久丢失用户自设的代理环境变量。
+        // 离开手动代理时先恢复原环境，再按**当前系统设置**决定出网；
+        // 恢复的旧 HTTP_PROXY 不能被误当作系统仍启用的代理。
         if !saved.is_empty() {
             restore_env(&saved);
             saved = Vec::new();
@@ -237,63 +221,66 @@ pub fn configure(settings: &AppSettings) {
                 std::env::set_var(key, &state.url);
             }
             set_no_proxy(&combined_no_proxy(&state.no_proxy));
-            // ALL_PROXY 不由手动模式管理：恢复用户原始值。
-            restore_unmanaged(
-                &saved,
-                &[
-                    "HTTP_PROXY",
-                    "HTTPS_PROXY",
-                    "http_proxy",
-                    "https_proxy",
-                    "NO_PROXY",
-                    "no_proxy",
-                ],
-            );
-        }
-        "direct" => {
-            for key in PROXY_VARIABLES {
+            // ALL_PROXY 若继承旧代理会抢走手动请求；清除两套大小写环境变量。
+            for key in ["ALL_PROXY", "all_proxy"] {
                 remove_var(key);
             }
-            // in-process 的 reqwest（tauri 更新器）每次请求都重建客户端并读取
-            // 环境变量；`*` 匹配所有主机，直连语义下让它无视系统代理。
-            set_no_proxy("*");
         }
-        // system：进程环境已恢复原样（含用户自设变量），交给 env/注册表检测。
-        _ => {}
+        // 跟随系统不继承启动器的旧代理环境：明确映射已启用的系统配置，
+        // 若没有显式系统代理就让进程直接走 OS 网络栈（含透明 TUN）。
+        _ => match detect_system_proxy() {
+            Some(url) => {
+                for key in PROXY_ADDRESS_KEYS {
+                    std::env::set_var(key, &url);
+                }
+                for key in ["ALL_PROXY", "all_proxy"] {
+                    remove_var(key);
+                }
+                set_no_proxy(&combined_no_proxy(&state.no_proxy));
+            }
+            None => {
+                for key in PROXY_VARIABLES {
+                    remove_var(key);
+                }
+                // reqwest 可自行读取 WinINET/环境代理；`*` 确保系统代理关闭
+                // 时不被进程残值重定向，底层 TUN 仍会照常接管真实出网。
+                set_no_proxy("*");
+                // PAC/WPAD 生效时注册表里没有静态 ProxyServer，上面的分支会走到
+                // 这里。子进程仍然正确（它们指向按目标求值的中继），但宿主进程内
+                // 的 ureq/reqwest 无法求值 PAC，此时按 OS 网络栈直连。
+                if crate::system_proxy::has_dynamic_proxy_config() {
+                    log::info!(
+                        "event=proxy_mode status=system dynamic_proxy_config kind=pac_or_autodetect \
+                         note=in_process_clients_use_os_route"
+                    );
+                }
+            }
+        },
     }
+    // 状态与环境都已就位，再把中继上游切到新模式的等效值。已经建立的中继监听
+    // socket 不变，新连接立即走新上游——这就是「切模式不重启子进程」的实现点。
+    let current = snapshot();
+    let system = system_injection_for(&current);
+    crate::proxy_relay::set_global_upstream(effective_upstream(&current, &system));
 }
 
 /// 跟随系统模式下子进程的注入决策（纯函数，便于测试）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SystemInjection {
-    /// 环境已有代理变量：尊重现有配置，补 `NODE_USE_ENV_PROXY=1`（否则
-    /// Node 24 的 fetch 会无视代理环境变量），并合并例外地址（环境已有的
-    /// NO_PROXY + 用户设置 + 本地默认），保证本地目标仍绕过代理。
-    RespectEnv { no_proxy: String },
     /// 环境无代理变量但系统代理可用：注入完整代理环境（含合并后的 NO_PROXY）。
     UseSystemProxy { url: String, no_proxy: String },
     /// 环境与系统都没有代理：不注入。
     None,
 }
 
-/// 决策「跟随系统」模式给子进程注入的代理环境。
-/// `lookup` 读取进程环境变量；`system_proxy` 为严格检测（ProxyEnable=1）结果。
+/// 决策「跟随系统」模式的代理：以 Windows 已启用的系统设置为准，绝不让
+/// 继承的 HTTP_PROXY 或 ProxyEnable=0 的注册表残值覆盖系统当前网络路径。
+/// `lookup` 保留为注入式测试入口；进程环境在此模式下不是系统设置的来源。
 pub(crate) fn decide_system_injection(
-    lookup: &dyn Fn(&str) -> Option<String>,
+    _lookup: &dyn Fn(&str) -> Option<String>,
     system_proxy: Option<String>,
     user_no_proxy: &str,
 ) -> SystemInjection {
-    for key in PROXY_ENV_LOOKUP_KEYS {
-        if lookup(key).is_some_and(|value| !value.trim().is_empty()) {
-            let env_no_proxy = ["NO_PROXY", "no_proxy"]
-                .iter()
-                .find_map(|key| lookup(key).filter(|value| !value.trim().is_empty()))
-                .unwrap_or_default();
-            return SystemInjection::RespectEnv {
-                no_proxy: merged_no_proxy(&[&env_no_proxy, user_no_proxy]),
-            };
-        }
-    }
     match system_proxy {
         Some(url) => SystemInjection::UseSystemProxy {
             url,
@@ -311,49 +298,139 @@ fn system_injection_for(state: &ProxyState) -> SystemInjection {
     )
 }
 
+/// 跟随系统/手动模式的中继上游。系统设置已关闭时经 OS 网络栈出网（TUN
+/// 仍可透明接管），绝不因为环境里还留着 HTTP_PROXY 就使用旧代理端口。
+fn upstream_for(state: &ProxyState, system: &SystemInjection) -> Upstream {
+    if state.mode == "manual" {
+        return match state.url.trim() {
+            "" => Upstream::Direct,
+            url => Upstream::ViaProxy(url.to_owned()),
+        };
+    }
+    match system {
+        SystemInjection::UseSystemProxy { url, .. } => Upstream::ViaProxy(url.clone()),
+        SystemInjection::None => Upstream::Direct,
+    }
+}
+
+fn effective_upstream(state: &ProxyState, system: &SystemInjection) -> Upstream {
+    upstream_for(state, system)
+}
+
+/// 每条新中继连接都重新读取当前系统设置，并**按目标**解析路由：用户在 Windows
+/// 中开/关代理、改 PAC、或不同协议走不同代理时，都不必重启 DeepPi 或 DSH。
+/// 初始化前返回 None，让中继保留自己的默认上游。
+pub(crate) fn live_upstream_for(target: &str) -> Option<Upstream> {
+    let state = snapshot();
+    if state.mode.is_empty() {
+        return None;
+    }
+    if state.mode == "manual" {
+        return Some(upstream_for(&state, &SystemInjection::None));
+    }
+    // 系统模式以 Windows 当前启用的设置为准：含按协议分流、PAC/WPAD 与例外
+    // 列表。`Unsupported` 原样交给中继（它返回 502），不能退化成直连——那会在
+    // 用户以为在走代理时把流量泄漏出去。
+    Some(match crate::system_proxy::resolve(target) {
+        crate::system_proxy::Route::Direct => Upstream::Direct,
+        crate::system_proxy::Route::HttpProxy(url) => Upstream::ViaProxy(url),
+        crate::system_proxy::Route::Unsupported(reason) => Upstream::Unsupported(reason),
+    })
+}
+
+/// 子进程应指向的中继地址。中继未启动、或当前上游不被中继支持（例如
+/// `https://` 上游代理）时返回 `None`，调用方回落到既有注入行为。
+///
+/// 上游不被支持时「切换模式无需重启子进程」这个性质**不成立**（子进程拿到的
+/// 仍是真实地址），所以中继在运行的情况下必须留痕，否则这个折扣是隐形的。
+fn child_relay_url(state: &ProxyState, system: &SystemInjection) -> Option<String> {
+    if !effective_upstream(state, system).is_relay_supported() {
+        if crate::proxy_relay::global_port().is_some() {
+            log::warn!("event=proxy_relay status=unsupported_upstream kind=https_or_invalid");
+        }
+        return None;
+    }
+    crate::proxy_relay::global_url()
+}
+
 /// 子进程环境操作：Command 与 portable-pty 的 CommandBuilder 共用。
 enum EnvOp {
     Set(&'static str, String),
     Remove(&'static str),
 }
 
+/// 中继运行时子进程的代理环境：两种模式一律指向同一个回环中继，地址恒定。
+fn relay_env_ops(relay_url: &str, no_proxy: &str) -> Vec<EnvOp> {
+    let mut ops: Vec<EnvOp> = PROXY_ADDRESS_KEYS
+        .into_iter()
+        .map(|key| EnvOp::Set(key, relay_url.to_owned()))
+        .collect();
+    // ALL_PROXY 不由模式管理，但部分客户端会优先使用它；中继存在时留着它会让
+    // 子进程绕过中继，模式切换就重新变得不可控，因此显式清除。
+    ops.push(EnvOp::Remove("ALL_PROXY"));
+    ops.push(EnvOp::Remove("all_proxy"));
+    ops.push(EnvOp::Set("NODE_USE_ENV_PROXY", "1".into()));
+    ops.push(EnvOp::Set("NO_PROXY", no_proxy.to_owned()));
+    ops.push(EnvOp::Set("no_proxy", no_proxy.to_owned()));
+    ops
+}
+
+/// 跟随系统不继承启动器的 NO_PROXY（可能是过期的 *），只合并设置及本地例外。
+fn relay_no_proxy(state: &ProxyState, system: &SystemInjection) -> String {
+    match system {
+        SystemInjection::UseSystemProxy { no_proxy, .. } if state.mode != "manual" => {
+            no_proxy.clone()
+        }
+        _ => combined_no_proxy(&state.no_proxy),
+    }
+}
+
 /// 计算子进程代理环境操作（纯函数，便于测试）。
-fn child_env_ops(state: &ProxyState, system: &SystemInjection) -> Vec<EnvOp> {
+/// `relay_url` 为 `Some` 时两种模式统一指向中继；为 `None`（中继未启动，或
+/// 当前上游不被中继支持）时显式按系统/手动模式注入，决不继承旧代理。
+fn child_env_ops(
+    state: &ProxyState,
+    system: &SystemInjection,
+    relay_url: Option<&str>,
+) -> Vec<EnvOp> {
+    if let Some(relay_url) = relay_url {
+        return relay_env_ops(relay_url, &relay_no_proxy(state, system));
+    }
     match state.mode.as_str() {
         "manual" => {
             let mut ops: Vec<EnvOp> = PROXY_ADDRESS_KEYS
                 .into_iter()
                 .map(|key| EnvOp::Set(key, state.url.clone()))
                 .collect();
+            ops.push(EnvOp::Remove("ALL_PROXY"));
+            ops.push(EnvOp::Remove("all_proxy"));
             ops.push(EnvOp::Set("NODE_USE_ENV_PROXY", "1".into()));
             let no_proxy = combined_no_proxy(&state.no_proxy);
             ops.push(EnvOp::Set("NO_PROXY", no_proxy.clone()));
             ops.push(EnvOp::Set("no_proxy", no_proxy));
             ops
         }
-        "direct" => {
-            let mut ops: Vec<EnvOp> = PROXY_VARIABLES.into_iter().map(EnvOp::Remove).collect();
-            ops.push(EnvOp::Remove("NODE_USE_ENV_PROXY"));
-            ops
-        }
         _ => match system {
-            SystemInjection::RespectEnv { no_proxy } => {
-                let mut ops: Vec<EnvOp> = vec![EnvOp::Set("NODE_USE_ENV_PROXY", "1".into())];
-                ops.push(EnvOp::Set("NO_PROXY", no_proxy.clone()));
-                ops.push(EnvOp::Set("no_proxy", no_proxy.clone()));
-                ops
-            }
             SystemInjection::UseSystemProxy { url, no_proxy } => {
                 let mut ops: Vec<EnvOp> = PROXY_ADDRESS_KEYS
                     .into_iter()
                     .map(|key| EnvOp::Set(key, url.clone()))
                     .collect();
+                ops.push(EnvOp::Remove("ALL_PROXY"));
+                ops.push(EnvOp::Remove("all_proxy"));
                 ops.push(EnvOp::Set("NODE_USE_ENV_PROXY", "1".into()));
                 ops.push(EnvOp::Set("NO_PROXY", no_proxy.clone()));
                 ops.push(EnvOp::Set("no_proxy", no_proxy.clone()));
                 ops
             }
-            SystemInjection::None => Vec::new(),
+            SystemInjection::None => {
+                let mut ops: Vec<EnvOp> = PROXY_VARIABLES.into_iter().map(EnvOp::Remove).collect();
+                ops.push(EnvOp::Remove("NODE_USE_ENV_PROXY"));
+                // 无中继退化路径也不得继承启动器的旧代理端口。
+                ops.push(EnvOp::Set("NO_PROXY", "*".into()));
+                ops.push(EnvOp::Set("no_proxy", "*".into()));
+                ops
+            }
         },
     }
 }
@@ -383,11 +460,14 @@ impl EnvOp {
 }
 
 /// 给 Node 子进程注入/清理代理环境变量。
-/// 手动模式额外设置 `NODE_USE_ENV_PROXY=1`，否则 pi/DSH 的 fetch 不会走代理。
+/// 中继运行时三种模式统一指向回环中继（地址恒定，切模式无需重启子进程）；
+/// 否则手动模式注入显式地址并补 `NODE_USE_ENV_PROXY=1`，否则 pi/DSH 的 fetch
+/// 不会走代理。
 pub fn apply_to_command(command: &mut Command) {
     let state = snapshot();
     let system = system_injection_for(&state);
-    for op in child_env_ops(&state, &system) {
+    let relay = child_relay_url(&state, &system);
+    for op in child_env_ops(&state, &system, relay.as_deref()) {
         op.apply_command(command);
     }
 }
@@ -396,7 +476,8 @@ pub fn apply_to_command(command: &mut Command) {
 pub fn apply_to_pty(command: &mut portable_pty::CommandBuilder) {
     let state = snapshot();
     let system = system_injection_for(&state);
-    for op in child_env_ops(&state, &system) {
+    let relay = child_relay_url(&state, &system);
+    for op in child_env_ops(&state, &system, relay.as_deref()) {
         op.apply_pty(command);
     }
 }
@@ -422,34 +503,25 @@ fn build_ureq_proxy(url: &str, no_proxy: &str) -> Option<ureq::Proxy> {
     builder.build().ok()
 }
 
-/// 给 ureq 客户端用的代理：手动模式用显式地址，直连模式为 None，
-/// 跟随系统则先读环境变量（HTTP(S)_PROXY / ALL_PROXY / NO_PROXY），
-/// 未设置时回落 Windows 系统代理（严格语义）。
+/// ureq 代理与中继读取同一来源：手动地址，或已启用的 Windows 系统代理。
+/// 不读取进程继承的代理环境变量（其中可能是已关闭的旧端口）。
 pub fn ureq_proxy() -> Option<ureq::Proxy> {
     let state = snapshot();
-    match state.mode.as_str() {
-        "manual" => build_ureq_proxy(&state.url, &combined_no_proxy(&state.no_proxy)),
-        "direct" => None,
-        _ => ureq::Proxy::try_from_env().or_else(|| {
-            detect_system_proxy()
-                .and_then(|url| build_ureq_proxy(&url, &combined_no_proxy(&state.no_proxy)))
-        }),
-    }
+    let url = if state.mode == "manual" {
+        Some(state.url)
+    } else {
+        detect_system_proxy()
+    };
+    url.and_then(|url| build_ureq_proxy(&url, &combined_no_proxy(&state.no_proxy)))
 }
 
-/// 当前应使用的代理地址（手动模式用显式地址；跟随系统时先读环境变量、
-/// 未设置时回落 Windows 系统代理；直连为 None）。
+/// 当前全局代理地址；不代表 PAC/按域名分流的最终出站路由。
 pub fn current_url() -> Option<String> {
     let state = snapshot();
-    match state.mode.as_str() {
-        "manual" => Some(state.url.clone()).filter(|url| !url.is_empty()),
-        "direct" => None,
-        _ => ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"]
-            .iter()
-            .find_map(|key| std::env::var(key).ok())
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty())
-            .or_else(detect_system_proxy),
+    if state.mode == "manual" {
+        Some(state.url).filter(|url| !url.is_empty())
+    } else {
+        detect_system_proxy()
     }
 }
 
@@ -538,58 +610,6 @@ pub(crate) fn detect_system_proxy() -> Option<String> {
     None
 }
 
-/// Windows 系统代理解析（容忍语义，仅限 pi OAuth 桥接特例）：某些代理客户端
-/// 会把 ProxyEnable 保持为 0，但仍写入 ProxyServer 并由浏览器实际使用；只要
-/// 地址通过安全校验，就应交给桥接子进程，否则 OAuth 会绕过浏览器代理直连超时。
-#[cfg(windows)]
-pub(crate) fn detect_system_proxy_tolerant() -> Option<String> {
-    use crate::provider::validate_proxy;
-    use winreg::enums::HKEY_CURRENT_USER;
-
-    let settings = winreg::RegKey::predef(HKEY_CURRENT_USER)
-        .open_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings")
-        .ok()?;
-    let raw: String = settings.get_value("ProxyServer").ok()?;
-    let proxy = parse_windows_proxy_server(&raw)?;
-    validate_proxy(Some(&proxy)).ok()?;
-    Some(proxy)
-}
-
-/// 非 Windows 平台暂不解析系统代理。
-#[cfg(not(windows))]
-pub(crate) fn detect_system_proxy_tolerant() -> Option<String> {
-    None
-}
-
-/// 决定桥接子进程要注入的代理环境变量：已有任何代理环境变量时尊重现有配置
-/// （返回 None），否则使用系统代理（含 `NODE_USE_ENV_PROXY=1` 与合并后的
-/// NO_PROXY：环境已有列表 + 本地默认）。`lookup` 由调用方注入以便测试。
-pub(crate) fn decide_proxy_injection(
-    lookup: &dyn Fn(&str) -> Option<String>,
-    system_proxy: Option<String>,
-) -> Option<Vec<(&'static str, String)>> {
-    for key in PROXY_ENV_LOOKUP_KEYS {
-        if lookup(key).is_some_and(|value| !value.trim().is_empty()) {
-            return None;
-        }
-    }
-    let proxy = system_proxy?;
-    let env_no_proxy = ["NO_PROXY", "no_proxy"]
-        .iter()
-        .find_map(|key| lookup(key).filter(|value| !value.trim().is_empty()))
-        .unwrap_or_default();
-    let no_proxy = merged_no_proxy(&[&env_no_proxy]);
-    Some(vec![
-        ("HTTP_PROXY", proxy.clone()),
-        ("HTTPS_PROXY", proxy.clone()),
-        ("http_proxy", proxy.clone()),
-        ("https_proxy", proxy.clone()),
-        ("NODE_USE_ENV_PROXY", "1".to_string()),
-        ("NO_PROXY", no_proxy.clone()),
-        ("no_proxy", no_proxy),
-    ])
-}
-
 fn probe(proxy: Option<ureq::Proxy>) -> Result<String, String> {
     let mut config = ureq::Agent::config_builder()
         .timeout_connect(Some(Duration::from_secs(8)))
@@ -625,7 +645,6 @@ fn probe(proxy: Option<ureq::Proxy>) -> Result<String, String> {
 #[tauri::command]
 pub async fn proxy_test(mode: String, url: String) -> Result<String, String> {
     let proxy = match normalize_mode(&mode) {
-        "direct" => None,
         "manual" => {
             let url = validate_url(&url)?;
             Some(
@@ -633,10 +652,8 @@ pub async fn proxy_test(mode: String, url: String) -> Result<String, String> {
                     .map_err(|error| format!("proxy address is invalid: {error}"))?,
             )
         }
-        // 与 ureq_proxy() 的跟随系统逻辑一致：env 优先，未设置时回落系统代理，
-        // 让「测试连接」反映实际将被使用的代理。
-        _ => ureq::Proxy::try_from_env()
-            .or_else(|| detect_system_proxy().and_then(|url| build_ureq_proxy(&url, ""))),
+        // 测试和真实请求共用系统设置；不能报告旧环境代理「连通」却让 DSH 失败。
+        _ => detect_system_proxy().and_then(|url| build_ureq_proxy(&url, "")),
     };
     tauri::async_runtime::spawn_blocking(move || probe(proxy))
         .await
@@ -650,7 +667,8 @@ mod tests {
     #[test]
     fn normalizes_unknown_modes_to_system() {
         assert_eq!(normalize_mode("manual"), "manual");
-        assert_eq!(normalize_mode("direct"), "direct");
+        // 旧安装保存的 direct 必须迁移到「跟随系统」，不能留下隐藏的第三种模式。
+        assert_eq!(normalize_mode("direct"), "system");
         assert_eq!(normalize_mode("system"), "system");
         assert_eq!(normalize_mode(""), "system");
         assert_eq!(normalize_mode("nonsense"), "system");
@@ -706,7 +724,7 @@ mod tests {
             no_proxy: "localhost".into(),
             saved_env: Vec::new(),
         };
-        let ops = child_env_ops(&state, &SystemInjection::None);
+        let ops = child_env_ops(&state, &SystemInjection::None, None);
         let sets = collect_sets(&ops);
         assert_eq!(
             sets.get("HTTPS_PROXY").map(String::as_str),
@@ -723,56 +741,26 @@ mod tests {
     }
 
     #[test]
-    fn direct_mode_clears_proxy_env_including_node_flag() {
+    fn system_without_proxy_clears_inherited_env_when_relay_is_absent() {
         let state = ProxyState {
-            mode: "direct".into(),
+            mode: "system".into(),
             url: String::new(),
             no_proxy: String::new(),
             saved_env: Vec::new(),
         };
-        let ops = child_env_ops(&state, &SystemInjection::None);
+        let ops = child_env_ops(&state, &SystemInjection::None, None);
         let removes = collect_removes(&ops);
-        for key in ["HTTP_PROXY", "NO_PROXY", "no_proxy", "NODE_USE_ENV_PROXY"] {
+        for key in [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "NODE_USE_ENV_PROXY",
+        ] {
             assert!(removes.contains(&key), "{key} should be removed");
         }
-    }
-
-    #[test]
-    fn system_mode_none_injects_nothing() {
-        let state = ProxyState {
-            mode: "system".into(),
-            url: String::new(),
-            no_proxy: String::new(),
-            saved_env: Vec::new(),
-        };
-        assert!(child_env_ops(&state, &SystemInjection::None).is_empty());
-    }
-
-    #[test]
-    fn system_mode_respect_env_sets_flag_and_merged_no_proxy() {
-        let state = ProxyState {
-            mode: "system".into(),
-            url: String::new(),
-            no_proxy: String::new(),
-            saved_env: Vec::new(),
-        };
-        let ops = child_env_ops(
-            &state,
-            &SystemInjection::RespectEnv {
-                no_proxy: "localhost,127.0.0.1,::1,[::1]".into(),
-            },
-        );
         let sets = collect_sets(&ops);
-        let removes = collect_removes(&ops);
-        assert_eq!(
-            sets.get("NODE_USE_ENV_PROXY").map(String::as_str),
-            Some("1")
-        );
-        assert_eq!(
-            sets.get("NO_PROXY").map(String::as_str),
-            Some("localhost,127.0.0.1,::1,[::1]")
-        );
-        assert!(removes.is_empty());
+        assert_eq!(sets.get("NO_PROXY").map(String::as_str), Some("*"));
+        assert_eq!(sets.get("no_proxy").map(String::as_str), Some("*"));
     }
 
     #[test]
@@ -787,7 +775,7 @@ mod tests {
             url: "http://127.0.0.1:7890".into(),
             no_proxy: "localhost,127.0.0.1,::1,[::1]".into(),
         };
-        let ops = child_env_ops(&state, &system);
+        let ops = child_env_ops(&state, &system, None);
         let sets = collect_sets(&ops);
         for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
             assert_eq!(
@@ -803,57 +791,181 @@ mod tests {
         assert!(sets.contains_key("no_proxy"));
     }
 
+    /// 构造测试用状态（环境隔离：这些用例都不读写进程环境变量）。
+    fn state_for(mode: &str, url: &str, no_proxy: &str) -> ProxyState {
+        ProxyState {
+            mode: mode.into(),
+            url: url.into(),
+            no_proxy: no_proxy.into(),
+            saved_env: Vec::new(),
+        }
+    }
+
+    /// 中继运行时：两种模式 × 系统启用/关闭代理，子进程环境必须**完全一致**
+    /// ——这正是「地址恒定」的不变量：切模式不再改动子进程的环境。
     #[test]
-    fn system_injection_respects_existing_env() {
-        // 用户已显式配置代理环境变量：只补 NODE_USE_ENV_PROXY，不覆盖。
-        let existing = |key: &str| (key == "HTTPS_PROXY").then(|| "http://env-proxy:1".to_string());
+    fn relay_url_is_identical_across_modes_and_system_decisions() {
+        let relay = "http://127.0.0.1:5555";
+        let system_decision = |no_proxy: &str| SystemInjection::UseSystemProxy {
+            url: "http://127.0.0.1:7890".into(),
+            no_proxy: no_proxy.into(),
+        };
+        let cases = [
+            (
+                state_for("manual", "http://127.0.0.1:7890", "mine.local"),
+                SystemInjection::None,
+            ),
+            (
+                state_for("manual", "http://127.0.0.1:7890", "mine.local"),
+                system_decision("localhost"),
+            ),
+            (state_for("system", "", ""), SystemInjection::None),
+            (state_for("system", "", "mine.local"), SystemInjection::None),
+            (
+                state_for("system", "", "mine.local"),
+                system_decision("mine.local,localhost,127.0.0.1,::1,[::1]"),
+            ),
+        ];
+        for (state, system) in cases {
+            let ops = child_env_ops(&state, &system, Some(relay));
+            let sets = collect_sets(&ops);
+            for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
+                assert_eq!(
+                    sets.get(key).map(String::as_str),
+                    Some(relay),
+                    "mode={} key={key} must point at the relay",
+                    state.mode
+                );
+            }
+            assert_eq!(
+                sets.get("NODE_USE_ENV_PROXY").map(String::as_str),
+                Some("1")
+            );
+            // ALL_PROXY 必须清掉，否则部分客户端会绕过中继。
+            let removes = collect_removes(&ops);
+            assert!(removes.contains(&"ALL_PROXY"), "mode={}", state.mode);
+            assert!(removes.contains(&"all_proxy"), "mode={}", state.mode);
+            // 例外地址必须含本地默认，且大小写两份一致。
+            let no_proxy = sets.get("NO_PROXY").expect("NO_PROXY must be set");
+            assert!(no_proxy.contains("localhost"), "{no_proxy}");
+            assert!(no_proxy.contains("127.0.0.1"), "{no_proxy}");
+            assert_eq!(
+                sets.get("no_proxy").map(String::as_str),
+                Some(no_proxy.as_str())
+            );
+        }
+    }
+
+    /// 系统模式不继承启动器旧的 NO_PROXY=*，否则已开启的系统代理被整体绕过。
+    #[test]
+    fn relay_no_proxy_uses_settings_not_inherited_environment() {
+        let relay = "http://127.0.0.1:5555";
+        let state = state_for("system", "", "mine.local");
+        let sets = collect_sets(&child_env_ops(
+            &state,
+            &SystemInjection::UseSystemProxy {
+                url: "http://127.0.0.1:7890".into(),
+                no_proxy: "mine.local,localhost,127.0.0.1,::1,[::1]".into(),
+            },
+            Some(relay),
+        ));
+        assert_eq!(
+            sets.get("NO_PROXY").map(String::as_str),
+            Some("mine.local,localhost,127.0.0.1,::1,[::1]")
+        );
+        let sets = collect_sets(&child_env_ops(&state, &SystemInjection::None, Some(relay)));
+        assert_eq!(
+            sets.get("NO_PROXY").map(String::as_str),
+            Some("mine.local,localhost,127.0.0.1,::1,[::1]")
+        );
+    }
+
+    /// 中继未启动时仍必须清除继承的过期代理，不暗中退回旧行为。
+    #[test]
+    fn without_relay_each_mode_explicitly_controls_inherited_env() {
+        let manual = state_for("manual", "http://127.0.0.1:7890", "");
+        let ops = child_env_ops(&manual, &SystemInjection::None, None);
+        let sets = collect_sets(&ops);
+        assert_eq!(
+            sets.get("HTTPS_PROXY").map(String::as_str),
+            Some("http://127.0.0.1:7890")
+        );
+        assert!(
+            !sets.values().any(|value| value.contains("127.0.0.1:5555")),
+            "no relay address may leak when the relay is absent"
+        );
+
+        let system = state_for("system", "", "");
+        let ops = child_env_ops(&system, &SystemInjection::None, None);
+        let removes = collect_removes(&ops);
+        for key in [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "NODE_USE_ENV_PROXY",
+        ] {
+            assert!(removes.contains(&key), "system must remove stale {key}");
+        }
+        assert_eq!(
+            collect_sets(&ops).get("NO_PROXY").map(String::as_str),
+            Some("*")
+        );
+    }
+
+    #[test]
+    fn upstream_for_follows_system_setting_not_environment() {
+        assert_eq!(
+            upstream_for(
+                &state_for("manual", "http://127.0.0.1:7890", ""),
+                &SystemInjection::None
+            ),
+            Upstream::ViaProxy("http://127.0.0.1:7890".into())
+        );
+        let system = state_for("system", "", "");
+        assert_eq!(
+            upstream_for(&system, &SystemInjection::None),
+            Upstream::Direct
+        );
+        assert_eq!(
+            upstream_for(
+                &system,
+                &SystemInjection::UseSystemProxy {
+                    url: "http://127.0.0.1:7890".into(),
+                    no_proxy: String::new(),
+                }
+            ),
+            Upstream::ViaProxy("http://127.0.0.1:7890".into())
+        );
+        // https 上游不被中继承载：调用方必须显式提示降级行为。
+        assert!(!upstream_for(
+            &state_for("manual", "https://proxy.local:8443", ""),
+            &SystemInjection::None,
+        )
+        .is_relay_supported());
+    }
+
+    #[test]
+    fn system_injection_ignores_stale_environment_and_uses_os_settings() {
+        let inherited = |key: &str| match key {
+            "HTTPS_PROXY" => Some("http://dead-proxy:7890".to_string()),
+            "NO_PROXY" => Some("*".to_string()),
+            _ => None,
+        };
+        // 核心回归：Windows 已关闭代理，即使进程继承旧端口也不使用它。
+        assert_eq!(
+            decide_system_injection(&inherited, None, ""),
+            SystemInjection::None
+        );
+        // Windows 启用代理，以系统值为准，不把继承的 NO_PROXY=* 带给新上游。
         assert_eq!(
             decide_system_injection(
-                &existing,
+                &inherited,
                 Some("http://127.0.0.1:7890".into()),
                 "mine.local"
             ),
-            SystemInjection::RespectEnv {
+            SystemInjection::UseSystemProxy {
+                url: "http://127.0.0.1:7890".into(),
                 no_proxy: "mine.local,localhost,127.0.0.1,::1,[::1]".into(),
-            }
-        );
-        // 环境已有 NO_PROXY：保留并合并。
-        let with_no_proxy = |key: &str| match key {
-            "HTTPS_PROXY" => Some("http://env-proxy:1".to_string()),
-            "NO_PROXY" => Some("corp.internal".to_string()),
-            _ => None,
-        };
-        assert_eq!(
-            decide_system_injection(&with_no_proxy, Some("http://127.0.0.1:7890".into()), ""),
-            SystemInjection::RespectEnv {
-                no_proxy: "corp.internal,localhost,127.0.0.1,::1,[::1]".into(),
-            }
-        );
-        // 空字符串的环境变量视为未设置。
-        let empty = |key: &str| (key == "HTTP_PROXY").then(|| "  ".to_string());
-        assert_eq!(
-            decide_system_injection(&empty, Some("http://127.0.0.1:7890".into()), ""),
-            SystemInjection::UseSystemProxy {
-                url: "http://127.0.0.1:7890".into(),
-                no_proxy: "localhost,127.0.0.1,::1,[::1]".into(),
-            }
-        );
-        // 没有环境变量也没有系统代理：不注入。
-        let none = |_: &str| None::<String>;
-        assert_eq!(
-            decide_system_injection(&none, None, ""),
-            SystemInjection::None
-        );
-        // 用户例外地址合并进注入结果。
-        assert_eq!(
-            decide_system_injection(
-                &none,
-                Some("http://127.0.0.1:7890".into()),
-                "internal.local"
-            ),
-            SystemInjection::UseSystemProxy {
-                url: "http://127.0.0.1:7890".into(),
-                no_proxy: "internal.local,localhost,127.0.0.1,::1,[::1]".into(),
             }
         );
     }
@@ -902,35 +1014,6 @@ mod tests {
         // 非法输入返回 None。
         assert!(build_ureq_proxy("not-a-url", "").is_none());
         assert!(build_ureq_proxy("ftp://proxy.local:21", "").is_none());
-    }
-
-    #[test]
-    fn bridge_injection_respects_existing_env() {
-        // 用户已显式配置代理环境变量：不注入、不覆盖。
-        let existing = |key: &str| (key == "HTTPS_PROXY").then(|| "http://env-proxy:1".to_string());
-        assert!(decide_proxy_injection(&existing, Some("http://127.0.0.1:7890".into())).is_none());
-        let none = |_: &str| None::<String>;
-        let pairs = decide_proxy_injection(&none, Some("http://127.0.0.1:7890".into()))
-            .expect("system proxy should be injected");
-        assert!(pairs
-            .iter()
-            .any(|(key, value)| *key == "HTTPS_PROXY" && value == "http://127.0.0.1:7890"));
-        // 环境代理变量注入时附带 Node 开关，否则 pi 的 fetch 仍会直连。
-        assert!(pairs
-            .iter()
-            .any(|(key, value)| *key == "NODE_USE_ENV_PROXY" && value == "1"));
-        // 环境已有 NO_PROXY：保留并合并。
-        let with_no_proxy = |key: &str| (key == "NO_PROXY").then(|| "corp.internal".to_string());
-        let pairs = decide_proxy_injection(&with_no_proxy, Some("http://127.0.0.1:7890".into()))
-            .expect("injected");
-        let no_proxy = pairs
-            .iter()
-            .find(|(key, _)| *key == "NO_PROXY")
-            .map(|(_, value)| value.clone())
-            .unwrap();
-        assert!(no_proxy.starts_with("corp.internal,"));
-        // 没有可用系统代理时不注入任何东西。
-        assert!(decide_proxy_injection(&none, None).is_none());
     }
 
     /// 本地端到端验证：开启代理时请求经 CONNECT 隧道由代理应答，

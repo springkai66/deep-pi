@@ -41,6 +41,7 @@ mod project_watch;
 mod prompt_enhance;
 mod provider;
 pub mod proxy;
+pub mod proxy_relay;
 mod pty;
 mod recovery;
 mod retry;
@@ -55,6 +56,7 @@ pub mod settings;
 mod shell;
 mod snapshot;
 mod startup;
+mod system_proxy;
 mod task;
 mod theme;
 mod tray;
@@ -161,6 +163,17 @@ pub fn run() {
                     // 全局代理最早在这里生效：后续创建的 HTTP 客户端与子进程都会读到。
                     if let Ok(current) = settings.get() {
                         crate::proxy::configure(&current);
+                        // 回环中继：给子进程一个恒定的代理地址，之后切换代理模式
+                        // 不必重启它们（上游已在 configure 内同步切换）。绑定失败
+                        // 不阻断启动：降级为按模式直接注入。
+                        match crate::proxy_relay::start_global() {
+                            Ok(port) => {
+                                log::info!("event=proxy_relay status=started port={port}")
+                            }
+                            Err(error) => {
+                                log::warn!("event=proxy_relay status=failed reason=\"{error}\"")
+                            }
+                        }
                         // 托盘菜单按用户语言渲染：设置此刻才加载完成，主线程补一次更新。
                         let language = current.language.clone();
                         let tray_app = worker_app.clone();
@@ -222,7 +235,10 @@ pub fn run() {
                 pet::reset_pet_image,
                 pet::set_pet_ring,
                 pet::set_pet_tasks_visible,
+                pet::sync_pet_tasks_position,
                 pet::get_pet_task_hover,
+                pet::set_active_agent,
+                pet::get_active_agent,
                 pet::set_pet_hit_rects,
                 pet::pet_debug_enabled,
                 checklist::open_checklist_window,

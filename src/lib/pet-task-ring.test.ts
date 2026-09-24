@@ -4,6 +4,7 @@ import type { Task } from "./task";
 import {
   RING_BUBBLE_HEIGHT,
   RING_BUBBLE_WIDTH,
+  RING_BUBBLE_WIDTH_MIN,
   RING_CENTER,
   RING_ENTER_MS,
   RING_ENTER_STAGGER_MS,
@@ -11,6 +12,8 @@ import {
   RING_EXIT_STAGGER_MS,
   RING_RADIUS_MAX,
   RING_RADIUS_MIN,
+  RING_RADIUS_RANGE,
+  RING_RADIUS_TARGET_DEFAULT,
   RING_TASK_LIMIT,
   RING_WINDOW,
   orderRingTasks,
@@ -19,7 +22,6 @@ import {
   ringEnterMs,
   ringExitMs,
   ringLayout,
-  ringNeededRadius,
   ringOverflowCount,
   ringRadius,
   ringSlotCount,
@@ -84,37 +86,49 @@ describe("ring task ordering", () => {
 });
 
 describe("ring radius follows the clock geometry", () => {
-  it("grows the radius so adjacent bubbles never overlap", () => {
+  it("never lets adjacent bubbles overlap, whatever the radius setting", () => {
     // 圆心距 = 2r·sin(π/slots) 必须容下气泡宽度 + 间隙。
-    for (let slots = 2; slots <= RING_TASK_LIMIT + 1; slots += 1) {
-      const radius = ringRadius(slots);
-      const chord = 2 * radius * Math.sin(Math.PI / slots);
-      expect(chord).toBeGreaterThanOrEqual(ringBubbleWidth(slots));
+    for (const target of [RING_RADIUS_RANGE.min, 100, 160, RING_RADIUS_RANGE.max]) {
+      for (let slots = 2; slots <= RING_TASK_LIMIT + 1; slots += 1) {
+        const radius = ringRadius(slots, target);
+        const chord = 2 * radius * Math.sin(Math.PI / slots);
+        expect(chord).toBeGreaterThanOrEqual(ringBubbleWidth(slots, target));
+      }
     }
   });
 
   it("narrows the bubble width as the count grows so the ring stays close", () => {
     expect(ringBubbleWidth(1)).toBe(168);
-    expect(ringBubbleWidth(4)).toBe(168);
     // 刻度变多后气泡收窄，环半径才不必被推远。
     expect(ringBubbleWidth(9)).toBeLessThan(168);
-    expect(ringBubbleWidth(9)).toBeGreaterThanOrEqual(96);
+    expect(ringBubbleWidth(9)).toBeGreaterThanOrEqual(RING_BUBBLE_WIDTH_MIN);
     expect(ringBubbleWidth(20)).toBeLessThanOrEqual(ringBubbleWidth(9));
     // 下限兜底：再窄也读不出标题，此时改由半径让步。
-    expect(ringBubbleWidth(60)).toBe(96);
+    expect(ringBubbleWidth(60)).toBe(RING_BUBBLE_WIDTH_MIN);
+    // 设置调大 → 同数量下气泡可以更宽（环变远、可读性更好）。
+    expect(ringBubbleWidth(9, 200)).toBeGreaterThan(ringBubbleWidth(9, 100));
   });
 
-  it("keeps the radius close to the target whenever the width floor allows", () => {
-    // 目标半径 175：气泡宽度没触底时，环半径不超过目标（刻度少时更近，
-    // 那是想要的效果），不会像「一味加宽半径」的旧几何那样越推越远。
-    for (let slots = 3; slots <= RING_TASK_LIMIT + 1; slots += 1) {
-      const width = ringBubbleWidth(slots);
-      const radius = ringRadius(slots);
-      if (width > 96) expect(radius).toBeLessThanOrEqual(181);
-      else expect(radius).toBeGreaterThan(175); // 触底后只能靠半径让步
+  it("honours the configured radius for every slot count", () => {
+    // 设置调大 → 刻度少时环直接铺到该半径；刻度多到放不下才由几何接管。
+    for (const target of [RING_RADIUS_RANGE.min, 100, 160, RING_RADIUS_RANGE.max]) {
+      for (let slots = 1; slots <= RING_TASK_LIMIT + 1; slots += 1) {
+        const radius = ringRadius(slots, target);
+        expect(radius).toBeGreaterThanOrEqual(Math.min(target, RING_RADIUS_MAX));
+        expect(radius).toBeLessThanOrEqual(RING_RADIUS_MAX);
+      }
     }
-    // 典型场景：9 个任务时环明显比旧几何（半径 217）更贴近本体。
-    expect(ringRadius(9)).toBeLessThanOrEqual(180);
+    // 近距离设置：典型数量下环明显贴近本体。
+    expect(ringRadius(5, 100)).toBeLessThanOrEqual(101);
+    expect(ringRadius(5, 200)).toBe(200);
+  });
+
+  it("falls back to the default when the setting is out of range or invalid", () => {
+    // 低于下限 → 钳到下限附近（气泡宽度下限可能再把它顶出去一点）。
+    expect(ringRadius(5, 10)).toBeGreaterThanOrEqual(RING_RADIUS_MIN);
+    expect(ringRadius(5, 10)).toBeLessThan(RING_RADIUS_TARGET_DEFAULT);
+    expect(ringRadius(5, 9999)).toBe(RING_RADIUS_RANGE.max); // 高于可设置上限 → 钳到上限
+    expect(ringRadius(5, Number.NaN)).toBe(ringRadius(5, RING_RADIUS_TARGET_DEFAULT));
   });
 
   it("keeps the needed radius inside the window bounds", () => {
@@ -127,27 +141,13 @@ describe("ring radius follows the clock geometry", () => {
     }
   });
 
-  it("keeps the needed radius monotonic inside each bubble-width tier", () => {
-    // 跨档时气泡变窄，所需半径可以回落（168→140 那一档就是如此）；
-    // 同一档内刻度越多，需要越大的半径。
-    let previous = 0;
-    for (let slots = 1; slots <= RING_TASK_LIMIT + 1; slots += 1) {
-      const needed = ringNeededRadius(slots);
-      if (slots === 1 || ringBubbleWidth(slots) === ringBubbleWidth(slots - 1)) {
-        expect(needed).toBeGreaterThanOrEqual(previous);
-      }
-      previous = needed;
+  it("lays out the ring at the configured radius", () => {
+    const tasks = ["a", "b", "c"].map((id) => task({ id }));
+    const layout = ringLayout(tasks, 180);
+    expect(layout.radius).toBe(180);
+    for (const bubble of layout.bubbles) {
+      expect(Math.round(Math.hypot(bubble.x, bubble.y))).toBe(180);
     }
-  });
-
-  it("shrinks only when the monitor is too small for the needed radius", () => {
-    // 常规显示器装得下所需半径：按需取值，不无故收缩。
-    expect(ringRadius(RING_TASK_LIMIT, [[0, 0, 1920, 1080]])).toBe(ringNeededRadius(RING_TASK_LIMIT));
-    // 显示器装不下（中心到边不足所需半径）：收缩到可用距离，但不低于下限。
-    const tiny = [[0, 0, 500, 500]] as [number, number, number, number][];
-    expect(ringRadius(RING_TASK_LIMIT, tiny)).toBe(RING_RADIUS_MIN);
-    // 没有显示器信息：按所需半径渲染（宁可出屏，也不无故缩小）。
-    expect(ringRadius(RING_TASK_LIMIT, [])).toBe(ringNeededRadius(RING_TASK_LIMIT));
   });
 });
 
@@ -234,14 +234,14 @@ describe("ring animation timing", () => {
 
   it("keeps the square window big enough for the widest ring", () => {
     expect(RING_WINDOW).toBe(2 * RING_CENTER);
-    // 上限之下，任何刻度数量的最宽气泡都留在窗口内。
+    // 最大设置之下，任何刻度数量的最宽气泡都留在窗口内。
     for (let slots = 1; slots <= RING_TASK_LIMIT + 1; slots += 1) {
-      const radius = ringRadius(slots);
-      expect(radius + ringBubbleWidth(slots) / 2).toBeLessThanOrEqual(RING_CENTER);
+      const radius = ringRadius(slots, RING_RADIUS_RANGE.max);
+      expect(radius + ringBubbleWidth(slots, RING_RADIUS_RANGE.max) / 2).toBeLessThanOrEqual(RING_CENTER);
       expect(radius + RING_BUBBLE_HEIGHT / 2).toBeLessThanOrEqual(RING_CENTER);
     }
-    // 下限仍要留在本体之外。
-    expect(RING_RADIUS_MIN).toBeGreaterThan(75 + RING_BUBBLE_HEIGHT / 2);
+    // 下限仍要留在本体之外：贴合窗口的本体半高约 60px + 气泡半高。
+    expect(RING_RADIUS_MIN).toBeGreaterThanOrEqual(60 + RING_BUBBLE_HEIGHT / 2);
   });
 });
 

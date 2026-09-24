@@ -31,7 +31,6 @@
     Settings2,
     Globe,
     GitBranch,
-    Cat,
   } from "@lucide/svelte";
   import { onMount, tick } from "svelte";
   import FileSidebar from "$lib/FileSidebar.svelte";
@@ -155,6 +154,10 @@
   let dshBusy = $state(false);
   let settingsPackageBusy = $state(false);
   let activeAgent = $state<"pi" | "dsh">("pi");
+  // 把当前工作区告诉后端：桌宠任务环据此只显示该工作流的任务。
+  $effect(() => {
+    void invoke("set_active_agent", { agent: activeAgent }).catch(() => { /* 后端未就绪时忽略 */ });
+  });
   let isDshStarting = $state(false);
   let dshHostError = $state<string | null>(null);
   let dialogRequest = $state<DialogRequest | null>(null);
@@ -1201,16 +1204,6 @@
     }
   }
 
-  /// 桌宠浮窗：透明置顶小窗，随任务状态做动作，可自定义形象。
-  async function openPetWindow() {
-    if (!canLeaveSettings()) return;
-    try {
-      await invoke("open_pet_window");
-    } catch (cause) {
-      showError(t("桌宠窗口打开失败：{error}", { error: tm(String(cause)) }));
-    }
-  }
-
   async function openShell() {
     if (!canLeaveSettings()) return;
     if (!selectedProjectId || !selectedProject) {
@@ -1493,8 +1486,6 @@
         onclick={() => void openBoardWindow()}><Kanban size={16} /></button>
       <button type="button" aria-label={t("四象限清单")} title={t("四象限清单")}
         onclick={() => void openChecklistWindow()}><ClipboardList size={16} /></button>
-      <button type="button" aria-label={t("桌宠")} title={t("显示桌宠")}
-        onclick={() => void openPetWindow()}><Cat size={16} /></button>
       <button type="button" aria-label={t("打开应用设置")} aria-keyshortcuts={shortcutAria("settings")}
         title={`${t("设置")} (${shortcutLabel("settings")})`} onclick={openSettings}><Settings2 size={16} /></button>
     </div>

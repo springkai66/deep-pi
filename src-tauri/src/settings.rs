@@ -71,7 +71,7 @@ fn default_pi_environment() -> String {
 }
 
 fn default_proxy_mode() -> String {
-    "direct".into()
+    "system".into()
 }
 
 fn default_notify_on_task_complete() -> bool {
@@ -84,6 +84,11 @@ fn default_pet_enabled() -> bool {
 
 fn default_pet_always_on_top() -> bool {
     true
+}
+
+/// 任务环半径默认值：与前端 pet-task-ring.ts 的 RING_RADIUS_TARGET_DEFAULT 一致。
+fn default_pet_task_ring_radius() -> u16 {
+    100
 }
 
 /// 未知代理模式回落 system（旧设置文件与手改配置容错）。
@@ -221,7 +226,7 @@ pub struct AppSettings {
     /// 用户导入的主题包（内置主题之外），原样保存 JSON 以便未来字段兼容。
     #[serde(default)]
     pub custom_themes: Vec<serde_json::Value>,
-    /// 全局网络代理：system（跟随系统/环境变量）/ direct（直连）/ manual（手动地址）。
+    /// 全局网络代理：system（跟随系统网络设置）/ manual（手动地址）；旧 direct 自动迁移。
     #[serde(
         default = "default_proxy_mode",
         deserialize_with = "deserialize_proxy_mode"
@@ -242,6 +247,9 @@ pub struct AppSettings {
     /// 桌宠浮窗是否置顶（显示在最上方；关闭后可被其他窗口遮挡）。
     #[serde(default = "default_pet_always_on_top")]
     pub pet_always_on_top: bool,
+    /// 任务环半径（逻辑像素）：气泡环绕桌宠的距离。
+    #[serde(default = "default_pet_task_ring_radius")]
+    pub pet_task_ring_radius: u16,
 }
 
 impl Default for AppSettings {
@@ -272,6 +280,7 @@ impl Default for AppSettings {
             notify_on_task_complete: default_notify_on_task_complete(),
             pet_enabled: default_pet_enabled(),
             pet_always_on_top: default_pet_always_on_top(),
+            pet_task_ring_radius: default_pet_task_ring_radius(),
         }
     }
 }
@@ -346,6 +355,8 @@ impl SettingsStore {
     }
 
     pub fn save(&self, mut settings: AppSettings) -> Result<(), String> {
+        // 旧前端/旧配置仍可能提交 direct；持久化前迁移，避免界面出现无选项的值。
+        settings.proxy_mode = crate::proxy::normalize_mode(&settings.proxy_mode).into();
         if matches!(settings.pi_environment.as_str(), "auto" | "native") {
             settings.pi_environment = default_pi_environment();
         }
@@ -525,12 +536,22 @@ pub async fn get_settings(app: AppHandle) -> Result<AppSettings, String> {
 pub async fn save_settings(app: AppHandle, settings: AppSettings) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let store = app.state::<SettingsStore>();
+        // 桌宠显隐只在开关真的翻转时动作：否则每次保存别的设置都会把桌宠弹出来。
+        let previous_pet_enabled = store.get().map(|current| current.pet_enabled).ok();
         store.save(settings)?;
-        // 保存成功后立即应用：新启动的任务/会话就用新代理（已运行的会话需重启任务）。
+        // 保存成功后立即应用：新启动的任务/会话就用新代理；运行中的 DSH/Pi 子进程
+        // 走的是地址恒定的回环中继，切换在上游侧即时生效，无需重启它们。
         let saved = store.get()?;
         crate::proxy::configure(&saved);
+        // OAuth 桥接也走恒定的回环中继；代理变化无需重建长期驻留的桥接进程。
         // 桌宠置顶设置即时生效到已打开的浮窗（未打开则无操作）。
         crate::pet::apply_always_on_top(&app, saved.pet_always_on_top);
+        // 「显示桌宠」同样即时生效：勾选即显示、取消即关闭（建窗须在主线程）。
+        if previous_pet_enabled != Some(saved.pet_enabled) {
+            let pet_app = app.clone();
+            let enabled = saved.pet_enabled;
+            let _ = app.run_on_main_thread(move || crate::pet::apply_enabled(&pet_app, enabled));
+        }
         // 界面语言即时生效到托盘菜单（原生 UI，须在主线程更新）。
         let language = saved.language;
         let tray_app = app.clone();
@@ -697,7 +718,7 @@ mod tests {
         let path = root.join("settings.json");
         let backups = root.join("backups");
         let store = SettingsStore::open(path.clone(), backups.clone()).unwrap();
-        assert_eq!(store.get().unwrap().proxy_mode, "direct");
+        assert_eq!(store.get().unwrap().proxy_mode, "system");
 
         // 手动模式缺地址：保存被拒绝，不会写入无效配置。
         assert!(store
@@ -727,8 +748,17 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         value["proxyMode"] = serde_json::Value::String("bogus".into());
         std::fs::write(&path, serde_json::to_string(&value).unwrap()).unwrap();
-        let normalized = SettingsStore::open(path, backups).unwrap();
+        let normalized = SettingsStore::open(path.clone(), backups.clone()).unwrap();
         assert_eq!(normalized.get().unwrap().proxy_mode, "system");
+        // 旧安装原本保存的 direct 在加载与再次保存时都迁移为 system。
+        value["proxyMode"] = serde_json::Value::String("direct".into());
+        std::fs::write(&path, serde_json::to_string(&value).unwrap()).unwrap();
+        let migrated = SettingsStore::open(path, backups).unwrap();
+        assert_eq!(migrated.get().unwrap().proxy_mode, "system");
+        let mut legacy_payload = migrated.get().unwrap();
+        legacy_payload.proxy_mode = "direct".into();
+        migrated.save(legacy_payload).unwrap();
+        assert_eq!(migrated.get().unwrap().proxy_mode, "system");
         std::fs::remove_dir_all(root).unwrap();
     }
 

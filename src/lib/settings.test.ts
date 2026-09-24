@@ -6,8 +6,8 @@ describe("managed workspace defaults", () => {
     expect(DEFAULT_APP_SETTINGS.piEnvironment).toBe("managed");
   });
 
-  it("defaults the global proxy to direct connection", () => {
-    expect(DEFAULT_APP_SETTINGS.proxyMode).toBe("direct");
+  it("defaults the global proxy to the Windows system setting", () => {
+    expect(DEFAULT_APP_SETTINGS.proxyMode).toBe("system");
     expect(DEFAULT_APP_SETTINGS.proxyUrl).toBe("");
     expect(DEFAULT_APP_SETTINGS.proxyNoProxy).toBe("");
   });

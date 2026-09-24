@@ -237,55 +237,48 @@ describe("pet task bubble controller", () => {
   });
 });
 
-describe("task end notice", () => {
-  it("holds a naturally completed task on the ring, then fades it out like the rest", async () => {
-    const app = harness({ endedHoldMs: 1000 });
+describe("ring contents follow the live workspace", () => {
+  it("drops tasks the moment they stop executing", async () => {
+    const app = harness();
     app.setTasks([task({ id: "t1" })]);
     const entering = app.bubbles.enter();
     await tick();
     await entering;
-    // 任务自己跑完了（没有经过结束按钮）：气泡要留下来把结果讲完。
+    expect(app.states.at(-1)?.tasks.map((value) => value.id)).toEqual(["t1"]);
+    // 跑完了（没有经过结束按钮）：环上不再保留，只讲当下正在跑什么。
     app.setTasks([task({ id: "t1", status: "completed", runId: null, completedAt: 5 })]);
     await app.bubbles.refresh();
-    expect(app.states.at(-1)?.tasks.map((value) => value.id)).toEqual(["t1"]);
-    expect(app.states.at(-1)?.endedAt.t1).toBeTypeOf("number");
-    await vi.advanceTimersByTimeAsync(1000);
-    expect(app.states.at(-1)?.leaving).toBe(true);
-    await app.bubbles.finishClose();
-    await tick();
-    expect(app.states.at(-1)?.open).toBe(false);
+    expect(app.states.at(-1)?.tasks).toEqual([]);
   });
 
-  it("gives a stopped task the same end notice", async () => {
-    const app = harness({ endedHoldMs: 1000 });
-    app.setTasks([task({ id: "t1" })]);
+  it("keeps idle (waiting) sessions off the ring", async () => {
+    const app = harness();
+    app.setTasks([task({ id: "idle", status: "waiting" })]);
     const entering = app.bubbles.enter();
     await tick();
     await entering;
-    await app.bubbles.act("stop", task({ id: "t1" }));
-    // 停止后任务进入 cancelled：气泡留着，等待停留时间走完。
-    app.setTasks([task({ id: "t1", status: "cancelled", runId: null })]);
-    await app.bubbles.refresh();
-    expect(app.states.at(-1)?.tasks.map((value) => value.id)).toEqual(["t1"]);
-    expect(app.states.at(-1)?.endedAt.t1).toBeTypeOf("number");
-    await vi.advanceTimersByTimeAsync(1000);
-    expect(app.states.at(-1)?.leaving).toBe(true);
+    expect(app.states.at(-1)?.tasks).toEqual([]);
+    expect(app.states.at(-1)?.empty).toBe(true);
   });
 
-  it("does not restart the hold when a refresh repeats the same ended task", async () => {
-    const app = harness({ endedHoldMs: 1000 });
+  it("filters to the main window's workspace and recomputes immediately", async () => {
+    const app = harness();
+    const pi = task({ id: "pi-1" });
+    const dsh = task({ id: "dsh-1", agent: "dsh", runId: null });
+    app.setTasks([pi, dsh]);
+    app.bubbles.setAgent("pi");
     const entering = app.bubbles.enter();
     await tick();
     await entering;
-    const ended = task({ id: "t1", status: "completed", runId: null, completedAt: 5 });
-    app.setTasks([ended]);
-    await app.bubbles.refresh();
-    const firstSeen = app.states.at(-1)?.endedAt.t1;
-    await vi.advanceTimersByTimeAsync(600);
-    await app.bubbles.refresh();
-    expect(app.states.at(-1)?.endedAt.t1).toBe(firstSeen);
+    expect(app.states.at(-1)?.tasks.map((value) => value.id)).toEqual(["pi-1"]);
+    // 切到 DSH 工作区：不必等下一次轮询，环立刻换成 DSH 的任务。
+    app.bubbles.setAgent("dsh");
+    await tick();
+    expect(app.states.at(-1)?.tasks.map((value) => value.id)).toEqual(["dsh-1"]);
   });
+});
 
+describe("animation replay", () => {
   it("replays the animation from zero on every open", async () => {
     const app = harness();
     app.setTasks([task({ id: "t1" }), task({ id: "t2" })]);
@@ -415,15 +408,20 @@ describe("per-task action errors", () => {
 
   it("opens any non-archived task and retires the ring on success", async () => {
     const app = harness();
+    const dsh = task({ id: "dsh-1", agent: "dsh", status: "running", runId: null });
+    app.setTasks([dsh]);
     const entering = app.bubbles.enter();
     await tick();
     await entering;
-    app.setTasks([task({ id: "dsh-1", agent: "dsh", status: "waiting", runId: null })]);
-    await app.bubbles.act("open", task({ id: "dsh-1", agent: "dsh", status: "waiting", runId: null }));
+    expect(app.states.at(-1)?.tasks.map((value) => value.id)).toEqual(["dsh-1"]);
+    await app.bubbles.act("open", dsh);
     await tick();
     expect(app.actions).toEqual([{ id: "dsh-1", action: "open" }]);
-    // 打开成功后主窗口接管：环直接退场，不再挂在桌面上。
+    // 打开成功后主窗口接管：环播完退场就收起，不再挂在桌面上。
     expect(app.states.at(-1)?.leaving).toBe(true);
+    await app.bubbles.finishClose();
+    await tick();
+    expect(app.states.at(-1)?.open).toBe(false);
   });
 
   it("ignores open requests for archived tasks", async () => {

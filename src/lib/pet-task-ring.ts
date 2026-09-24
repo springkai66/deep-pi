@@ -17,19 +17,26 @@ export const RING_CENTER = RING_WINDOW / 2;
 /** 最宽档的气泡宽度（≤7 个任务时）；宽度同时是布局宽度与 CSS 兜底宽度。 */
 export const RING_BUBBLE_WIDTH = 168;
 export const RING_BUBBLE_HEIGHT = 32;
-/** 环半径下限：保证最坏情况下仍不与本体（视觉半径约 75）重叠。 */
-export const RING_RADIUS_MIN = 110;
+/**
+ * 环半径下限：贴着本体外缘。贴合窗口的本体半高约 60px，气泡半高 16px，
+ * 因此 78 就是「气泡内缘刚好不压到小熊」的半径——单个任务时气泡就悬在
+ * 头顶正上方一点，中间不留大块空白。
+ */
+export const RING_RADIUS_MIN = 78;
 /** 环半径上限：最宽气泡贴窗口边缘再留 8px 余量。 */
 export const RING_RADIUS_MAX = 400;
 /** 相邻气泡圆心距至少比气泡宽度多出的间隙。 */
 const RING_GAP = 8;
 /**
- * 目标半径：气泡宁可窄一点，也要让环贴近本体——刻度多时按这个半径反推
- * 气泡宽度，而不是把环越推越远。
+ * 目标半径默认值（与 Rust 侧 settings 的 pet_task_ring_radius 一致）：
+ * 气泡宁可窄一点，也要让环贴近本体——刻度多时按这个半径反推气泡宽度，
+ * 而不是把环越推越远。用户可在设置里改（RING_RADIUS_RANGE）。
  */
-const RING_RADIUS_TARGET = 175;
+export const RING_RADIUS_TARGET_DEFAULT = 100;
+/** 用户可设置的半径范围；下限即 RING_RADIUS_MIN（再近就压到本体上了）。 */
+export const RING_RADIUS_RANGE = { min: RING_RADIUS_MIN, max: 240, step: 5 } as const;
 /** 气泡宽度下限：再窄就读不出标题了，此时改由半径让步（环变大）。 */
-const RING_BUBBLE_WIDTH_MIN = 96;
+export const RING_BUBBLE_WIDTH_MIN = 80;
 /** 环上最多的任务气泡数；超出的任务汇总成角标。 */
 export const RING_TASK_LIMIT = 20;
 
@@ -82,49 +89,33 @@ export function orderRingTasks(tasks: Task[]): Task[] {
 
 /**
  * 气泡宽度按刻度数量反推：以「目标半径」下相邻气泡恰好不相邻为目标，
- * 刻度越多气泡越窄（下限 96px），从而让环始终贴着本体——而不是靠把环
- * 越推越远来避免重叠。刻度很少时回到最宽档 168px。
+ * 刻度越多气泡越窄（下限 RING_BUBBLE_WIDTH_MIN），从而让环始终贴着本体
+ * ——而不是靠把环越推越远来避免重叠。刻度很少时回到最宽档 168px。
+ * target 由用户设置（设置 → 通知与桌宠 → 任务环半径）传入。
  */
-export function ringBubbleWidth(slots: number): number {
+export function ringBubbleWidth(slots: number, target = RING_RADIUS_TARGET_DEFAULT): number {
   if (slots <= 1) return RING_BUBBLE_WIDTH;
-  const fit = 2 * RING_RADIUS_TARGET * Math.sin(Math.PI / slots) - RING_GAP;
+  const fit = 2 * normalizeTarget(target) * Math.sin(Math.PI / slots) - RING_GAP;
   return Math.round(Math.max(RING_BUBBLE_WIDTH_MIN, Math.min(RING_BUBBLE_WIDTH, fit)));
 }
 
-/**
- * 不重叠所需的环半径：相邻气泡圆心距 = 2r·sin(π/slots)，须 ≥ 宽度 + 间隙。
- * 单刻度（或 0）没有相邻概念，直接取下限；结果钳在 [下限, 上限] 内。
- */
-export function ringNeededRadius(slots: number): number {
-  if (slots <= 1) return RING_RADIUS_MIN;
-  const width = ringBubbleWidth(slots);
-  const needed = Math.ceil((width + RING_GAP) / (2 * Math.sin(Math.PI / slots)));
-  return Math.max(RING_RADIUS_MIN, Math.min(RING_RADIUS_MAX, needed));
+/** 用户设置值归一化：非有限值回落默认，并钳进可设置范围。 */
+function normalizeTarget(target: number): number {
+  if (!Number.isFinite(target)) return RING_RADIUS_TARGET_DEFAULT;
+  return Math.min(RING_RADIUS_RANGE.max, Math.max(RING_RADIUS_RANGE.min, target));
 }
 
 /**
- * 环半径：按「不重叠所需半径」取值，钳在 [下限, 上限] 内。显示器信息
- * 仅用于在贴边时进一步收缩（下限兜底），没有则按所需半径渲染。
+ * 环半径：取「用户设定的半径」与「不重叠所需半径」中较大的一个，再钳进
+ * [下限, 上限]。用户把半径调近时气泡会自动收窄；窄到下限仍放不下时，
+ * 半径只能变大（保证永不重叠）。
  */
-export function ringRadius(slots: number, monitors: [number, number, number, number][] = []): number {
-  const needed = ringNeededRadius(slots);
-  if (!monitors.length) return Math.min(needed, RING_RADIUS_MAX);
-  const monitor = monitors.find(
-    ([x, y, width, height]) =>
-      RING_CENTER >= x && RING_CENTER < x + width && RING_CENTER >= y && RING_CENTER < y + height,
-  );
-  if (!monitor) return Math.min(needed, RING_RADIUS_MAX);
-  const [x, y, width, height] = monitor;
-  const available = Math.min(
-    RING_CENTER - x,
-    x + width - RING_CENTER,
-    RING_CENTER - y,
-    y + height - RING_CENTER,
-  );
-  return Math.max(
-    RING_RADIUS_MIN,
-    Math.min(needed, RING_RADIUS_MAX, available - RING_BUBBLE_HEIGHT / 2),
-  );
+export function ringRadius(slots: number, target = RING_RADIUS_TARGET_DEFAULT): number {
+  const wanted = normalizeTarget(target);
+  if (slots <= 1) return Math.min(wanted, RING_RADIUS_MAX);
+  const width = ringBubbleWidth(slots, wanted);
+  const needed = Math.ceil((width + RING_GAP) / (2 * Math.sin(Math.PI / slots)));
+  return Math.max(RING_RADIUS_MIN, Math.min(Math.max(wanted, needed), RING_RADIUS_MAX));
 }
 
 /**
@@ -168,13 +159,13 @@ export function ringStaggerMs(index: number, stepMs: number): number {
  */
 export function ringLayout(
   tasks: Task[],
-  monitors: [number, number, number, number][] = [],
+  target = RING_RADIUS_TARGET_DEFAULT,
 ): RingLayout {
   const visible = orderRingTasks(tasks);
   const overflow = ringOverflowCount(tasks.length);
   const slots = visible.length + (overflow > 0 ? 1 : 0);
-  const radius = ringRadius(slots, monitors);
-  const bubbleWidth = ringBubbleWidth(slots);
+  const radius = ringRadius(slots, target);
+  const bubbleWidth = ringBubbleWidth(slots, target);
   const at = (index: number): RingSlot => {
     const angle = ringCenteredAngle(index, slots);
     return {

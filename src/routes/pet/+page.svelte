@@ -213,17 +213,32 @@
     }, PET_TRANSIENT_MS);
   }
 
-  /** 拖动/爬行都意味着指针不在本体上了：先把环收掉。 */
+  /**
+   * 指针离开本体：只告诉浮层「环进入宽限期」。
+   * 关闭按钮的显隐由**窗口级** pointerenter/leave 负责——指针从本体移到
+   * 右上角按钮上时窗口没离开，按钮必须留在原地，否则永远点不到。
+   */
   function ringClose() {
-    hover = false;
     reportHover(false);
+  }
+
+  /**
+   * 桌宠移动（拖动/爬行/闪现）后把浮层同步到新位置：气泡跟着本体一起走。
+   * onMoved 触发很密，这里按 40ms 合并一次，避免每个移动事件都打一次 IPC。
+   */
+  let followTimer: ReturnType<typeof setTimeout> | null = null;
+  function syncPetTasksPosition() {
+    if (followTimer) return;
+    followTimer = setTimeout(() => {
+      followTimer = null;
+      void invoke<void>("sync_pet_tasks_position").catch(() => { /* 浮层未显示时无操作 */ });
+    }, 40);
   }
 
   function startDrag(event: PointerEvent) {
     if (event.button !== 0) return;
     event.preventDefault();
-    // 拖动意味着指针已经离开「悬停看任务」的语义：先把环收掉再拖窗口。
-    ringClose();
+    // 环保持打开：拖动过程中浮层会跟着本体一起移动（不再先收环）。
     void getCurrentWindow().startDragging().catch(() => { /* 窗口已销毁时忽略 */ });
   }
 
@@ -253,8 +268,9 @@
   let lastKnownPosition: { x: number; y: number } | null = null;
 
   function onDesktopPointer(event: DesktopPointerEvent) {
-    // 爬行/闪现都从壁纸开始，指针此刻不在本体上：环该收起来了。
-    ringClose();
+    // 壁纸交互期间指针不在本体上：关掉关闭按钮，但**不报告 hover 结束**——
+    // 爬行/闪现时浮层要跟着本体一起移动，不能被收掉。
+    hover = false;
     if (event.kind === "teleport") {
       stopCrawlLoop();
       crawl = null;
@@ -345,10 +361,12 @@
       if (payload.hovered) hover = true;
     });
     unlisteners.push(hovered);
-    // 记录窗口位置（爬行起点用）；拖动/爬行停住后防抖保存位置。
+    // 记录窗口位置（爬行起点用）；拖动/爬行停住后防抖保存位置，
+    // 并让任务浮层跟着一起移动（环显示期间气泡跟随本体）。
     unlisteners.push(getCurrentWindow().onMoved(({ payload }) => {
       lastKnownPosition = { x: payload.x, y: payload.y };
       schedulePositionSave(payload);
+      syncPetTasksPosition();
     }));
     void getCurrentWindow()
       .outerPosition()

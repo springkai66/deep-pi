@@ -246,6 +246,21 @@ fn runtime_update_cache_path(paths: &AppPaths) -> PathBuf {
     paths.cache.join("runtime-updates.json")
 }
 
+/// 事件日志单条失败文本的上限：足够定位，又不至于把日志刷爆。
+const MAX_LOG_ERROR_CHARS: usize = 300;
+
+/// 日志用的失败文本：先按 pi_auth 的令牌规则脱敏（≥32 位的 `[A-Za-z0-9_-]`
+/// 连续串整体替换，避免把凭据写进日志），再截断长度。
+fn redacted_log_text(text: &str) -> String {
+    let redacted = crate::pi_auth::redact(text);
+    if redacted.chars().count() <= MAX_LOG_ERROR_CHARS {
+        return redacted;
+    }
+    let mut truncated: String = redacted.chars().take(MAX_LOG_ERROR_CHARS).collect();
+    truncated.push('…');
+    truncated
+}
+
 fn now_seconds() -> Option<u64> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -317,7 +332,7 @@ fn valid_package_version(version: &str) -> bool {
 }
 
 fn configured_update_proxy() -> Result<Option<String>, String> {
-    // 全局代理设置（手动模式）、或跟随系统时读环境变量；直连模式返回 None。
+    // 手动地址或当前启用的系统代理；不读取启动器继承的旧环境代理。
     Ok(crate::proxy::current_url())
 }
 
@@ -350,7 +365,9 @@ fn fetch_latest_from_registry(
     let encoded = package.replace('/', "%2f");
     let mut config = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(8)))
-        .http_status_as_error(false);
+        .http_status_as_error(false)
+        // None 也要显式传入，否则 ureq 默认会重新读取进程里的旧代理环境。
+        .proxy(None);
     if let Some(proxy) = proxy {
         let proxy =
             ureq::Proxy::new(proxy).map_err(|error| format!("proxy is invalid: {error}"))?;
@@ -621,6 +638,10 @@ fn npm_install_with_registry(
         command.creation_flags(0x0800_0000);
     }
     if let Some(proxy) = proxy {
+        // 这里刻意**不**经过回环中继（#27）：npm 是每次安装现起的短命子进程，
+        // 地址在 spawn 时就解析好了，走中继只会多一跳而不会让「运行中切换代理」
+        // 变得更好（本来就每次重新解析）。中继存在的意义是让长命的 DSH/Pi 会话
+        // 保持恒定地址，那条路径由 apply_to_command 负责。
         command.env("HTTP_PROXY", &proxy).env("HTTPS_PROXY", &proxy);
     }
     // 心跳：大依赖树下载可能超过 1 分钟，界面阶段文本不刷新会让用户以为卡死。
@@ -1135,7 +1156,8 @@ fn install_node(
         let proxy = configured_update_proxy()?;
         let mut config = ureq::Agent::config_builder()
             .timeout_global(Some(Duration::from_secs(900)))
-            .http_status_as_error(false);
+            .http_status_as_error(false)
+            .proxy(None); // 覆盖 ureq 默认的环境代理探测（可能是关闭后的旧端口）。
         if let Some(proxy) = proxy {
             let proxy =
                 ureq::Proxy::new(&proxy).map_err(|error| format!("proxy is invalid: {error}"))?;
@@ -1656,18 +1678,28 @@ fn check_runtime_updates_inner(
                         note,
                     }
                 }
-                Err(error) => RuntimeUpdate {
-                    id: component.id.to_owned(),
-                    name: component.name.to_owned(),
-                    current_version: component.current_version,
-                    latest_version: None,
-                    update_available: false,
-                    installable: component_installable(&paths, component.id),
-                    can_rollback: runtime_backup_exists(&paths, component.id),
-                    stale: false,
-                    error: Some(error),
-                    note: None,
-                },
+                Err(error) => {
+                    // 失败原因必须落日志：否则事后只能看到 `errors=1` 这样的计数，
+                    // 无法区分「哪个组件」「哪个源」「什么原因」（见 #30）。
+                    // 错误文本来自 registry/传输层，不含凭据；仍做长度上限。
+                    log::warn!(
+                        "event=runtime_update_check status=component_failed component={} error={}",
+                        component.id,
+                        redacted_log_text(&error)
+                    );
+                    RuntimeUpdate {
+                        id: component.id.to_owned(),
+                        name: component.name.to_owned(),
+                        current_version: component.current_version,
+                        latest_version: None,
+                        update_available: false,
+                        installable: component_installable(&paths, component.id),
+                        can_rollback: runtime_backup_exists(&paths, component.id),
+                        stale: false,
+                        error: Some(error),
+                        note: None,
+                    }
+                }
             }
         })
         .collect::<Vec<_>>();
@@ -1975,5 +2007,33 @@ mod tests {
         std::fs::write(&manifest, r#"{"dsh":{"profile":{"bundles":"dshmarket"}}}"#).unwrap();
         assert!(!super::reconcile_dshmarket_bundle(&profile).unwrap());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// #30：运行时更新失败的日志文本必须**可定位**（保留 registry 与原因）
+    /// 且**不含凭据**，并有长度上限。
+    #[test]
+    fn runtime_update_log_text_redacts_secrets_and_caps_length() {
+        // 32 位以上的凭据串整体替换。
+        let with_secret =
+            "npmmirror: failed for https://registry.example/abcdefghijklmnopqrstuvwxyz0123456789";
+        let redacted = super::redacted_log_text(with_secret);
+        assert!(redacted.contains("[redacted]"), "{redacted}");
+        assert!(
+            !redacted.contains("abcdefghijklmnopqrstuvwxyz0123456789"),
+            "{redacted}"
+        );
+        // 普通错误文本原样保留：主机名与错误类别是定位的关键信息。
+        let plain = "npmjs: Connection refused (os error 10061)";
+        assert_eq!(super::redacted_log_text(plain), plain);
+        // 超长文本被截断并标记，避免刷爆日志。
+        let long = "err ".repeat(100);
+        let capped = super::redacted_log_text(&long);
+        assert_eq!(
+            capped.chars().count(),
+            super::MAX_LOG_ERROR_CHARS + 1,
+            "length={}",
+            capped.chars().count()
+        );
+        assert!(capped.ends_with('…'));
     }
 }

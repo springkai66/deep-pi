@@ -152,6 +152,9 @@ export const EN_MISC: Record<string, string> = {
   "未命名任务": "Untitled task",
   "还有 {count} 个任务": "{count} more tasks",
   "在主窗口打开：{title}": "Open in the main window: {title}",
+  "任务环半径": "Task ring radius",
+  "气泡环绕桌宠的距离；调近时气泡会自动收窄，任务多到放不下才会略微外扩。":
+    "How far the bubbles orbit the desktop pet. Pull it in and the bubbles narrow automatically; only a very full ring grows outward.",
   "结束任务：{title}": "End task: {title}",
   "停止当前执行，保留会话": "Stop the current run; keep the session",
   "DSH 任务请在主窗口操作": "Manage DSH tasks from the main window",

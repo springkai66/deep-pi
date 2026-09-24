@@ -24,8 +24,6 @@ export interface PetTaskBubblesState {
   pending: string[];
   /** 按任务 id 记录的动作失败原因（其中 id → 时间戳 的部分仅供内部计时）。 */
   actionErrors: Record<string, string>;
-  /** 环上某任务进入结束态的时刻；用于「结束后停留几秒再消失」。 */
-  endedAt: Record<string, number>;
   /** 列表读取失败（环级提示，与单任务动作失败区分开）。 */
   error: string;
 }
@@ -44,20 +42,14 @@ export interface PetTaskBubblesOptions {
   leaveMs?: number;
   /** 任务快照轮询间隔。 */
   refreshMs?: number;
-  /** 结束后气泡在环上停留的时长，然后按退场规则消失。 */
-  endedHoldMs?: number;
   /** 空环（无进行中任务）自动收起前的停留时长。 */
   emptyCloseMs?: number;
 }
-
-/** 结束状态（含被停止）在环上停留多久。 */
-const ENDED_HOLD_MS = 2500;
 
 /** 悬停生命周期、任务快照与原生显隐都收在这里。 */
 export function createPetTaskBubbles(ports: Ports, options: PetTaskBubblesOptions = {}) {
   const leaveMs = options.leaveMs ?? 400;
   const refreshMs = options.refreshMs ?? 1500;
-  const endedHoldMs = options.endedHoldMs ?? ENDED_HOLD_MS;
   const emptyCloseMs = options.emptyCloseMs ?? 1500;
   let state: PetTaskBubblesState = {
     open: false,
@@ -67,9 +59,10 @@ export function createPetTaskBubbles(ports: Ports, options: PetTaskBubblesOption
     tasks: [],
     pending: [],
     actionErrors: {},
-    endedAt: {},
     error: "",
   };
+  /** 主窗口当前工作区：only 该工作流的任务上环；null = 还没收到，先不过滤。 */
+  let agentFilter: Task["agent"] | null = null;
   let desiredOpen = false;
   /** 指针是否悬在桌宠本体上（enter/leave 事件维护；空环收起时据此决定是否设闩）。 */
   let petHovered = false;
@@ -83,11 +76,9 @@ export function createPetTaskBubbles(ports: Ports, options: PetTaskBubblesOption
   let resizeQueue: Promise<void> = Promise.resolve();
   let leaveTimer: ReturnType<typeof setTimeout> | undefined;
   let pollTimer: ReturnType<typeof setTimeout> | undefined;
-  let heldFadeTimer: ReturnType<typeof setTimeout> | undefined;
   let emptyTimer: ReturnType<typeof setTimeout> | undefined;
   /** 最近一次发布给视图的元素数，退场动画时长按它算。 */
   let slotCount = 0;
-  const retained = new Set<string>();
   const pending = new Set<string>();
   const actionErrors = new Map<string, string>();
 
@@ -112,7 +103,6 @@ export function createPetTaskBubbles(ports: Ports, options: PetTaskBubblesOption
   function clearTimers() {
     clearTimeout(leaveTimer);
     clearTimeout(pollTimer);
-    clearTimeout(heldFadeTimer);
     clearTimeout(emptyTimer);
   }
 
@@ -125,21 +115,6 @@ export function createPetTaskBubbles(ports: Ports, options: PetTaskBubblesOption
   function poll() {
     clearTimeout(pollTimer);
     if (desiredOpen && !disposed) pollTimer = setTimeout(() => { void refresh(); }, refreshMs);
-  }
-
-  /**
-   * 结束的任务在环上停留 endedHoldMs 后，再按退场规则逐条淡出。
-   * 计时只在首次观测到结束态时启动，刷新不会把它推后。
-   */
-  function scheduleHeldFade(tasks: Task[]) {
-    clearTimeout(heldFadeTimer);
-    const now = Date.now();
-    const ended = tasks.filter((task) => isEndedTask(task));
-    if (!ended.length) return;
-    // 用「观测到结束的时刻」而不是后端的 completedAt：后者可能是几分钟前，
-    // 打开环时不该让一个早就结束的任务立刻消失。
-    const firstSeen = Math.min(...ended.map((task) => state.endedAt[task.id] ?? now));
-    heldFadeTimer = setTimeout(() => { void close(ended.length); }, Math.max(0, endedHoldMs - (now - firstSeen)));
   }
 
   /** 空环停留 emptyCloseMs 后自动收起；指针仍在本体上则设防循环闩。 */
@@ -161,21 +136,10 @@ export function createPetTaskBubbles(ports: Ports, options: PetTaskBubblesOption
       const tasks = await ports.load();
       if (disposed || cycle !== generation || read !== readVersion) return;
       ports.loaded?.(tasks);
-      // 刚结束的任务要留在环上把结果讲完：先把它们登记进保留集，
-      // 再据此过滤，否则从 running 变 completed 的那一帧气泡会直接消失。
-      const now = Date.now();
-      for (const task of tasks) {
-        if (task.archivedAt == null && isEndedTask(task)) retained.add(task.id);
-      }
-      const visible = visiblePetTasks(tasks, retained);
-      const nextEndedAt: Record<string, number> = {};
-      for (const task of visible) {
-        if (isEndedTask(task)) nextEndedAt[task.id] = state.endedAt[task.id] ?? now;
-      }
-      publish({ tasks: visible, loading: false, endedAt: nextEndedAt, empty: visible.length === 0 });
+      const visible = visiblePetTasks(tasks, agentFilter);
+      publish({ tasks: visible, loading: false, empty: visible.length === 0 });
       // 空环给一段「暂无进行中任务」的停留后自动收起；有任务则取消该计时。
       if (visible.length === 0) scheduleEmptyClose(); else clearTimeout(emptyTimer);
-      scheduleHeldFade(visible);
     } catch {
       if (disposed || cycle !== generation || read !== readVersion) return;
       clearTimeout(emptyTimer);
@@ -194,7 +158,6 @@ export function createPetTaskBubbles(ports: Ports, options: PetTaskBubblesOption
       return;
     }
     clearTimeout(leaveTimer);
-    clearTimeout(heldFadeTimer);
     publish({ open: false, leaving: false, loading: false, empty: false });
     try {
       await resize(false);
@@ -249,7 +212,7 @@ export function createPetTaskBubbles(ports: Ports, options: PetTaskBubblesOption
     desiredOpen = true;
     inside = true;
     const cycle = ++generation;
-    publish({ leaving: false, loading: true, error: "", endedAt: {}, empty: false });
+    publish({ leaving: false, loading: true, error: "", empty: false });
     try {
       await resize(true);
       if (disposed || cycle !== generation) return;
@@ -269,8 +232,6 @@ export function createPetTaskBubbles(ports: Ports, options: PetTaskBubblesOption
     if (action === "stop" && !canStopPetTask(task)) return;
     if (action === "open" && !canOpenPetTask(task)) return;
     pending.add(task.id);
-    // 被停止的任务要留在环上把结果讲完；打开只是跳转，不需要保留项。
-    if (action === "stop") retained.add(task.id);
     ++readVersion; // A pre-action snapshot must not overwrite the action result.
     clearTimeout(leaveTimer);
     actionErrors.delete(task.id);
@@ -293,6 +254,15 @@ export function createPetTaskBubbles(ports: Ports, options: PetTaskBubblesOption
 
   return {
     enter, keepOpen, leave, close, finishClose, refresh, act,
+    /**
+     * 主窗口工作区变化：环上只保留该工作流的任务（null = 未知，先不过滤）。
+     * 环开着时立即重算，不必等下一次轮询。
+     */
+    setAgent(agent: Task["agent"] | null) {
+      if (agent === agentFilter) return;
+      agentFilter = agent;
+      if (state.open && !state.leaving) void refresh();
+    },
     async retry() {
       publish({ error: "", loading: true, empty: false });
       if (state.open) await refresh(); else await enter();
@@ -307,9 +277,4 @@ export function createPetTaskBubbles(ports: Ports, options: PetTaskBubblesOption
       if (needsClose) void resize(false, true).catch(() => {});
     },
   };
-}
-
-/** 结束态：任务已不在运行/等待，气泡只剩「最后看一眼」的价值。 */
-export function isEndedTask(task: Pick<Task, "status">): boolean {
-  return task.status !== "running" && task.status !== "waiting";
 }

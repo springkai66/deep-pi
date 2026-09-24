@@ -447,25 +447,9 @@ fn spawn_bridge(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    // 系统代理注入：桥接内的 OAuth token 交换走 pi 的 EnvHttpProxyAgent，只认
-    // HTTP(S)_PROXY 环境变量。浏览器端走系统代理能完成授权，而这里直连会被
-    // 部分官方服务（如 OpenAI）按地区拦截（HTTP 403），造成「网页成功、应用
-    // 报失败」。用户已显式配置代理环境变量时尊重现状，不覆盖。
-    //
-    // 跟随系统/手动模式的常规注入已由 apply_to_command 完成；这里只补 OAuth
-    // 特例：仅跟随系统模式且严格系统代理（ProxyEnable=1）未命中时，兼容
-    // 「ProxyEnable=0 但写了 ProxyServer」的注册表残留配置。直连模式不注入，
-    // 尊重用户的直连选择。
-    if crate::proxy::current_mode() == "system" && crate::proxy::detect_system_proxy().is_none() {
-        if let Some(pairs) = crate::proxy::decide_proxy_injection(
-            &|key| std::env::var(key).ok(),
-            crate::proxy::detect_system_proxy_tolerant(),
-        ) {
-            for (key, value) in pairs {
-                command.env(key, value);
-            }
-        }
-    }
+    // OAuth 桥接也统一走常驻回环中继。系统代理关闭时不能读取
+    // ProxyEnable=0 的旧 ProxyServer（否则登录仍会钉在过期端口上）；
+    // 子进程环境由 apply_to_command 依据当前系统/手动模式注入。
     if let Some(inject) = inject {
         command.env("PI_AUTH_BRIDGE_TEST_INJECT", inject);
     }

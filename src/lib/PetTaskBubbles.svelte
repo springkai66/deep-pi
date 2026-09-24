@@ -18,8 +18,10 @@
   } from "$lib/pet-task-ring";
 
   // 注意：prop 不能叫 state —— 那会遮蔽 Svelte 的 $state rune。
-  let { ring, onOpen, onAction, onRetry, onKeepOpen, onLeave, onSettled }: {
+  let { ring, radiusTarget = undefined, onOpen, onAction, onRetry, onKeepOpen, onLeave, onSettled }: {
     ring: PetTaskBubblesState;
+    /** 任务环半径（设置里可调）；缺省用 RING_RADIUS_TARGET_DEFAULT。 */
+    radiusTarget?: number;
     /** 点击气泡主体：在主窗口打开该任务（Pi 进任务面板，DSH 进 DSH 视图）。 */
     onOpen: (task: Task) => void;
     onAction: (task: Task) => void;
@@ -36,7 +38,7 @@
   let enterToken = $state(0);
   let showToken = $state(-1);
 
-  const layout = $derived(ringLayout(ring.tasks));
+  const layout = $derived(ringLayout(ring.tasks, radiusTarget));
   const radius = $derived(layout.radius);
   const slots = $derived(ringSlotCount(layout));
 

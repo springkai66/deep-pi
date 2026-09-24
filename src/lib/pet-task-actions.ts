@@ -46,16 +46,16 @@ export function canContinueTask(task: Task): boolean {
 }
 
 /**
- * 环上显示哪些任务：运行中/等待输入，加上「刚结束且需要给出结束提示」的
- * 保留项（被停止、失败或自然完成）。调用方负责在任务进入结束态的瞬间把
- * id 加进 retained，之后由控制器停留几秒再淡出。
+ * 环上显示哪些任务：只显示「正在执行」的任务（status = running）。
+ * Pi 空闲会话是 waiting、DSH 空闲会话同理，都不占环；已结束的任务也不再
+ * 停留——环只讲当下正在跑什么。
+ * agent 给定时只保留该工作流的任务（跟随主窗口当前所在的 Pi / DSH 工作区）。
  */
-export function visiblePetTasks(tasks: Task[], retained: ReadonlySet<string>): Task[] {
-  return tasks.filter((task) => task.archivedAt == null && (
-    task.status === "running" || task.status === "waiting"
-    || (retained.has(task.id)
-      && (task.status === "cancelled" || task.status === "failed" || task.status === "completed"))
-  ));
+export function visiblePetTasks(tasks: Task[], agent?: Task["agent"] | null): Task[] {
+  return tasks.filter((task) =>
+    task.archivedAt == null
+    && task.status === "running"
+    && (!agent || task.agent === agent));
 }
 
 interface ActionPorts {

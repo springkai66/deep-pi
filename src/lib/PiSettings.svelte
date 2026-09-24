@@ -19,6 +19,7 @@
   import RuntimeSettings, { type RuntimeSettingsProps } from "./RuntimeSettings.svelte";
   import { SETTINGS_CATEGORIES, nextSettingsCategory, parseTaskLimit, settingsGroups, type SettingsCategory } from "./settings-navigation";
   import ExternalEditorSettings from "./ExternalEditorSettings.svelte";
+  import { RING_RADIUS_RANGE } from "./pet-task-ring";
   import DiagnosticsPanel from "./DiagnosticsPanel.svelte";
   import PiMcpSkillsSettings from "./PiMcpSkillsSettings.svelte";
   import { t, tm, getLocale } from "$lib/i18n.svelte";
@@ -341,17 +342,24 @@
           </label>
           <p class="muted">{t("任务完成或失败时发送系统通知；应用切到后台（最小化/失焦）也会提示。")}</p>
           <label class="setting-control setting-check">
-            <input type="checkbox" checked={runtime.settings.petEnabled} aria-label={t("启动时显示桌宠")}
+            <input type="checkbox" checked={runtime.settings.petEnabled} aria-label={t("显示桌宠")}
               onchange={(event) => updateSettings({ petEnabled: event.currentTarget.checked })} />
-            <strong>{t("启动时显示桌宠")}</strong>
+            <strong>{t("显示桌宠")}</strong>
           </label>
-          <p class="muted">{t("桌宠常驻桌面，随任务状态做动作；随时可在主窗口工具栏打开或关闭。")}</p>
+          <p class="muted">{t("勾选立即显示、取消立即关闭；下次启动也按此设置。桌宠常驻桌面，随任务状态做动作。")}</p>
           <label class="setting-control setting-check">
             <input type="checkbox" checked={runtime.settings.petAlwaysOnTop} aria-label={t("桌宠置顶显示")}
               onchange={(event) => updateSettings({ petAlwaysOnTop: event.currentTarget.checked })} />
             <strong>{t("桌宠置顶显示")}</strong>
           </label>
           <p class="muted">{t("桌宠浮窗显示在最上方，不被其他窗口遮挡；关闭后可被覆盖。")}</p>
+          <label class="setting-control"><strong>{t("任务环半径")}</strong>
+            <input type="range" min={RING_RADIUS_RANGE.min} max={RING_RADIUS_RANGE.max} step={RING_RADIUS_RANGE.step}
+              aria-label={t("任务环半径")} value={runtime.settings.petTaskRingRadius}
+              oninput={(event) => updateSettings({ petTaskRingRadius: Number(event.currentTarget.value) })} />
+            <span class="muted">{runtime.settings.petTaskRingRadius}px</span>
+          </label>
+          <p class="muted">{t("气泡环绕桌宠的距离；调近时气泡会自动收窄，任务多到放不下才会略微外扩。")}</p>
           <div class="setting-control pet-appearance">
             <strong>{t("桌宠形象")}</strong>
             <div class="pet-preview-row">
@@ -482,11 +490,10 @@
             <select value={runtime.settings.proxyMode} aria-label={t("代理模式")}
               onchange={(event) => updateSettings({ proxyMode: event.currentTarget.value as AppSettings["proxyMode"] })}>
               <option value="system">{t("跟随系统")}</option>
-              <option value="direct">{t("直连（不使用代理）")}</option>
               <option value="manual">{t("手动设置")}</option>
             </select>
           </label>
-          <p class="muted">{t("代理客户端开启虚拟网卡（TUN）模式时已在网络层透明接管流量，DeepPi 应选择「直连」，无需再配置代理。")}</p>
+          <p class="muted">{t("跟随系统使用 Windows 系统代理；若 Windows 系统代理未开启（包括 TUN 透明接管流量），则不强制设置应用层代理，按操作系统路由连接。需要指定代理时选择「手动设置」。")}</p>
           {#if runtime.settings.proxyMode === "manual"}
             <label class="setting-control"><strong>{t("代理地址")}</strong>
               <input type="text" value={runtime.settings.proxyUrl} placeholder="http://127.0.0.1:7890"
@@ -508,7 +515,8 @@
               {#if proxyTestResult}<span class="proxy-state" role="status">{proxyTestResult}</span>{/if}
             </div>
           </div>
-          <p class="muted">{t("代理作用于 Pi / DSH 子进程（含模型请求与 Advisor）、运行时下载、扩展市场与 DeepPi 自身的模型调用；Provider 单独配置的代理优先。跟随系统会读取代理环境变量，未设置时自动检测 Windows 系统代理；直连不使用应用层代理。已打开的会话需重启任务后生效，应用内更新检查需重启应用。")}</p>
+          <p class="muted">{t("代理作用于 Pi / DSH 子进程（含模型请求与 Advisor）、运行时下载、扩展市场与 DeepPi 自身的模型调用；Provider 单独配置的代理优先。跟随系统以 Windows 系统代理设置为准，不把残留的 HTTP_PROXY 当作系统设置；手动设置可覆盖系统代理。已打开的会话需重启任务后生效，应用内更新检查需重启应用。")}</p>
+          <p class="muted">{t("为让已打开的会话在切换代理后立即生效，子进程统一指向本机回环中继；中继只支持 http:// 上游代理，填 https:// 代理地址时该特性不生效，已打开的会话仍需重启任务。")}</p>
         </section>
       </div>
       <div class="settings-panel" hidden={category !== "advanced"}>

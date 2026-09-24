@@ -266,6 +266,22 @@ pub(crate) fn apply_always_on_top(app: &AppHandle, on_top: bool) {
     }
 }
 
+/// 应用「显示桌宠」设置到当前会话：开 → 立即显示，关 → 立即关闭。
+/// 设置里改这个开关即时生效（不必重启应用），也是关闭桌宠之后唯一的恢复入口。
+/// 建窗必须跑在主线程：调用方用 `run_on_main_thread` 投递过来。
+pub(crate) fn apply_enabled(app: &AppHandle, enabled: bool) {
+    if enabled {
+        if let Err(error) = open_or_focus(app) {
+            log::warn!("event=pet_apply_enabled error={error}");
+        }
+        return;
+    }
+    // 关闭走与桌宠自带 ✕ 相同的窗口生命周期：销毁事件里会一并收起任务浮层。
+    if let Some(pet) = app.get_webview_window(PET_LABEL) {
+        let _ = pet.close();
+    }
+}
+
 /// 计算并应用桌宠位置：优先恢复保存值（钳位），否则停靠主显示器右下角。
 fn position_pet(app: &AppHandle, pet: &tauri::WebviewWindow) {
     let monitors = collect_monitors(app);
@@ -384,6 +400,31 @@ pub fn get_pet_task_hover() -> Result<PetTaskHover, String> {
     TASK_HOVER
         .lock()
         .map(|state| state.clone())
+        .map_err(|error| error.to_string())
+}
+
+/// 主窗口当前工作区（"pi" / "dsh"）：桌宠任务环按它只显示该工作流的任务。
+/// None = 还没收到（主窗口未就绪），此时环不过滤。
+static ACTIVE_AGENT: Mutex<Option<String>> = Mutex::new(None);
+
+/// 主窗口上报工作区切换；广播给桌宠与任务浮层两个窗口。
+#[tauri::command]
+pub fn set_active_agent(app: AppHandle, agent: String) -> Result<(), String> {
+    if agent != "pi" && agent != "dsh" {
+        return Err("unknown agent".into());
+    }
+    *ACTIVE_AGENT.lock().map_err(|error| error.to_string())? = Some(agent.clone());
+    let _ = app.emit_to(PET_TASKS_LABEL, "active-agent", agent.clone());
+    let _ = app.emit_to(PET_LABEL, "active-agent", agent);
+    Ok(())
+}
+
+/// 读取当前工作区快照（浮层/桌宠加载时先读一次，避免错过广播）。
+#[tauri::command]
+pub fn get_active_agent() -> Result<Option<String>, String> {
+    ACTIVE_AGENT
+        .lock()
+        .map(|agent| agent.clone())
         .map_err(|error| error.to_string())
 }
 
@@ -562,23 +603,10 @@ pub async fn set_pet_tasks_visible(
             let _ = popup.set_ignore_cursor_events(true);
             return result;
         }
-        let pet = app
-            .get_webview_window(PET_LABEL)
-            .ok_or("pet window is closed")?;
-        let scale = pet.scale_factor().map_err(|error| error.to_string())?;
-        let pos = pet.outer_position().map_err(|error| error.to_string())?;
-        let size = pet.inner_size().map_err(|error| error.to_string())?;
-        let target = (
-            (TASKS_SIZE * scale).round() as u32,
-            (TASKS_SIZE * scale).round() as u32,
-        );
-        let (x, y) = ring_window_position((pos.x, pos.y, size.width, size.height), target);
-        popup
-            .set_position(PhysicalPosition::new(x, y))
-            .map_err(|error| error.to_string())?;
-        popup
-            .set_size(LogicalSize::new(TASKS_SIZE, TASKS_SIZE))
-            .map_err(|error| error.to_string())?;
+        if app.get_webview_window(PET_LABEL).is_none() {
+            return Err("pet window is closed".into());
+        }
+        place_tasks_popup(&app)?;
         popup.show().map_err(|error| error.to_string())?;
         // 显示后才开始命中轮询；线程内部按此标志在 15ms/150ms 两档间切换。
         PET_TASKS_HITTABLE.store(true, Ordering::SeqCst);
@@ -587,6 +615,49 @@ pub async fn set_pet_tasks_visible(
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+/// 把任务浮层摆到桌宠当前所在位置（窗口中心对齐本体中心）。开环时与
+/// 桌宠移动跟随（sync_pet_tasks_position）共用，两处必须完全一致。
+fn place_tasks_popup(app: &AppHandle) -> Result<(), String> {
+    let popup = app
+        .get_webview_window(PET_TASKS_LABEL)
+        .ok_or("task popup is closed")?;
+    let pet = app
+        .get_webview_window(PET_LABEL)
+        .ok_or("pet window is closed")?;
+    let scale = pet.scale_factor().map_err(|error| error.to_string())?;
+    let pos = pet.outer_position().map_err(|error| error.to_string())?;
+    let size = pet.inner_size().map_err(|error| error.to_string())?;
+    let target = (
+        (TASKS_SIZE * scale).round() as u32,
+        (TASKS_SIZE * scale).round() as u32,
+    );
+    let (x, y) = ring_window_position((pos.x, pos.y, size.width, size.height), target);
+    popup
+        .set_position(PhysicalPosition::new(x, y))
+        .map_err(|error| error.to_string())?;
+    popup
+        .set_size(LogicalSize::new(TASKS_SIZE, TASKS_SIZE))
+        .map_err(|error| error.to_string())
+}
+
+/// 桌宠移动后把浮层同步到新位置：环显示期间气泡跟着本体一起走。
+/// 由桌宠页在窗口移动时调用（前端已节流），浮层没显示时直接跳过。
+#[tauri::command]
+pub async fn sync_pet_tasks_position(
+    webview: tauri::Webview,
+    app: AppHandle,
+) -> Result<(), String> {
+    if webview.label() != PET_LABEL {
+        return Err("task popup follow requires the pet webview".into());
+    }
+    if !PET_TASKS_HITTABLE.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+    tauri::async_runtime::spawn_blocking(move || place_tasks_popup(&app))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 // —— 任务环命中切换：浮层默认点击穿透，光标落在可点矩形上才临时接管 ——

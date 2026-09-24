@@ -222,8 +222,8 @@ export const EN_SETTINGS: Record<string, string> = {
   "安装更新": "Install update",
   "检查应用更新": "Check for app updates",
   "未知错误": "Unknown error",
-  "无法连接更新服务器：{detail}。请检查网络；直连模式可能无法直达 GitHub，可在 设置 → 网络代理 中改为「手动」并填入本地代理地址后重试。":
-    "Could not reach the update server: {detail}. Check your network; in Direct mode GitHub may be unreachable — switch to Manual with your local proxy address in Settings → Network proxy and retry.",
+  "无法连接更新服务器：{detail}。请确认系统本身能访问更新服务器；若使用手动代理，请检查代理地址及服务是否可用。":
+    "Could not reach the update server: {detail}. Make sure your system can reach it; if using a manual proxy, check its address and that the proxy service is available.",
   "运行服务": "Running services",
   "{count} 个任务运行中": "{count} tasks running",
   "没有运行中的任务": "No tasks running",
@@ -269,7 +269,6 @@ export const EN_SETTINGS: Record<string, string> = {
   "网络代理": "Network proxy",
   "代理模式": "Proxy mode",
   "跟随系统": "Follow system",
-  "直连（不使用代理）": "Direct (no proxy)",
   "手动设置": "Manual",
   "代理地址": "Proxy address",
   "例外地址": "No-proxy list",
@@ -277,24 +276,26 @@ export const EN_SETTINGS: Record<string, string> = {
   "测试中…": "Testing…",
   "连接成功（{result}）": "Connected ({result})",
   "连接失败：{error}": "Connection failed: {error}",
-  "代理作用于 Pi / DSH 子进程（含模型请求与 Advisor）、运行时下载、扩展市场与 DeepPi 自身的模型调用；Provider 单独配置的代理优先。跟随系统会读取代理环境变量，未设置时自动检测 Windows 系统代理；直连不使用应用层代理。已打开的会话需重启任务后生效，应用内更新检查需重启应用。":
-    "The proxy applies to Pi/DSH child processes (model requests and Advisor included), runtime downloads, the extension marketplace, and DeepPi's own model calls; a provider's own proxy takes precedence. Follow system reads proxy environment variables and falls back to the Windows system proxy when none are set; direct bypasses application-layer proxies. Restart a task for open sessions and restart the app for in-app update checks.",
+  "代理作用于 Pi / DSH 子进程（含模型请求与 Advisor）、运行时下载、扩展市场与 DeepPi 自身的模型调用；Provider 单独配置的代理优先。跟随系统以 Windows 系统代理设置为准，不把残留的 HTTP_PROXY 当作系统设置；手动设置可覆盖系统代理。已打开的会话需重启任务后生效，应用内更新检查需重启应用。":
+    "The proxy applies to Pi/DSH child processes (including model requests and Advisor), runtime downloads, the extension marketplace, and DeepPi's own model calls; a provider's own proxy takes precedence. Follow system uses the Windows proxy setting, not a leftover HTTP_PROXY variable; Manual can override it. Restart a task for open sessions and restart the app for in-app update checks.",
+  "为让已打开的会话在切换代理后立即生效，子进程统一指向本机回环中继；中继只支持 http:// 上游代理，填 https:// 代理地址时该特性不生效，已打开的会话仍需重启任务。":
+    "So that open sessions pick up a proxy change immediately, child processes point at a loopback relay. The relay only supports http:// upstream proxies: with an https:// proxy address this does not apply and open sessions still need a task restart.",
   // —— 通知与桌宠 ——
   "通知与桌宠": "Notifications & pet",
   "任务完成通知": "Task completion notifications",
-  "启动时显示桌宠": "Show the desktop pet on startup",
+  // 「显示桌宠」的译名在 i18n-en-misc.ts（EN_MISC 最后合并，避免重复条目）。
+  "勾选立即显示、取消立即关闭；下次启动也按此设置。桌宠常驻桌面，随任务状态做动作。":
+    "Checking shows the pet right away and unchecking closes it; the next launch follows the same setting. The pet lives on your desktop and reacts to task states.",
   "桌宠置顶显示": "Keep the pet on top",
   "桌宠浮窗显示在最上方，不被其他窗口遮挡；关闭后可被覆盖。":
     "The pet window stays above other windows. Turn it off to let windows cover the pet.",
   "任务完成或失败时发送系统通知；应用切到后台（最小化/失焦）也会提示。":
     "Send a system notification when a task completes or fails. It also pops up while the app is in the background (minimized or unfocused).",
-  "桌宠常驻桌面，随任务状态做动作；随时可在主窗口工具栏打开或关闭。":
-    "The pet lives on your desktop and reacts to task states. Open or close it anytime from the main-window toolbar.",
   "桌宠形象": "Pet appearance",
   "选择图片…": "Pick an image…",
   "恢复默认": "Restore default",
-  "代理客户端开启虚拟网卡（TUN）模式时已在网络层透明接管流量，DeepPi 应选择「直连」，无需再配置代理。":
-    "When your proxy client runs in TUN (virtual adapter) mode it takes over traffic at the network layer; set DeepPi to Direct — no app-level proxy is needed.",
+  "跟随系统使用 Windows 系统代理；若 Windows 系统代理未开启（包括 TUN 透明接管流量），则不强制设置应用层代理，按操作系统路由连接。需要指定代理时选择「手动设置」。":
+    "Follow system uses the Windows system proxy. If the Windows proxy is off (including when TUN transparently handles traffic), the app does not force an application-layer proxy and uses the OS network route. Choose Manual to specify a proxy address.",
   "选择桌宠形象图片": "Choose a pet image",
   "图片": "Images",
 };

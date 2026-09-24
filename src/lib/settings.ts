@@ -10,8 +10,8 @@ export type CloseBehavior = "ask" | "minimize" | "exit";
 export type TerminalShell = "powershell" | "pwsh" | "bash" | "cmd";
 /** AI 对话内容的显示详细程度：简洁（只看正文）/ 标准（过程内容折叠）/ 详细（过程内容默认展开）。 */
 export type ChatDetailLevel = "concise" | "standard" | "verbose";
-/** 全局网络代理模式：跟随系统（代理环境变量，未设置时自动检测 Windows 系统代理）/ 直连 / 手动地址。 */
-export type ProxyMode = "system" | "direct" | "manual";
+/** 全局网络代理模式：跟随 Windows 系统代理（关闭时按操作系统路由）/ 手动指定代理地址。 */
+export type ProxyMode = "system" | "manual";
 
 export const CHAT_DETAIL_LEVELS: Array<{ value: ChatDetailLevel; label: string }> = [
   { value: "concise", label: "简洁" },
@@ -61,6 +61,8 @@ export interface AppSettings {
   petEnabled: boolean;
   /** 桌宠浮窗是否置顶（显示在最上方）。 */
   petAlwaysOnTop: boolean;
+  /** 任务环半径（逻辑像素）：气泡环绕桌宠的距离。 */
+  petTaskRingRadius: number;
 }
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
@@ -83,12 +85,13 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   piEnvironment: "managed",
   chatDetailLevel: "standard",
   customThemes: [],
-  proxyMode: "direct",
+  proxyMode: "system",
   proxyUrl: "",
   proxyNoProxy: "",
   notifyOnTaskComplete: true,
   petEnabled: true,
   petAlwaysOnTop: true,
+  petTaskRingRadius: 100,
 };
 
 export const FONT_SIZE_RANGE = { min: 9, max: 32 } as const;

@@ -27,14 +27,14 @@ function isRetryableUpdateError(error: unknown): boolean {
   );
 }
 
-/// 把更新检查/安装的错误转成可操作的提示：传输层失败补代理排查建议
-/// （直连模式下 GitHub 可能无法直达，是最常见的诱因）；其余原样透出。
+/// 把更新检查/安装的错误转成可操作的提示：传输层失败时提示
+/// 对照系统网络状态和手动代理设置排查；其余原样透出。
 export function describeUpdateError(error: unknown): string {
   const detail = String(error ?? "").trim();
   if (!detail) return t("未知错误");
   if (!isRetryableUpdateError(detail)) return detail;
   return t(
-    "无法连接更新服务器：{detail}。请检查网络；直连模式可能无法直达 GitHub，可在 设置 → 网络代理 中改为「手动」并填入本地代理地址后重试。",
+    "无法连接更新服务器：{detail}。请确认系统本身能访问更新服务器；若使用手动代理，请检查代理地址及服务是否可用。",
     { detail },
   );
 }

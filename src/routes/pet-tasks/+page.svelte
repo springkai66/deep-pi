@@ -10,15 +10,34 @@
   import { createPetTaskBubbles, type PetTaskBubblesState } from "$lib/pet-task-bubbles";
   import { createPetTaskActionClient, PET_TASK_ACTION_EVENT, PET_TASK_RESULT_EVENT, type PetTaskResult } from "$lib/pet-task-actions";
   import { applyAppearance } from "$lib/appearance";
+  import { RING_RADIUS_TARGET_DEFAULT } from "$lib/pet-task-ring";
   import { t } from "$lib/i18n.svelte";
   import type { AppSettings } from "$lib/settings";
   import type { Task } from "$lib/task";
 
   let taskBubbles = $state<PetTaskBubblesState>({
-    open: false, leaving: false, loading: false, empty: false, tasks: [], pending: [], actionErrors: {}, endedAt: {}, error: "",
+    open: false, leaving: false, loading: false, empty: false, tasks: [], pending: [], actionErrors: {}, error: "",
   });
   let hoverRevision = 0;
   let petDebug = $state(false);
+  /** 主窗口当前工作区：环上只显示该工作流的任务（Pi / DSH）。 */
+  let activeAgent = $state<"pi" | "dsh" | null>(null);
+  /** 任务环半径（设置里可调）：气泡环绕桌宠的距离。 */
+  let ringRadiusTarget = $state(RING_RADIUS_TARGET_DEFAULT);
+
+  /** 设置里的半径：越界/缺失时回落默认。 */
+  function applyRingRadius(settings: AppSettings) {
+    const value = settings.petTaskRingRadius;
+    ringRadiusTarget = typeof value === "number" && Number.isFinite(value)
+      ? value
+      : RING_RADIUS_TARGET_DEFAULT;
+  }
+
+  /** 工作区变化：把过滤条件交给控制器，环开着时立即重算。 */
+  function applyActiveAgent(agent: "pi" | "dsh" | null) {
+    activeAgent = agent;
+    bubbles.setAgent(agent);
+  }
 
   // —— 可点矩形推送：浮层默认点击穿透，宿主轮询光标命中这些矩形才临时接管 ——
   type HitRect = { x: number; y: number; width: number; height: number };
@@ -93,7 +112,9 @@
     void (async () => {
       try {
         await invoke<void>("await_startup");
-        applyAppearance(await invoke<AppSettings>("get_settings"));
+        const settings = await invoke<AppSettings>("get_settings");
+        applyAppearance(settings);
+        applyRingRadius(settings);
       } catch { /* 启动未就绪：保持默认外观 */ }
     })();
     void invoke<boolean>("pet_debug_enabled")
@@ -102,7 +123,11 @@
     const unlisteners = [
       listen("pet-appearance", () => {
         void (async () => {
-          try { applyAppearance(await invoke<AppSettings>("get_settings")); } catch { /* 保留外观 */ }
+          try {
+            const settings = await invoke<AppSettings>("get_settings");
+            applyAppearance(settings);
+            applyRingRadius(settings);
+          } catch { /* 保留外观 */ }
         })();
       }),
       // 先注册 hover 监听，再读带版本的当前状态：覆盖页面加载期间的移出事件。
@@ -110,6 +135,10 @@
         if (payload.revision < hoverRevision) return;
         hoverRevision = payload.revision;
         if (payload.hovered) void enterRing(); else bubbles.leave();
+      }),
+      // 工作区切换：环上只留当前工作流的任务。
+      listen<"pi" | "dsh">("active-agent", ({ payload }) => {
+        if (payload === "pi" || payload === "dsh") applyActiveAgent(payload);
       }),
     ];
     void (async () => {
@@ -120,6 +149,12 @@
         if (state.hovered) void enterRing();
       } catch { /* 快照读取失败时等待下一次 hover 事件 */ }
     })();
+    void (async () => {
+      try {
+        const agent = await invoke<"pi" | "dsh" | null>("get_active_agent");
+        if (!disposed && (agent === "pi" || agent === "dsh")) applyActiveAgent(agent);
+      } catch { /* 主窗口未就绪时先不过滤 */ }
+    })();
     return () => {
       disposed = true;
       bubbles.dispose();
@@ -129,8 +164,11 @@
     };
   });
 
-  /** 指针进入本体：让环按当前任务数量反推的半径依次绽放。 */
+  /** 指针进入本体：先取一次最新设置（半径可能刚被调过），再依次绽放。 */
   async function enterRing() {
+    try {
+      applyRingRadius(await invoke<AppSettings>("get_settings"));
+    } catch { /* 读不到设置就用上一次的值 */ }
     await bubbles.enter();
   }
 </script>
@@ -141,7 +179,7 @@
 </svelte:head>
 
 {#if taskBubbles.open || taskBubbles.leaving}
-  <PetTaskBubbles ring={taskBubbles}
+  <PetTaskBubbles ring={taskBubbles} radiusTarget={ringRadiusTarget}
     onOpen={(task) => void bubbles.act("open", task)}
     onAction={(task) => void bubbles.act("stop", task)}
     onRetry={() => void bubbles.retry()}

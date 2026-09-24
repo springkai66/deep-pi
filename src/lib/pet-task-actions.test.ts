@@ -55,19 +55,24 @@ describe("pet task action gates", () => {
     expect(canOpenPetTask(task({ id: "a", archivedAt: 1 }))).toBe(false);
   });
 
-  it("shows live tasks plus retained ended ones and hides archived rows", () => {
+  it("shows only tasks that are currently executing", () => {
     const running = task({ id: "run" });
-    const stopped = task({ id: "stop", status: "cancelled", runId: null });
+    const waiting = task({ id: "wait", status: "waiting" });
     const completed = task({ id: "done", status: "completed", runId: null });
-    // 三种结束方式都要能留在环上把结果讲完：被停止、失败、自然完成。
-    const retained = visiblePetTasks(
-      [running, stopped, task({ id: "failed", status: "failed", runId: null }), completed],
-      new Set(["stop", "failed", "done"]),
-    );
-    expect(retained.map((task) => task.id)).toEqual(["run", "stop", "failed", "done"]);
-    // 没登记保留项的结束任务不显示（避免每次悬停都翻出历史任务）。
-    expect(visiblePetTasks([completed], new Set()).map((task) => task.id)).toEqual([]);
-    expect(visiblePetTasks([task({ id: "archived", archivedAt: 1 })], new Set(["archived"]))).toEqual([]);
+    const failed = task({ id: "failed", status: "failed", runId: null });
+    // 只讲当下正在跑什么：等待输入与已结束都不上环。
+    expect(visiblePetTasks([running, waiting, completed, failed]).map((value) => value.id)).toEqual(["run"]);
+    // 归档行永远不显示。
+    expect(visiblePetTasks([task({ id: "archived", archivedAt: 1 })])).toEqual([]);
+  });
+
+  it("narrows to the workspace's agent when one is given", () => {
+    const pi = task({ id: "pi-1" });
+    const dsh = task({ id: "dsh-1", agent: "dsh", runId: null });
+    expect(visiblePetTasks([pi, dsh], "pi").map((value) => value.id)).toEqual(["pi-1"]);
+    expect(visiblePetTasks([pi, dsh], "dsh").map((value) => value.id)).toEqual(["dsh-1"]);
+    // 未知工作区（null）：不过滤。
+    expect(visiblePetTasks([pi, dsh], null).map((value) => value.id)).toEqual(["pi-1", "dsh-1"]);
   });
 });
 

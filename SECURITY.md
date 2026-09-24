@@ -11,6 +11,7 @@ DeepPi is a Windows-first local desktop application. The security boundary is th
 | DeepPi to Pi Package registry | Command injection or package metadata abuse | Exact npm version confirmation, package-source validation, no shell interpolation, CI install scripts disabled |
 | DeepPi to Pi/DSH child process | Secret inheritance or unexpected process access | Minimal environment variables, no key in arguments/logs, managed process paths, activity checks before runtime swap |
 | Main window to DSH WebView | LAN exposure or navigation escape | DSH binds to `127.0.0.1`, dynamic port, active-origin allowlist, external opener for other origins |
+| Loopback proxy relay | Local port abuse, tunnelled credential leakage, silent proxy bypass | `127.0.0.1`-only bind, bounded request head with handshake timeout, no SOCKS/PAC/auth, explicit `502` instead of a direct fallback |
 | Runtime update source | Malicious or partial update replacing the active runtime | HTTPS registry, exact version validation, `--ignore-scripts`, staging verification, atomic swap, rollback backup |
 | DeepPi self updater | Unsigned installer or downgrade from an untrusted endpoint | Tauri updater public-key verification, HTTPS-only `latest.json`, signed installer artifacts, Release secret gates |
 
@@ -24,7 +25,7 @@ DeepPi is a Windows-first local desktop application. The security boundary is th
 | DSH WebView | navigation impersonation | hostile page navigation | host status events | local data exposure | loopback and bounded WebView | active-origin allowlist |
 | Package and runtime install | untrusted package source | staged atomic activation | install/rollback logs | bounded child output | retries, timeouts, no lifecycle scripts | exact versions and compatibility checks |
 
-The review is intentionally tied to the six runtime boundaries above. Any new command, external URL, child process, package source, or credential path must add a validation rule and a focused regression test before release.
+The review is intentionally tied to the runtime boundaries above. Any new command, external URL, child process, package source, or credential path must add a validation rule and a focused regression test before release.
 
 ## Controls
 
@@ -37,6 +38,7 @@ The review is intentionally tied to the six runtime boundaries above. Any new co
 - Pi bridge status uses a task-scoped Windows Named Pipe with remote clients rejected; the state-file fallback contains only `running`/`waiting` and is bounded to the per-user temp directory.
 - Lifecycle scripts are disabled for CI dependency installation, and production dependency audit and license validation are required CI steps.
 - Runtime update requests honor only validated `HTTPS_PROXY`/`HTTP_PROXY` environment proxies; invalid proxy URLs fail closed.
+- DeepPi runs a loopback-only proxy relay so child processes keep a constant proxy address while the proxy mode changes underneath them. It binds `127.0.0.1` on an ephemeral port, bounds the request line and header block, times out the handshake, rejects upstream URLs carrying credentials, never forwards `Proxy-Authorization` or any other proxy credential header, and answers `502` when the upstream is unreachable instead of falling back to a direct connection.
 - DeepPi self updates use the Tauri updater signature embedded in `latest.json`; development builds without a release overlay cannot install an update.
 
 ## Checks
