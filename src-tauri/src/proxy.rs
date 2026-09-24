@@ -112,7 +112,23 @@ pub fn validate_url(value: &str) -> Result<String, String> {
     {
         return Err("proxy address host is invalid".into());
     }
-    Ok(format!("{scheme}://{authority}"))
+    // 字符串检查挡不住 `http://:7890`（空主机）、`http://host:99999`（端口越界）、
+    // `http://[::1:7890`（IPv6 不闭合）这类地址：它们都能通过上面的检查，却在
+    // `Url::parse` 失败。若不在这里拦下，坏地址会被保存，随后 `build_ureq_proxy`
+    // 返回 None（= 未配置代理）→ 测试连接走直连却报「连接成功」（#32）。
+    let candidate = format!("{scheme}://{authority}");
+    let parsed =
+        Url::parse(&candidate).map_err(|_| "proxy address is not a valid URL".to_string())?;
+    if parsed.host_str().is_none_or(str::is_empty) {
+        return Err("proxy address host is invalid".into());
+    }
+    match parsed.port() {
+        Some(0) => return Err("proxy address port is invalid".into()),
+        Some(_) => {}
+        // 未写端口：使用 scheme 默认端口（http 80 / https 443）。
+        None => {}
+    }
+    Ok(candidate)
 }
 
 /// 校验整组代理设置（保存设置时由 settings::validate 调用）。
@@ -511,6 +527,10 @@ fn build_ureq_proxy(url: &str, no_proxy: &str) -> Option<ureq::Proxy> {
 /// 代理构造的**唯一**入口（#29）：真实请求（`ureq_proxy()`）与「测试连接」
 /// （`proxy_test`）都必须经过这里，否则按钮会拿一条与 DSH 不同的路径去报「通」。
 /// 例外地址一律合并本地默认——回环调用不能被送进代理。
+///
+/// **手动模式 fail-closed**（#32）：地址无法构造出代理时必须报错，绝不能返回
+/// `Ok(None)`——那等于「未配置代理」，会让测试连接走直连却显示「连接成功」，
+/// 与子进程实际走的路径相反。
 fn proxy_for_mode(
     mode: &str,
     manual_url: &str,
@@ -520,7 +540,9 @@ fn proxy_for_mode(
     match normalize_mode(mode) {
         "manual" => {
             let url = validate_url(manual_url)?;
-            Ok(build_ureq_proxy(&url, &no_proxy))
+            build_ureq_proxy(&url, &no_proxy)
+                .map(Some)
+                .ok_or_else(|| "proxy address is unusable".to_string())
         }
         // 跟随系统：以当前启用的 Windows 系统设置为准，不读继承的环境代理。
         _ => Ok(detect_system_proxy().and_then(|url| build_ureq_proxy(&url, &no_proxy))),
@@ -698,12 +720,34 @@ fn probe(proxy: Option<ureq::Proxy>) -> Result<String, String> {
     Err(format!("目标返回 HTTP {status} · {elapsed} ms"))
 }
 
-/// 按给定配置测试代理连通性。**与真实请求共用 `proxy_for_mode`**（#29）：
-/// 同一份配置必须构造出同一个代理，否则「测试连接」会与实际行为不符。
+/// 系统模式下「测试连接」用的代理：按**本次测试的目标**解析系统设置，与子进程
+/// 经中继得到的答案同源（含 PAC/WPAD 与按协议分流）。只读静态注册表
+/// （`detect_system_proxy`）看不到 PAC，会让按钮与 DSH 得出相反结论——比如
+/// `ProxyEnable=0` + PAC 的常见企业配置下，DSH 走 PAC 而按钮报「直连成功」。
+fn system_route_proxy(no_proxy: &str) -> Result<Option<ureq::Proxy>, String> {
+    match crate::system_proxy::resolve(TEST_URL) {
+        crate::system_proxy::Route::Direct => Ok(None),
+        crate::system_proxy::Route::HttpProxy(url) => {
+            build_ureq_proxy(&url, &combined_no_proxy(no_proxy))
+                .map(Some)
+                .ok_or_else(|| "system proxy address is unusable".to_string())
+        }
+        // 系统启用了无法安全表达的路由：如实报出来，不假装直连成功。
+        crate::system_proxy::Route::Unsupported(reason) => Err(reason),
+    }
+}
+
+/// 按给定配置测试代理连通性。**与真实请求共用同一套构造**（#29）：手动模式走
+/// `proxy_for_mode`，跟随系统模式按测试目标解析系统设置，否则「测试连接」会与
+/// 实际行为不符。
 #[tauri::command]
 pub async fn proxy_test(mode: String, url: String) -> Result<String, String> {
     let no_proxy = snapshot().no_proxy;
-    let proxy = proxy_for_mode(&mode, &url, &no_proxy)?;
+    let proxy = if normalize_mode(&mode) == "manual" {
+        proxy_for_mode(&mode, &url, &no_proxy)?
+    } else {
+        system_route_proxy(&no_proxy)?
+    };
     tauri::async_runtime::spawn_blocking(move || probe(proxy))
         .await
         .map_err(|error| error.to_string())?
@@ -1102,6 +1146,44 @@ mod tests {
         assert!(proxy_for_mode("manual", "", "").is_err());
         // 旧版 direct 值已被迁移为跟随系统，不再有第三种分支。
         assert!(proxy_for_mode("direct", "", "").is_ok());
+    }
+
+    /// #32：手动地址必须 **fail-closed**。此前 `validate_url` 只做字符串检查，
+    /// `http://:7890`、`http://host:99999`、`http://[::1:7890`、`http://h:1:2`
+    /// 都能通过校验被保存，而 `build_ureq_proxy` 解析失败返回 None（= 未配置
+    /// 代理）→ 测试连接走直连却报「连接成功」。这四个地址现在都必须被拒。
+    #[test]
+    fn unusable_manual_addresses_are_rejected_not_silently_disabled() {
+        for bad in [
+            "http://:7890",             // 空主机
+            "http://host:99999",        // 端口越界
+            "http://[::1:7890",         // IPv6 未闭合
+            "http://127.0.0.1:7890:80", // 双端口
+            "http://host:0",            // 端口 0
+            "http://",                  // 只有 scheme
+        ] {
+            assert!(
+                validate_url(bad).is_err(),
+                "{bad} must be rejected at validation time"
+            );
+            assert!(
+                proxy_for_mode("manual", bad, "").is_err(),
+                "{bad} must fail closed, never become 'no proxy'"
+            );
+        }
+        // 合法地址不受影响。
+        for good in [
+            "http://127.0.0.1:7890",
+            "https://proxy.local:8443",
+            "http://proxy.local",
+            "http://[::1]:7890",
+        ] {
+            assert!(validate_url(good).is_ok(), "{good} must stay valid");
+            assert!(
+                proxy_for_mode("manual", good, "").unwrap().is_some(),
+                "{good} must construct a proxy"
+            );
+        }
     }
 
     #[test]

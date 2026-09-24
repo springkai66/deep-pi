@@ -160,38 +160,57 @@ fn describe_failure(failure: &AttemptFailure) -> String {
 /// 日志文本上限：足够定位，又不至于把日志刷爆。
 const MAX_LOG_CHARS: usize = 300;
 
-/// 去掉 URL 里的 userinfo：`scheme://user:pass@host` → `scheme://[redacted]@host`。
-/// `pi_auth::redact` 只覆盖 ≥32 位的长串，**短口令不会被它处理**，而日志里
-/// 最可能出现的凭据形态就是 URL 的 userinfo，因此这里单独兜一层。
-fn strip_userinfo(text: &str) -> String {
+/// 去掉日志文本里 URL 的敏感部分：userinfo 与**查询串的值**。
+///
+/// - `scheme://user:pass@host` → `scheme://[redacted]@host`
+/// - `?token=abc123` → `?token=[redacted]`（键保留：它不是凭据，且有助于定位）
+///
+/// 这一层必须存在：`pi_auth::redact` 只替换 **≥32 位**的 `[A-Za-z0-9_-]` 连续串，
+/// 而日志里最可能出现的凭据恰恰是**短短口令**与**短查询令牌**，它们不会被它覆盖。
+fn redact_url_secrets(text: &str) -> String {
     let mut output = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(index) = rest.find("://") {
         let (head, tail) = rest.split_at(index + 3);
         output.push_str(head);
-        // authority 截止到第一个 '/'、'?'、'#' 或空白。
-        let end = tail
-            .find(|character: char| ['/', '?', '#', ' ', '\t'].contains(&character))
-            .unwrap_or(tail.len());
-        let authority = &tail[..end];
-        match authority.rsplit_once('@') {
-            Some((_, host)) => {
-                output.push_str("[redacted]@");
-                output.push_str(host);
-            }
-            None => output.push_str(authority),
-        }
+        // 日志里的 URL 不含空白，据此切出整条 URL。
+        let end = tail.find(char::is_whitespace).unwrap_or(tail.len());
+        output.push_str(&redact_one_url(&tail[..end]));
         rest = &tail[end..];
     }
     output.push_str(rest);
     output
 }
 
-/// 脱敏（先剥离 URL userinfo，再复用 pi_auth 的令牌规则：≥32 位
+/// 单条 URL：剥离 userinfo，并把查询串的值替换为 `[redacted]`。
+fn redact_one_url(url: &str) -> String {
+    // authority：`://` 之后到第一个 `/`、`?`、`#` 之前。
+    let authority_end = url.find(['/', '?', '#']).unwrap_or(url.len());
+    let (authority, remainder) = url.split_at(authority_end);
+    let authority = match authority.rsplit_once('@') {
+        Some((_, host)) => format!("[redacted]@{host}"),
+        None => authority.to_owned(),
+    };
+    let Some(query_start) = remainder.find('?') else {
+        return format!("{authority}{remainder}");
+    };
+    let (before_query, query) = remainder.split_at(query_start + 1);
+    let query = query
+        .split('&')
+        .map(|pair| match pair.split_once('=') {
+            Some((key, _)) => format!("{key}=[redacted]"),
+            None => pair.to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join("&");
+    format!("{authority}{before_query}{query}")
+}
+
+/// 脱敏（先处理 URL 的 userinfo 与查询串，再复用 pi_auth 的令牌规则：≥32 位
 /// `[A-Za-z0-9_-]` 连续串整体替换）并截断。凭据因此不会进入日志，
 /// 符合 SECURITY.md 的约束。
 fn log_text(text: &str) -> String {
-    let redacted = strip_userinfo(&crate::pi_auth::redact(text));
+    let redacted = redact_url_secrets(&crate::pi_auth::redact(text));
     if redacted.chars().count() <= MAX_LOG_CHARS {
         return redacted;
     }
@@ -413,19 +432,23 @@ mod tests {
             describe_failure(&failure("connection refused", None)).contains("category=tcp_connect")
         );
 
-        // 凭据与查询串绝不出现：短口令靠 userinfo 剥离，长令牌靠 redact。
+        // 凭据与查询串绝不出现：短口令靠 userinfo 剥离，长令牌靠 redact，
+        // **短的查询串值**靠查询串脱敏（三者各管一段）。
         let token = "a".repeat(40);
         let described = describe_failure(&failure(
-            &format!("failed for http://user:secret@proxy.local:8080/path?token={token}"),
+            &format!("failed for http://user:secret@proxy.local:8080/path?token={token}&k=v"),
             None,
         ));
         assert!(!described.contains("secret"), "{described}");
         assert!(!described.contains(&token), "{described}");
-        // 查询串的**值**必须消失；参数名保留（它不是凭据，且有助于定位）。
+        // 短值也必须消失——此前只覆盖 ≥32 位长串，注释与断言都在说谎。
+        assert!(!described.contains("k=v"), "{described}");
         assert!(
             !described.contains(&format!("token={token}")),
             "{described}"
         );
+        assert!(described.contains("token=[redacted]"), "{described}");
+        assert!(described.contains("k=[redacted]"), "{described}");
         assert!(
             described.contains("[redacted]@proxy.local:8080"),
             "{described}"
