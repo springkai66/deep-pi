@@ -135,11 +135,16 @@ pub fn start_global() -> Result<u16, String> {
         .port();
     // 只对全局中继按连接重读系统设置；测试用 spawn_with 仍取注入的共享上游。
     // Windows 设置变化（开启/关闭代理）与 PAC 求值都无需重启 DeepPi 或 DSH。
+    //
+    // accept 线程起不来时必须让整次启动失败：否则端口照常发布，子进程会被钉在
+    // 一个没有人 accept 的中继上、每个请求都失败，而 lib.rs 本来会在 Err 时
+    // 回落到按模式直接注入。
     spawn_accept_loop(
         listener,
         |target: &str| crate::proxy::live_upstream_for(target).unwrap_or_else(global_upstream),
         Limits::default(),
-    );
+    )
+    .map_err(|error| format!("failed to start proxy relay accept loop: {error}"))?;
     let _ = GLOBAL_PORT.set(port);
     Ok(port)
 }
@@ -147,7 +152,7 @@ pub fn start_global() -> Result<u16, String> {
 /// 在给定监听器上启动中继，上游由共享状态读取（测试与嵌入式使用）。
 /// 该入口不按目标分流：整个中继共用一个上游，供测试直接驱动切换语义。
 pub fn spawn_with(listener: TcpListener, upstream: Arc<RwLock<Upstream>>) {
-    spawn_accept_loop(
+    if spawn_accept_loop(
         listener,
         move |_target: &str| {
             upstream
@@ -156,7 +161,11 @@ pub fn spawn_with(listener: TcpListener, upstream: Arc<RwLock<Upstream>>) {
                 .unwrap_or_default()
         },
         Limits::default(),
-    );
+    )
+    .is_err()
+    {
+        log::warn!("event=proxy_relay status=accept_thread_unavailable");
+    }
 }
 
 /// 中继的超时预算。测试用短超时验证握手超时真的生效。
@@ -175,12 +184,12 @@ impl Default for Limits {
     }
 }
 
-fn spawn_accept_loop<F>(listener: TcpListener, upstream: F, limits: Limits)
+fn spawn_accept_loop<F>(listener: TcpListener, upstream: F, limits: Limits) -> std::io::Result<()>
 where
     F: Fn(&str) -> Upstream + Send + Sync + 'static,
 {
     let upstream: Resolver = Arc::new(upstream);
-    let spawned = thread::Builder::new()
+    thread::Builder::new()
         .name("proxy-relay-accept".into())
         .spawn(move || {
             for stream in listener.incoming() {
@@ -196,10 +205,8 @@ where
                     log::debug!("event=proxy_relay status=conn_thread_unavailable");
                 }
             }
-        });
-    if spawned.is_err() {
-        log::warn!("event=proxy_relay status=accept_thread_unavailable");
-    }
+        })
+        .map(|_| ())
 }
 
 /// 请求头解析结果。
@@ -389,6 +396,9 @@ fn relay_http(
         Upstream::Unsupported(reason) => {
             log::warn!("event=proxy_relay status=unsupported_route");
             respond_status(&mut client, 502, "Bad Gateway", reason);
+            // 消息体可能还没读：不排空就关闭，Windows 会发 RST 并丢掉刚写的 502，
+            // 客户端看到的是 ECONNRESET —— 恰好把这个诊断弄丢（见 drain_before_close）。
+            drain_before_close(&mut client);
             return;
         }
         Upstream::Direct => match absolute_form_target(&head.target) {
@@ -422,6 +432,7 @@ fn relay_http(
                     "Bad Gateway",
                     "upstream proxy address is unusable",
                 );
+                drain_before_close(&mut client);
                 return;
             }
         },
@@ -436,11 +447,13 @@ fn relay_http(
                 "Bad Gateway",
                 "cannot reach the request target",
             );
+            drain_before_close(&mut client);
             return;
         }
     };
     let Ok(mut outbound_reader) = outbound.try_clone().map(BufReader::new) else {
         respond_status(&mut client, 502, "Bad Gateway", "upstream is unusable");
+        drain_before_close(&mut client);
         return;
     };
 
@@ -457,6 +470,7 @@ fn relay_http(
     outbound_head.push_str("Connection: close\r\n\r\n");
     if outbound.write_all(outbound_head.as_bytes()).is_err() || outbound.flush().is_err() {
         respond_status(&mut client, 502, "Bad Gateway", "upstream write failed");
+        drain_before_close(&mut client);
         return;
     }
 
@@ -954,7 +968,7 @@ mod tests {
         let listener = bind_loopback().unwrap();
         let relay_port = listener.local_addr().unwrap().port();
         let proxied = format!("http://127.0.0.1:{proxy_port}");
-        spawn_accept_loop(
+        let _ = spawn_accept_loop(
             listener,
             move |target: &str| {
                 // 只有目标端口等于假上游代理端口时才走代理，其余直连。
@@ -1573,7 +1587,7 @@ mod tests {
         let listener = bind_loopback().unwrap();
         let port = listener.local_addr().unwrap().port();
         let shared = Arc::new(RwLock::new(Upstream::Direct));
-        spawn_accept_loop(
+        let _ = spawn_accept_loop(
             listener,
             move |_target: &str| shared.read().map(|guard| guard.clone()).unwrap_or_default(),
             Limits {

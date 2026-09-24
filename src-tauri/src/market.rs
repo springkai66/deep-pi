@@ -1080,7 +1080,7 @@ fn fetch_npm_search(text: &str) -> Result<Vec<PiPackage>, String> {
             crate::retry::AttemptFailure {
                 message: format!("Pi package catalog request failed: {error}"),
                 retryable: crate::retry::is_retryable_ureq_error(&error),
-                status: None,
+                status: crate::retry::status_of_ureq_error(&error),
                 retry_after: None,
             }
         })?;
@@ -1174,7 +1174,7 @@ fn fetch_mcp_registry(query: &str) -> Result<Vec<McpRegistryEntry>, String> {
             crate::retry::AttemptFailure {
                 message: format!("MCP registry request failed: {error}"),
                 retryable: crate::retry::is_retryable_ureq_error(&error),
-                status: None,
+                status: crate::retry::status_of_ureq_error(&error),
                 retry_after: None,
             }
         })?;
@@ -1214,7 +1214,7 @@ pub fn fetch_package_metadata(name: &str) -> Result<PackageMetadata, String> {
                 crate::retry::AttemptFailure {
                     message: format!("npm metadata request failed: {error}"),
                     retryable: crate::retry::is_retryable_ureq_error(&error),
-                    status: None,
+                    status: crate::retry::status_of_ureq_error(&error),
                     retry_after: None,
                 }
             })?;
@@ -1296,7 +1296,7 @@ fn fetch_models_dev_catalog(cache: Option<&ModelCatalogCache>) -> Result<String,
             .map_err(|error| crate::retry::AttemptFailure {
                 message: format!("models.dev catalog request failed: {error}"),
                 retryable: crate::retry::is_retryable_ureq_error(&error),
-                status: None,
+                status: crate::retry::status_of_ureq_error(&error),
                 retry_after: None,
             })?;
         read_response_with_limit(response.body_mut(), MAX_MODELS_RESPONSE_BYTES).map_err(|error| {

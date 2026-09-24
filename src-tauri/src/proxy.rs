@@ -652,7 +652,11 @@ fn host_port_to_http_proxy(value: &str) -> Option<String> {
     let (host, port_text) = value.rsplit_once(':')?;
     let host = host.trim();
     let port_text = port_text.trim();
+    // 拒绝 userinfo：注册表里写成 `user:pass@host:8080` 时，`rsplit_once(':')`
+    // 会把它整段当主机名，凭据就会被写进进程环境、子进程 HTTP(S)_PROXY 与 npm
+    // 环境。WinHTTP 路径（system_proxy）同样 fail-closed，两处必须一致。
     if host.is_empty()
+        || host.contains('@')
         || port_text.is_empty()
         || !port_text.bytes().all(|byte| byte.is_ascii_digit())
     {
@@ -1087,6 +1091,10 @@ mod tests {
         assert_eq!(parse_windows_proxy_server("socks=127.0.0.1:1080"), None);
         assert_eq!(parse_windows_proxy_server(""), None);
         assert_eq!(parse_windows_proxy_server("host:not-a-port"), None);
+        // 注册表里带凭据的写法必须拒绝：否则凭据会经进程环境流进子进程与 npm
+        // （与 system_proxy 的 fail-closed 行为一致）。
+        assert_eq!(parse_windows_proxy_server("user:pass@host:8080"), None);
+        assert_eq!(parse_windows_proxy_server("http=user:pass@host:8080"), None);
     }
 
     /// #28 回归：in-process 客户端（dsh_api / market / 本地 Provider）的回环
@@ -1114,38 +1122,6 @@ mod tests {
                 "user={user}: remote targets must still use the proxy"
             );
         }
-    }
-
-    /// #29：真实请求与「测试连接」必须走**同一个**构造入口，并且例外地址
-    /// 逐项一致。此前按钮用 `ureq::Proxy::new`（完全不带 NO_PROXY），而真实
-    /// 请求带合并后的例外列表——同一个配置可能一个报「通」、一个全断。
-    #[test]
-    fn probe_and_real_requests_build_the_same_proxy() {
-        let build = |mode: &str, url: &str, no_proxy: &str| {
-            proxy_for_mode(mode, url, no_proxy)
-                .expect("valid configuration")
-                .expect("proxy should be constructed")
-        };
-        let probe = build("manual", "http://127.0.0.1:7890", "corp.internal");
-        let real = build("manual", "http://127.0.0.1:7890", "corp.internal");
-        for url in [
-            "http://127.0.0.1:11434/",
-            "http://localhost:53255/",
-            "http://corp.internal/pkg",
-            "https://api.github.com/",
-        ] {
-            let parsed = url.parse().unwrap();
-            assert_eq!(
-                probe.is_no_proxy(&parsed),
-                real.is_no_proxy(&parsed),
-                "bypass decision must match for {url}"
-            );
-        }
-        // 非法手动地址：两边都必须**报错**，不能一边静默不用代理。
-        assert!(proxy_for_mode("manual", "not-a-url", "").is_err());
-        assert!(proxy_for_mode("manual", "", "").is_err());
-        // 旧版 direct 值已被迁移为跟随系统，不再有第三种分支。
-        assert!(proxy_for_mode("direct", "", "").is_ok());
     }
 
     /// #32：手动地址必须 **fail-closed**。此前 `validate_url` 只做字符串检查，

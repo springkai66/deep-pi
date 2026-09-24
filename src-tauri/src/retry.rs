@@ -65,6 +65,16 @@ pub fn is_retryable_post_error(error: &ureq::Error) -> bool {
     }
 }
 
+/// 从 ureq 错误里取出**已到达的状态码**。调用方把它放进 `AttemptFailure.status`，
+/// 日志的 `category=http_429/upstream_5xx` 才不会退化成 `other`（#30）：只靠文案
+/// 分类时，`Error::StatusCode(503)` 的 Display 是 "http status: 503"，认不出来。
+pub fn status_of_ureq_error(error: &ureq::Error) -> Option<u16> {
+    match error {
+        ureq::Error::StatusCode(status) => Some(*status),
+        _ => None,
+    }
+}
+
 fn backoff_delay(attempt: u32, delays_ms: &[u64]) -> Duration {
     Duration::from_millis(
         delays_ms
@@ -117,6 +127,12 @@ pub fn run<T, E>(
 /// 失败类别：事后区分「DNS 失败 / TCP 连接失败 / CONNECT 被代理拒绝 / TLS
 /// 失败 / 超时 / 上游 5xx」靠的就是这一列（见 #30）。分类依据是 ureq 的
 /// Display 文案与已到达的状态码 —— 覆盖其 error.rs 中列出的几种措辞。
+///
+/// 文案匹配**不能假设英文**：Windows 的 io 错误是本地化的（中文系统上是
+/// 「由于目标计算机积极拒绝，无法连接。」），ureq 的 `HostNotFound` 文案是
+/// "host not found"（既不含 dns 也不含 lookup）。因此这里同时认 Winsock 错误码
+/// ——它们是数字，跨语言不变。调用方能给出类型化状态码时优先用它（见
+/// `status_of_ureq_error`）。
 fn failure_category(failure: &AttemptFailure) -> &'static str {
     if let Some(status) = failure.status {
         return if status == 429 {
@@ -128,10 +144,26 @@ fn failure_category(failure: &AttemptFailure) -> &'static str {
         };
     }
     let message = failure.message.to_ascii_lowercase();
+    // Winsock 错误码（与语言无关）：10054 连接被重置、10060 超时、
+    // 10061 连接被拒绝、11001 主机未找到。
+    if message.contains("10060") {
+        return "timeout";
+    }
+    if message.contains("11001") {
+        return "dns";
+    }
+    if message.contains("10061") || message.contains("10054") {
+        return "tcp_connect";
+    }
     if message.contains("proxy") && message.contains("connect") {
         // `CONNECT proxy failed`：隧道被上游代理拒绝或不可达。
         "proxy_connect"
-    } else if message.contains("dns") || message.contains("lookup") || message.contains("resolve") {
+    } else if message.contains("dns")
+        || message.contains("lookup")
+        || message.contains("resolve")
+        || message.contains("host not found")
+        || message.contains("name or service not known")
+    {
         "dns"
     } else if message.contains("tls")
         || message.contains("certificate")

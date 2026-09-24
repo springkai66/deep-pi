@@ -325,7 +325,7 @@ impl SettingsStore {
         }
         fs::create_dir_all(&backups)
             .map_err(|error| format!("failed to create backup directory: {error}"))?;
-        let settings = if path.is_file() {
+        let mut settings = if path.is_file() {
             let content = fs::read_to_string(&path)
                 .map_err(|error| format!("failed to read settings: {error}"))?;
             let migrated = migrate_legacy_settings(
@@ -339,6 +339,18 @@ impl SettingsStore {
             write_atomic(&path, &settings)?;
             settings
         };
+        // 旧版（含已发布的 v1.4.0）只做字符串校验，用户可能存下「字符串合法、
+        // URL 非法」的手动代理地址（端口笔误即可）。严格校验上线后这类配置会让
+        // open() 失败 → 启动失败 → 界面只剩「重新加载」且重试仍失败，只能手改
+        // settings.json 才能恢复。因此这里按**迁移**处理：回落到跟随系统并落盘一次，
+        // 而不是拒绝启动；保存路径（save → validate）保持严格。
+        if crate::proxy::normalize_mode(&settings.proxy_mode) == "manual"
+            && crate::proxy::validate_url(&settings.proxy_url).is_err()
+        {
+            log::warn!("event=proxy_mode status=legacy_address_rejected fallback=system");
+            settings.proxy_mode = crate::proxy::normalize_mode("system").to_owned();
+            write_atomic(&path, &settings)?;
+        }
         validate(&settings)?;
         Ok(Self {
             path,
@@ -565,6 +577,8 @@ pub async fn save_settings(app: AppHandle, settings: AppSettings) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::{default_theme, migrate_legacy_settings, AppSettings, SettingsStore};
+    use serde_json::Value;
+    use std::fs;
 
     #[test]
     fn loads_old_settings_with_new_defaults() {
@@ -759,6 +773,38 @@ mod tests {
         legacy_payload.proxy_mode = "direct".into();
         migrated.save(legacy_payload).unwrap();
         assert_eq!(migrated.get().unwrap().proxy_mode, "system");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// H1 回归（发布阻断项）：已发布的旧版只做字符串校验，可能存下
+    /// `http://host:99999` 这类「字符串合法、URL 非法」的手动地址。严格校验
+    /// 上线后**不能**让 open() 失败——那会让应用停在「重新加载」页且无法从界面
+    /// 恢复。必须迁移为跟随系统并落盘。
+    #[test]
+    fn legacy_unusable_manual_address_falls_back_to_system() {
+        let root =
+            std::env::temp_dir().join(format!("deeppi-legacy-proxy-{}", uuid::Uuid::new_v4()));
+        let path = root.join("settings.json");
+        let backups = root.join("backups");
+        fs::create_dir_all(&root).unwrap();
+        let mut value = serde_json::to_value(AppSettings::default()).unwrap();
+        value["proxyMode"] = Value::String("manual".into());
+        value["proxyUrl"] = Value::String("http://host:99999".into());
+        fs::write(&path, serde_json::to_string(&value).unwrap()).unwrap();
+
+        let store = SettingsStore::open(path.clone(), backups.clone())
+            .expect("a legacy unusable address must not prevent startup");
+        assert_eq!(store.get().unwrap().proxy_mode, "system");
+        // 迁移结果落盘：下次启动无需再次判断，文件里也不再留着非法地址。
+        let persisted: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(persisted["proxyMode"], Value::String("system".into()));
+
+        // 保存路径依然严格：手改动把非法地址写回去必须被拒。
+        let mut attempt = store.get().unwrap();
+        attempt.proxy_mode = "manual".into();
+        attempt.proxy_url = "http://host:99999".into();
+        assert!(store.save(attempt).is_err());
+
         std::fs::remove_dir_all(root).unwrap();
     }
 
