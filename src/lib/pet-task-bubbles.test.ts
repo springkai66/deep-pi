@@ -303,6 +303,79 @@ describe("task end notice", () => {
   });
 });
 
+describe("empty ring auto-close", () => {
+  it("shows the empty state and auto-closes after the hold", async () => {
+    const app = harness({ emptyCloseMs: 1500 });
+    const entering = app.bubbles.enter();
+    await tick();
+    await entering;
+    await tick();
+    expect(app.states.at(-1)?.empty).toBe(true);
+    expect(app.states.at(-1)?.open).toBe(true);
+    await vi.advanceTimersByTimeAsync(1500);
+    await tick();
+    expect(app.states.at(-1)?.open).toBe(false);
+    expect(app.resizes.at(-1)).toEqual({ open: false, force: false });
+  });
+
+  it("latches while the pointer stays on the pet; leaving re-arms reopening", async () => {
+    const app = harness({ emptyCloseMs: 1500 });
+    const entering = app.bubbles.enter();
+    await tick();
+    await entering;
+    await tick();
+    await vi.advanceTimersByTimeAsync(1500);
+    await tick();
+    expect(app.states.at(-1)?.open).toBe(false);
+    // 指针未离开本体（没有 leave 事件）：enter 被闩拦下，环不重开。
+    const blocked = app.bubbles.enter();
+    await tick();
+    await blocked;
+    await tick();
+    expect(app.states.at(-1)?.open).toBe(false);
+    expect(app.resizes.filter((resize) => resize.open)).toHaveLength(1);
+    // 指针离开本体：闩解除；再进入正常重开。
+    app.bubbles.leave();
+    const reopened = app.bubbles.enter();
+    await tick();
+    await reopened;
+    await tick();
+    expect(app.states.at(-1)?.open).toBe(true);
+    expect(app.resizes.filter((resize) => resize.open)).toHaveLength(2);
+  });
+
+  it("cancels the empty close when tasks arrive during the hold", async () => {
+    const app = harness({ emptyCloseMs: 1500 });
+    const entering = app.bubbles.enter();
+    await tick();
+    await entering;
+    await tick();
+    expect(app.states.at(-1)?.empty).toBe(true);
+    app.setTasks([task({ id: "t1" })]);
+    await app.bubbles.refresh();
+    expect(app.states.at(-1)?.empty).toBe(false);
+    expect(app.states.at(-1)?.tasks.map((value) => value.id)).toEqual(["t1"]);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(app.states.at(-1)?.open).toBe(true);
+    expect(app.resizes.filter((resize) => !resize.open)).toHaveLength(0);
+  });
+
+  it("cancels the empty close when the read fails during the hold", async () => {
+    const app = harness({ emptyCloseMs: 1500 });
+    const entering = app.bubbles.enter();
+    await tick();
+    await entering;
+    await tick();
+    expect(app.states.at(-1)?.empty).toBe(true);
+    app.failLoads("ipc down");
+    await app.bubbles.refresh();
+    expect(app.states.at(-1)?.error).toContain("无法读取任务");
+    expect(app.states.at(-1)?.empty).toBe(false);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(app.states.at(-1)?.open).toBe(true);
+  });
+});
+
 describe("per-task action errors", () => {
   it("keeps the failed task's bubble visible with its own message", async () => {
     const app = harness();

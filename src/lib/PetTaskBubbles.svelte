@@ -22,10 +22,12 @@
   } from "$lib/pet-task-ring";
 
   // 注意：prop 不能叫 state —— 那会遮蔽 Svelte 的 $state rune。
-  let { ring, monitors = [], onAction, onRetry, onKeepOpen, onLeave, onSettled }: {
+  let { ring, monitors = [], debug = false, onAction, onRetry, onKeepOpen, onLeave, onSettled }: {
     ring: PetTaskBubblesState;
     /** 本体中心所在屏幕的物理区域；用于把半径收进屏幕内。 */
     monitors?: Monitor[];
+    /** 调试模式（DEEPPI_PET_DEBUG=1）：浮层显示半透明红框，供人工验收目视比对。 */
+    debug?: boolean;
     onAction: (task: Task) => void;
     onRetry: () => void;
     onKeepOpen: () => void;
@@ -81,7 +83,7 @@
 {/snippet}
 
 <!-- 整层不接鼠标事件：只有气泡本身可点，本体窗口与桌面照常收到点击。 -->
-<div class="ring" role="presentation"
+<div class="ring" class:debug role="presentation"
   onpointerenter={onKeepOpen} onpointerleave={onLeave}
   oncontextmenu={(event) => { event.preventDefault(); event.stopPropagation(); }}>
   {#if ring.open && ring.error}
@@ -98,6 +100,7 @@
     {@const done = ended(bubble.task)}
     <article class="task-bubble" class:shown class:leaving class:busy class:done
       data-task={bubble.task.id}
+      title={bubble.task.agent !== "pi" ? t("DSH 任务请在主窗口操作") : undefined}
       style="--x: {bubble.x}px; --y: {bubble.y}px; width: {RING_BUBBLE_WIDTH}px; --in-delay: {index * RING_ENTER_STAGGER_MS}ms; --out-delay: {index * RING_EXIT_STAGGER_MS}ms"
       aria-label={bubble.task.title} aria-busy={busy}>
       {#if failure}
@@ -129,6 +132,12 @@
     <div class="ring-badge ring-loading" role="status" style="--y: -{radius}px">
       <RotateCw size={11} aria-hidden="true" />
       <span>{t("正在读取任务…")}</span>
+    </div>
+  {/if}
+
+  {#if ring.empty && !ring.tasks.length && !ring.error}
+    <div class="ring-badge ring-empty" role="status" style="--y: -{radius}px">
+      <span>{t("暂无进行中任务")}</span>
     </div>
   {/if}
 </div>
@@ -256,6 +265,13 @@
     font-size: 11px;
     cursor: pointer;
   }
-  /* 读取中：不参与依次显示的次序，直接可见。 */
-  .ring-loading { pointer-events: none; opacity: 1; scale: 1; }
+  /* 读取中/空态：不参与依次显示的次序，直接可见，且不参与命中。 */
+  .ring-loading,
+  .ring-empty { pointer-events: none; opacity: 1; scale: 1; }
+
+  /* 调试红框（DEEPPI_PET_DEBUG=1）：目视核对浮层窗口边界与环的相对位置。 */
+  .ring.debug {
+    background: rgb(255 0 0 / 7%);
+    outline: 1px solid rgb(255 0 0 / 50%);
+  }
 </style>

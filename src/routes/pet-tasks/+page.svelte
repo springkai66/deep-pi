@@ -17,10 +17,64 @@
   import type { Monitor } from "$lib/pet-task-ring";
 
   let taskBubbles = $state<PetTaskBubblesState>({
-    open: false, leaving: false, loading: false, tasks: [], pending: [], actionErrors: {}, endedAt: {}, error: "",
+    open: false, leaving: false, loading: false, empty: false, tasks: [], pending: [], actionErrors: {}, endedAt: {}, error: "",
   });
   let screenAreas = $state<Monitor[]>([]);
   let hoverRevision = 0;
+  let petDebug = $state(false);
+
+  // —— 可点矩形推送：浮层默认点击穿透，宿主轮询光标命中这些矩形才临时接管 ——
+  type HitRect = { x: number; y: number; width: number; height: number };
+  let lastRectsKey = "";
+  let rectsEnterTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function pushHitRects(rects: HitRect[]) {
+    const key = JSON.stringify(rects);
+    if (key === lastRectsKey) return;
+    lastRectsKey = key;
+    void invoke("set_pet_hit_rects", { rects }).catch(() => { /* 浮层不可用时忽略 */ });
+  }
+
+  /** 量取当前真正可交互的元素：非 busy、非退场中的气泡 + 带重试的错误角标。 */
+  function measureHitRects(): HitRect[] {
+    const nodes = document.querySelectorAll<HTMLElement>(
+      ".task-bubble:not(.busy):not(.leaving), .ring-error",
+    );
+    return Array.from(nodes, (node) => {
+      const rect = node.getBoundingClientRect();
+      return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+    });
+  }
+
+  // 每次状态发布后重测量（rAF 等 DOM 落定）；环收起推空数组。
+  $effect(() => {
+    const open = taskBubbles.open;
+    const leaving = taskBubbles.leaving;
+    // 触达所有会影响可点元素集合/位置的字段：任何相关发布都触发重测量。
+    const tasksKey = taskBubbles.tasks.map((task) => `${task.id}:${task.status}`).join(",");
+    const busyKey = taskBubbles.pending.join(",");
+    const errorKey = taskBubbles.error;
+    if (petDebug) {
+      console.debug("[pet-debug] hit rects refresh", { open, leaving, tasksKey, busyKey, errorKey });
+    }
+    if (rectsEnterTimer) {
+      clearTimeout(rectsEnterTimer);
+      rectsEnterTimer = null;
+    }
+    if (!open && !leaving) {
+      pushHitRects([]);
+      return;
+    }
+    const frame = requestAnimationFrame(() => {
+      pushHitRects(measureHitRects());
+      // 入场动画（最长约 540ms）期间 getBoundingClientRect 偏小：结束后补推一次。
+      rectsEnterTimer = setTimeout(() => {
+        rectsEnterTimer = null;
+        pushHitRects(measureHitRects());
+      }, 600);
+    });
+    return () => cancelAnimationFrame(frame);
+  });
 
   const taskActions = createPetTaskActionClient(async (request) => {
     await emitTo("main", PET_TASK_ACTION_EVENT, request);
@@ -56,6 +110,9 @@
       } catch { /* 启动未就绪：保持默认外观 */ }
     })();
     void refreshMonitors();
+    void invoke<boolean>("pet_debug_enabled")
+      .then((enabled) => { petDebug = enabled; })
+      .catch(() => { /* 查询失败按非调试处理 */ });
     const unlisteners = [
       listen("pet-appearance", () => {
         void (async () => {
@@ -81,6 +138,7 @@
       disposed = true;
       bubbles.dispose();
       taskActions.dispose();
+      if (rectsEnterTimer) clearTimeout(rectsEnterTimer);
       for (const unlisten of unlisteners) void unlisten.then((dispose) => dispose()).catch(() => {});
     };
   });
@@ -98,7 +156,7 @@
 </svelte:head>
 
 {#if taskBubbles.open || taskBubbles.leaving}
-  <PetTaskBubbles ring={taskBubbles} monitors={screenAreas}
+  <PetTaskBubbles ring={taskBubbles} monitors={screenAreas} debug={petDebug}
     onAction={(task) => void bubbles.act("stop", task)}
     onRetry={() => void bubbles.retry()}
     onKeepOpen={() => bubbles.keepOpen()}

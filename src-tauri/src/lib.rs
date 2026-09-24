@@ -222,6 +222,8 @@ pub fn run() {
                 pet::set_pet_ring,
                 pet::set_pet_tasks_visible,
                 pet::get_pet_task_hover,
+                pet::set_pet_hit_rects,
+                pet::pet_debug_enabled,
                 checklist::open_checklist_window,
                 checklist::list_checklist_items,
                 checklist::add_checklist_item,

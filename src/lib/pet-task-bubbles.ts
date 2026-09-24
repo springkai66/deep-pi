@@ -17,6 +17,8 @@ export interface PetTaskBubblesState {
   /** 正在依次消失；视图据此播放退场，播完调用 finishClose()。 */
   leaving: boolean;
   loading: boolean;
+  /** 刷新结果为空且无错误：显示「暂无进行中任务」并计时自动收起。 */
+  empty: boolean;
   tasks: Task[];
   /** 已下发、尚未确认的任务 id。 */
   pending: string[];
@@ -44,6 +46,8 @@ export interface PetTaskBubblesOptions {
   refreshMs?: number;
   /** 结束后气泡在环上停留的时长，然后按退场规则消失。 */
   endedHoldMs?: number;
+  /** 空环（无进行中任务）自动收起前的停留时长。 */
+  emptyCloseMs?: number;
 }
 
 /** 结束状态（含被停止）在环上停留多久。 */
@@ -54,10 +58,12 @@ export function createPetTaskBubbles(ports: Ports, options: PetTaskBubblesOption
   const leaveMs = options.leaveMs ?? 400;
   const refreshMs = options.refreshMs ?? 1500;
   const endedHoldMs = options.endedHoldMs ?? ENDED_HOLD_MS;
+  const emptyCloseMs = options.emptyCloseMs ?? 1500;
   let state: PetTaskBubblesState = {
     open: false,
     leaving: false,
     loading: false,
+    empty: false,
     tasks: [],
     pending: [],
     actionErrors: {},
@@ -65,6 +71,10 @@ export function createPetTaskBubbles(ports: Ports, options: PetTaskBubblesOption
     error: "",
   };
   let desiredOpen = false;
+  /** 指针是否悬在桌宠本体上（enter/leave 事件维护；空环收起时据此决定是否设闩）。 */
+  let petHovered = false;
+  /** 防循环闩：空环自动收起时指针仍在本体上 → 指针离开前不再重开，否则收起→重开闪烁。 */
+  let emptyLatch = false;
   /** 指针在环上（浮层内）：即使在退场中也要把环拉回来。 */
   let inside = false;
   let disposed = false;
@@ -74,6 +84,7 @@ export function createPetTaskBubbles(ports: Ports, options: PetTaskBubblesOption
   let leaveTimer: ReturnType<typeof setTimeout> | undefined;
   let pollTimer: ReturnType<typeof setTimeout> | undefined;
   let heldFadeTimer: ReturnType<typeof setTimeout> | undefined;
+  let emptyTimer: ReturnType<typeof setTimeout> | undefined;
   /** 最近一次发布给视图的元素数，退场动画时长按它算。 */
   let slotCount = 0;
   const retained = new Set<string>();
@@ -102,6 +113,7 @@ export function createPetTaskBubbles(ports: Ports, options: PetTaskBubblesOption
     clearTimeout(leaveTimer);
     clearTimeout(pollTimer);
     clearTimeout(heldFadeTimer);
+    clearTimeout(emptyTimer);
   }
 
   function resize(open: boolean, force = false) {
@@ -130,6 +142,16 @@ export function createPetTaskBubbles(ports: Ports, options: PetTaskBubblesOption
     heldFadeTimer = setTimeout(() => { void close(ended.length); }, Math.max(0, endedHoldMs - (now - firstSeen)));
   }
 
+  /** 空环停留 emptyCloseMs 后自动收起；指针仍在本体上则设防循环闩。 */
+  function scheduleEmptyClose() {
+    clearTimeout(emptyTimer);
+    emptyTimer = setTimeout(() => {
+      emptyTimer = undefined;
+      if (petHovered) emptyLatch = true;
+      void close();
+    }, emptyCloseMs);
+  }
+
   async function refresh() {
     if (!desiredOpen || !state.open || disposed || state.leaving) return;
     const cycle = generation;
@@ -150,11 +172,14 @@ export function createPetTaskBubbles(ports: Ports, options: PetTaskBubblesOption
       for (const task of visible) {
         if (isEndedTask(task)) nextEndedAt[task.id] = state.endedAt[task.id] ?? now;
       }
-      publish({ tasks: visible, loading: false, endedAt: nextEndedAt });
+      publish({ tasks: visible, loading: false, endedAt: nextEndedAt, empty: visible.length === 0 });
+      // 空环给一段「暂无进行中任务」的停留后自动收起；有任务则取消该计时。
+      if (visible.length === 0) scheduleEmptyClose(); else clearTimeout(emptyTimer);
       scheduleHeldFade(visible);
     } catch {
       if (disposed || cycle !== generation || read !== readVersion) return;
-      publish({ loading: false, error: "无法读取任务，请重试" });
+      clearTimeout(emptyTimer);
+      publish({ loading: false, error: "无法读取任务，请重试", empty: false });
     } finally {
       if (cycle === generation && read === readVersion) poll();
     }
@@ -170,7 +195,7 @@ export function createPetTaskBubbles(ports: Ports, options: PetTaskBubblesOption
     }
     clearTimeout(leaveTimer);
     clearTimeout(heldFadeTimer);
-    publish({ open: false, leaving: false, loading: false });
+    publish({ open: false, leaving: false, loading: false, empty: false });
     try {
       await resize(false);
     } catch {
@@ -197,6 +222,9 @@ export function createPetTaskBubbles(ports: Ports, options: PetTaskBubblesOption
   }
 
   function leave() {
+    petHovered = false;
+    // 指针离开本体：闩解除，下次悬停可重开。
+    emptyLatch = false;
     inside = false;
     clearTimeout(leaveTimer);
     if (pending.size === 0 && !hasActionError()) {
@@ -213,12 +241,15 @@ export function createPetTaskBubbles(ports: Ports, options: PetTaskBubblesOption
 
   async function enter() {
     if (disposed) return;
+    // 防循环闩：空环自动收起后指针未离开本体，不重开（否则收起→重开闪烁循环）。
+    if (emptyLatch) return;
     // 已经在显示（或正在退场被拉回）：只需续上宽限期，不重播打开流程。
     if (desiredOpen) { keepOpen(); return; }
+    petHovered = true;
     desiredOpen = true;
     inside = true;
     const cycle = ++generation;
-    publish({ leaving: false, loading: true, error: "", endedAt: {} });
+    publish({ leaving: false, loading: true, error: "", endedAt: {}, empty: false });
     try {
       await resize(true);
       if (disposed || cycle !== generation) return;
@@ -261,7 +292,7 @@ export function createPetTaskBubbles(ports: Ports, options: PetTaskBubblesOption
   return {
     enter, keepOpen, leave, close, finishClose, refresh, act,
     async retry() {
-      publish({ error: "", loading: true });
+      publish({ error: "", loading: true, empty: false });
       if (state.open) await refresh(); else await enter();
     },
     dispose() {

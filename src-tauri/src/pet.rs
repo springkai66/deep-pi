@@ -12,9 +12,9 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicU32, Ordering},
-        Mutex,
+        Mutex, OnceLock,
     },
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use base64::Engine as _;
@@ -176,6 +176,7 @@ fn open_or_focus(app: &AppHandle) -> Result<(), String> {
     if let Some(pet) = app.get_webview_window(PET_LABEL) {
         let _ = pet.unminimize();
         let _ = pet.show();
+        precreate_pet_tasks_window(app);
         return Ok(());
     }
     // 并发触发时只允许一次 build；撞上时静默返回，窗口总会建成。
@@ -184,6 +185,9 @@ fn open_or_focus(app: &AppHandle) -> Result<(), String> {
     }
     let result = build_pet_window(app);
     PET_OPEN_IN_FLIGHT.store(false, Ordering::SeqCst);
+    if result.is_ok() {
+        precreate_pet_tasks_window(app);
+    }
     result
 }
 
@@ -397,22 +401,19 @@ pub(crate) fn anchored_pet_position(app: &AppHandle, cursor_x: i32, cursor_y: i3
     )
 }
 
-/// 转发本体悬停状态；仅创建隐藏的浮层窗口，不移动/缩放桌宠本身。
-/// 浮层页面先注册监听，再读带版本的快照，避免首次载入遗漏移出事件。
-#[tauri::command]
-pub async fn set_pet_ring(app: AppHandle, open: bool) -> Result<(), String> {
-    let state = update_task_hover(open)?;
-    let _ = app.emit_to(PET_TASKS_LABEL, "pet-task-hover", state.clone());
-    let _ = app.emit_to(PET_LABEL, "pet-task-hover", state);
-    if !open || app.get_webview_window(PET_TASKS_LABEL).is_some() {
-        return Ok(());
+/// 确保任务浮层存在（幂等）：已存在返回 false；桌宠窗口缺失时不建。
+/// WebView 构建耗时，走 spawn_blocking，不堵调用线程。
+async fn ensure_pet_tasks_window(app: &AppHandle) -> Result<bool, String> {
+    if app.get_webview_window(PET_TASKS_LABEL).is_some() {
+        return Ok(false);
     }
     if TASKS_BUILD_IN_FLIGHT.swap(true, Ordering::SeqCst) {
-        return Ok(());
+        return Ok(false);
     }
+    let app = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         if app.get_webview_window(PET_LABEL).is_none() {
-            return Ok(());
+            return Ok(false);
         }
         let popup =
             WebviewWindowBuilder::new(&app, PET_TASKS_LABEL, WebviewUrl::App("pet-tasks".into()))
@@ -426,20 +427,50 @@ pub async fn set_pet_ring(app: AppHandle, open: bool) -> Result<(), String> {
                 .maximizable(false)
                 .minimizable(false)
                 .focused(false)
+                // 点击气泡不激活浮层、不抢当前应用焦点（WS_EX_NOACTIVATE）。
+                .focusable(false)
                 .visible(false)
                 .inner_size(TASKS_SIZE, TASKS_SIZE)
                 .build()
                 .map_err(|error| error.to_string())?;
+        // 浮层默认点击穿透：命中轮询只在光标进入可点矩形时临时接管（仅 Windows）。
+        #[cfg(windows)]
+        let _ = popup.set_ignore_cursor_events(true);
+        spawn_hit_poll_thread(app.clone());
         if app.get_webview_window(PET_LABEL).is_none() {
             let _ = popup.destroy();
         }
-        Ok(())
+        Ok(true)
     })
     .await
     .map_err(|error| error.to_string())
     .and_then(|result| result);
     TASKS_BUILD_IN_FLIGHT.store(false, Ordering::SeqCst);
     result
+}
+
+/// 桌宠开窗即预建任务浮层（隐藏、不抢焦点）：首次悬停立即开环，免去现场
+/// 构建的数百毫秒延迟。失败静默——悬停路径（set_pet_ring）会兜底补建。
+fn precreate_pet_tasks_window(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = ensure_pet_tasks_window(&app).await {
+            log::warn!("event=pet_tasks_precreate_failed error={error}");
+        }
+    });
+}
+
+/// 转发本体悬停状态；仅创建隐藏的浮层窗口，不移动/缩放桌宠本身。
+/// 浮层页面先注册监听，再读带版本的快照，避免首次载入遗漏移出事件。
+#[tauri::command]
+pub async fn set_pet_ring(app: AppHandle, open: bool) -> Result<(), String> {
+    let state = update_task_hover(open)?;
+    let _ = app.emit_to(PET_TASKS_LABEL, "pet-task-hover", state.clone());
+    let _ = app.emit_to(PET_LABEL, "pet-task-hover", state);
+    if !open || app.get_webview_window(PET_TASKS_LABEL).is_some() {
+        return Ok(());
+    }
+    ensure_pet_tasks_window(&app).await.map(|_| ())
 }
 
 /// 浮层窗口左上角（物理像素）：窗口中心对齐桌宠窗口中心。
@@ -469,7 +500,16 @@ pub async fn set_pet_tasks_visible(
             return Ok(());
         };
         if !open {
-            return popup.hide().map_err(|error| error.to_string());
+            let result = popup.hide().map_err(|error| error.to_string());
+            // 隐藏即退出命中：复位穿透与缓存，矩形一并清空（下次打开由前端重推）。
+            PET_TASKS_HITTABLE.store(false, Ordering::SeqCst);
+            PET_TASKS_INTERACTIVE.store(false, Ordering::SeqCst);
+            if let Ok(mut slots) = PET_HIT_RECTS.lock() {
+                slots.clear();
+            }
+            #[cfg(windows)]
+            let _ = popup.set_ignore_cursor_events(true);
+            return result;
         }
         let pet = app
             .get_webview_window(PET_LABEL)
@@ -488,11 +528,158 @@ pub async fn set_pet_tasks_visible(
         popup
             .set_size(LogicalSize::new(TASKS_SIZE, TASKS_SIZE))
             .map_err(|error| error.to_string())?;
-        popup.show().map_err(|error| error.to_string())
+        popup.show().map_err(|error| error.to_string())?;
+        // 显示后才开始命中轮询；线程内部按此标志在 15ms/150ms 两档间切换。
+        PET_TASKS_HITTABLE.store(true, Ordering::SeqCst);
+        spawn_hit_poll_thread(app.clone());
+        Ok(())
     })
     .await
     .map_err(|error| error.to_string())?
 }
+
+// —— 任务环命中切换：浮层默认点击穿透，光标落在可点矩形上才临时接管 ——
+
+/// 可点矩形（浮层窗口相对，逻辑像素）：前端渲染后量取实际可交互元素推送。
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct PetHitRect {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
+static PET_HIT_RECTS: Mutex<Vec<PetHitRect>> = Mutex::new(Vec::new());
+/// 环是否处于显示状态：轮询门控；隐藏时复位穿透并清空矩形。
+static PET_TASKS_HITTABLE: AtomicBool = AtomicBool::new(false);
+/// 浮层当前是否接管鼠标（ignore_cursor_events 的反相缓存，避免每 tick 重设）。
+static PET_TASKS_INTERACTIVE: AtomicBool = AtomicBool::new(false);
+/// 轮询线程在跑标志：浮层销毁线程退出时清零，浮层重建时再起。
+static PET_HIT_POLL_RUNNING: AtomicBool = AtomicBool::new(false);
+/// 调试开关（DEEPPI_PET_DEBUG=1）：红框 + 日志，仅服务人工验收，验收后整体移除。
+static PET_DEBUG: OnceLock<bool> = OnceLock::new();
+
+fn pet_debug() -> bool {
+    *PET_DEBUG.get_or_init(|| std::env::var("DEEPPI_PET_DEBUG").is_ok_and(|value| value == "1"))
+}
+
+fn pet_debug_log(message: &str) {
+    if pet_debug() {
+        log::info!("{message}");
+    }
+}
+
+/// 推送当前可点矩形集（仅任务浮层可调用；序列化去重由前端负责）。
+#[tauri::command]
+pub fn set_pet_hit_rects(webview: tauri::Webview, rects: Vec<PetHitRect>) -> Result<(), String> {
+    if webview.label() != PET_TASKS_LABEL {
+        return Err("hit rects require the task popup webview".into());
+    }
+    let count = rects.len();
+    let mut slots = PET_HIT_RECTS.lock().map_err(|error| error.to_string())?;
+    *slots = rects;
+    drop(slots);
+    pet_debug_log(&format!("event=pet_hit_rects count={count}"));
+    Ok(())
+}
+
+/// 调试开关查询（前端据此渲染红框）。
+#[tauri::command]
+pub fn pet_debug_enabled() -> bool {
+    pet_debug()
+}
+
+/// 光标（物理屏幕坐标）→ 浮层窗口相对逻辑坐标。原点可为负（副屏在左/上）。
+fn cursor_in_window_logical(
+    cursor: (i32, i32),
+    window_origin: (i32, i32),
+    scale: f64,
+) -> (f64, f64) {
+    let scale = if scale > 0.0 { scale } else { 1.0 };
+    (
+        (cursor.0 - window_origin.0) as f64 / scale,
+        (cursor.1 - window_origin.1) as f64 / scale,
+    )
+}
+
+/// 点是否落在任一矩形内（左闭右开，与 DOM 命中语义一致）。
+fn hit_test_rects(point: (f64, f64), rects: &[PetHitRect]) -> bool {
+    rects.iter().any(|rect| {
+        point.0 >= rect.x
+            && point.0 < rect.x + rect.width
+            && point.1 >= rect.y
+            && point.1 < rect.y + rect.height
+    })
+}
+
+/// 一轮命中判定：取光标 → 换算 → 命中 → 仅在接管状态变化时切换穿透。
+#[cfg(windows)]
+fn hit_test_tick(app: &AppHandle) {
+    use windows_sys::Win32::Foundation::POINT;
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
+    let Some(popup) = app.get_webview_window(PET_TASKS_LABEL) else {
+        return;
+    };
+    let Ok(scale) = popup.scale_factor() else {
+        return;
+    };
+    let Ok(position) = popup.outer_position() else {
+        return;
+    };
+    let mut cursor = POINT { x: 0, y: 0 };
+    if unsafe { GetCursorPos(&mut cursor) } == 0 {
+        return;
+    }
+    let local = cursor_in_window_logical((cursor.x, cursor.y), (position.x, position.y), scale);
+    let rects = PET_HIT_RECTS
+        .lock()
+        .map(|rects| rects.clone())
+        .unwrap_or_default();
+    let interactive = hit_test_rects(local, &rects);
+    if interactive != PET_TASKS_INTERACTIVE.load(Ordering::SeqCst) {
+        match popup.set_ignore_cursor_events(!interactive) {
+            Ok(()) => {
+                PET_TASKS_INTERACTIVE.store(interactive, Ordering::SeqCst);
+                pet_debug_log(&format!(
+                    "event=pet_hit_toggle interactive={interactive} cursor=({:.0},{:.0})",
+                    local.0, local.1
+                ));
+            }
+            Err(error) => log::warn!("event=pet_hit_toggle_failed error={error}"),
+        }
+    }
+}
+
+/// 启动命中轮询线程（仅 Windows；浮层销毁后线程自行退出，重建时再起）。
+#[cfg(windows)]
+fn spawn_hit_poll_thread(app: AppHandle) {
+    if PET_HIT_POLL_RUNNING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let spawned = std::thread::Builder::new()
+        .name("pet-hit-poll".into())
+        .spawn(move || {
+            loop {
+                if app.get_webview_window(PET_TASKS_LABEL).is_none() {
+                    break;
+                }
+                if PET_TASKS_HITTABLE.load(Ordering::SeqCst) {
+                    hit_test_tick(&app);
+                    std::thread::sleep(Duration::from_millis(15));
+                } else {
+                    std::thread::sleep(Duration::from_millis(150));
+                }
+            }
+            PET_HIT_POLL_RUNNING.store(false, Ordering::SeqCst);
+        });
+    if spawned.is_err() {
+        PET_HIT_POLL_RUNNING.store(false, Ordering::SeqCst);
+    }
+}
+
+/// 非 Windows 平台不做命中轮询：浮层保持完全可交互（现状行为）。
+#[cfg(not(windows))]
+fn spawn_hit_poll_thread(_app: AppHandle) {}
 
 /// 保存桌宠位置（物理像素）。桌宠窗口在拖动结束后调用（前端已防抖）。
 #[tauri::command]
@@ -503,7 +690,6 @@ pub async fn save_pet_position(app: AppHandle, x: i32, y: i32) -> Result<(), Str
     state.y = y;
     store.save(state)
 }
-
 /// 读取当前桌宠形象（自定义形象文件字节，否则内置默认图）。自定义形象
 /// 文件丢失或格式无法识别时自愈回落默认图。
 #[tauri::command]
@@ -723,6 +909,66 @@ mod tests {
         assert!(
             frontend.contains("export const RING_WINDOW = 420"),
             "RING_WINDOW must mirror TASKS_SIZE: {frontend}"
+        );
+    }
+
+    #[test]
+    fn hit_test_matches_points_inside_rects_only() {
+        let rects = vec![
+            PetHitRect {
+                x: 10.0,
+                y: 10.0,
+                width: 100.0,
+                height: 30.0,
+            },
+            PetHitRect {
+                x: -50.0,
+                y: 0.0,
+                width: 40.0,
+                height: 40.0,
+            },
+        ];
+        assert!(hit_test_rects((10.0, 10.0), &rects));
+        assert!(hit_test_rects((109.9, 39.9), &rects));
+        // 负坐标矩形（环探出屏幕左侧）同样参与命中。
+        assert!(hit_test_rects((-50.0, 20.0), &rects));
+        // 左闭右开：右缘/下缘不算命中，与 DOM 命中语义一致。
+        assert!(!hit_test_rects((110.0, 10.0), &rects));
+        assert!(!hit_test_rects((10.0, 40.0), &rects));
+        assert!(!hit_test_rects((0.0, 0.0), &rects));
+        // 空矩形集永不接管：环上没有可点元素时浮层必须全程穿透。
+        assert!(!hit_test_rects((50.0, 25.0), &[]));
+    }
+
+    #[test]
+    fn cursor_conversion_is_window_relative_logical() {
+        // 1.5x 缩放：物理差值除以缩放得逻辑坐标。
+        assert_eq!(
+            cursor_in_window_logical((310, 460), (100, 100), 1.5),
+            (140.0, 240.0)
+        );
+        // 副屏负原点：差值照常计算。
+        assert_eq!(
+            cursor_in_window_logical((-860, 100), (-1000, 100), 2.0),
+            (70.0, 0.0)
+        );
+        // 非法缩放回落 1.0，不产生 NaN/Inf。
+        assert_eq!(cursor_in_window_logical((5, 5), (0, 0), 0.0), (5.0, 5.0));
+    }
+
+    #[test]
+    fn hit_rect_wire_format_uses_plain_field_names() {
+        // 前端按 { x, y, width, height } 推送：字段名契约由反序列化守住。
+        let rect: PetHitRect =
+            serde_json::from_str(r#"{"x":1,"y":2,"width":3,"height":4}"#).unwrap();
+        assert_eq!(
+            rect,
+            PetHitRect {
+                x: 1.0,
+                y: 2.0,
+                width: 3.0,
+                height: 4.0,
+            }
         );
     }
 

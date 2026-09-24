@@ -148,6 +148,7 @@ export const EN_MISC: Record<string, string> = {
   "桌宠任务": "Pet tasks",
   "桌宠已关闭": "The pet was closed",
   "正在读取任务…": "Loading tasks…",
+  "暂无进行中任务": "No tasks in progress",
   "未命名任务": "Untitled task",
   "还有 {count} 个任务": "{count} more tasks",
   "结束任务：{title}": "End task: {title}",
