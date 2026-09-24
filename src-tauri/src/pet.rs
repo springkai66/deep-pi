@@ -399,7 +399,10 @@ pub(crate) fn anchored_pet_position(app: &AppHandle, cursor_x: i32, cursor_y: i3
 
 /// 窗口中心对准光标：左上角 = 光标 − 物理尺寸的一半。
 fn anchored_window_origin(cursor: (i32, i32), physical: (u32, u32)) -> (i32, i32) {
-    (cursor.0 - physical.0 as i32 / 2, cursor.1 - physical.1 as i32 / 2)
+    (
+        cursor.0 - physical.0 as i32 / 2,
+        cursor.1 - physical.1 as i32 / 2,
+    )
 }
 
 /// 前端量取形象不透明边界后请求贴合：把窗口缩放到 {width,height}（逻辑
@@ -416,7 +419,8 @@ pub async fn fit_pet_window(
         return Err("pet window fit requires the pet webview".into());
     }
     // 量测异常（极小/超大）时拒绝，维持当前窗口，宁可留白也不裁掉本体。
-    if !width.is_finite() || !height.is_finite()
+    if !width.is_finite()
+        || !height.is_finite()
         || !(32.0..=320.0).contains(&width)
         || !(32.0..=320.0).contains(&height)
     {
