@@ -1,6 +1,6 @@
 <script lang="ts">
   import { Check, Copy, FileText } from "@lucide/svelte";
-  import type { RpcMessage } from "./rpc-state";
+  import { readableRpcError, type RpcMessage } from "./rpc-state";
   import { messageParts, messageSource } from "./message-parts";
   import { visibleMessageText } from "./chat-presentation";
   import type { ChatDetailLevel } from "./settings";
@@ -40,6 +40,7 @@
     if (copying) return;
     const content = message.content;
     const text = detail === "concise" ? visibleMessageText(message) : messageSource(content);
+    if (detail === "concise" && !text) return;
     copying = true;
     error = "";
     try { await navigator.clipboard.writeText(text); copied = content === message.content; }
@@ -81,9 +82,12 @@
       {/if}
     {/each}
   {/if}
+  {#if (message.role === "assistant" || message.role === "toolResult") && message.errorMessage}
+    <p role="alert">{tm(readableRpcError(message.errorMessage))}</p>
+  {/if}
   {#if error}<p role="alert">{error}</p>{/if}
   <footer>
-    <button type="button" title={copied ? t("已复制") : t("复制消息")} aria-label={copied ? t("已复制") : t("复制消息")} disabled={copying} onclick={copy}>
+    <button type="button" title={copied ? t("已复制") : t("复制消息")} aria-label={copied ? t("已复制") : t("复制消息")} disabled={copying || (detail === "concise" && !visibleMessageText(message))} onclick={copy}>
       {#if copied}<Check size={14} />{:else}<Copy size={14} />{/if}
     </button>
     {#if message.role !== "user" && detail === "verbose"}

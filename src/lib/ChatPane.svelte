@@ -12,7 +12,8 @@
   import { captureTranscriptAnchor, restoreTranscriptAnchor, messageWindowStart, transcriptPort } from "./transcript-scroll";
   import MessageDisclosure from "./MessageDisclosure.svelte";
   import { messageSource } from "./message-parts";
-  import { showConversationMessage, visibleMessageText } from "./chat-presentation";
+  import MessageFallback from "./MessageFallback.svelte";
+  import { showConversationMessage } from "./chat-presentation";
   import { clipboardImageFiles } from "./clipboard-images";
   import { hasQueuedImages, rekeyQueuedImages, takeQueuedImages, type QueuedImageEntry } from "./queued-images";
   import { formatDuration } from "./duration";
@@ -284,8 +285,7 @@
   let reloadRequested = false;
   const messageStart = $derived(messageWindowStart(conversation.messages.length, historyLimit, pinnedMessageStart));
   const visibleMessages = $derived(conversation.messages.slice(messageStart));
-  /// 空白 assistant 占位轮次（失败请求在会话历史里的残留）不渲染：错误已由横幅展示，
-  /// 空轮次只剩「Pi」标签和一对复制按钮；带上原始下标，data-message-index 保持正确。
+  /// 历史与实时消息共用可见性规则；保留下标以稳定翻页锚点。
   const visibleEntries = $derived(
     visibleMessages
       .map((message, offset) => ({ message, index: messageStart + offset }))
@@ -382,6 +382,10 @@
     return name;
   }
 
+  function displayedToolName(tool: RpcTool): string {
+    return chatDetailLevel === "concise" ? tool.name : toolCallSummary(tool.name, tool.args);
+  }
+
   /// —— 输出活跃度分档 ——
   /// tool_execution_update 事件即心跳：< 10s 视为输出更新中；< 2min 静默；再久提示疑似停滞。
   /// 注意措辞：长静默 ≠ 卡住（npm install、sleep 等本来就长时间无输出），只客观陈述无输出多久。
@@ -429,7 +433,7 @@
   /// 上滚时悬浮胶囊的文案：工具摘要 + 已运行 + 静默时长。
   function activeToolChipLabel(tool: RpcTool): string {
     const elapsed = tool.startedAt !== undefined ? formatDuration(elapsedNow - tool.startedAt) : "";
-    return `${t("{name} 执行中", { name: chatDetailLevel === "concise" ? tool.name : toolCallSummary(tool.name, tool.args) })}${elapsed ? ` · ${elapsed}` : ""}${silenceLabel(tool, elapsedNow)}`;
+    return `${t("{name} 执行中", { name: displayedToolName(tool) })}${elapsed ? ` · ${elapsed}` : ""}${silenceLabel(tool, elapsedNow)}`;
   }
 
   /// 回到最新消息并恢复自动跟随；悬浮胶囊与回底按钮共用。
@@ -819,7 +823,7 @@
     if (!connected) return t("未连接");
     const turnPart = turnStartedAt !== null ? ` · ${t("本轮 {duration}", { duration: formatDuration(elapsedNow - turnStartedAt) })}` : "";
     if (conversation.phase === "tool" && activeTool) {
-      const summary = chatDetailLevel === "concise" ? activeTool.name : toolCallSummary(activeTool.name, activeTool.args);
+      const summary = displayedToolName(activeTool);
       const toolPart = activeTool.startedAt !== undefined ? formatDuration(elapsedNow - activeTool.startedAt) : "";
       return `${summary}${toolPart ? ` · ${toolPart}` : ""}${silenceLabel(activeTool, elapsedNow)}${turnPart}`;
     }
@@ -1855,13 +1859,13 @@
           <div class="message-content">
             {#if messageModule}
               {#await messageModule}
-                <div class="plain-message">{chatDetailLevel === "concise" ? visibleMessageText(message) : messageSource(message.content)}</div>
+                <MessageFallback {message} detail={chatDetailLevel} />
               {:then module}<module.default {message} onOpenLink={openMessageLink} detail={chatDetailLevel} resolvedToolIds={toolResults} />
               {:catch}
-                <div class="plain-message">{chatDetailLevel === "concise" ? visibleMessageText(message) : messageSource(message.content)}</div>
+                <MessageFallback {message} detail={chatDetailLevel} />
                 <button type="button" title={t("重新加载消息显示")} aria-label={t("重新加载消息显示")} onclick={() => { messageModule = null; }}><RefreshCw size={15} /></button>
               {/await}
-            {:else}<div class="plain-message">{chatDetailLevel === "concise" ? visibleMessageText(message) : messageSource(message.content)}</div>{/if}
+            {:else}<MessageFallback {message} detail={chatDetailLevel} />{/if}
           </div>
         {/if}
       </article>
@@ -1897,7 +1901,7 @@
         <div class="tool-call-head">
           <span class="activity-dot {outputActivity(tool, elapsedNow)}" aria-hidden="true"></span>
           <Terminal size={14} />
-          <span class="tool-call-name">{chatDetailLevel === "concise" ? tool.name : toolCallSummary(tool.name, tool.args)}</span>
+          <span class="tool-call-name">{displayedToolName(tool)}</span>
           {#if tool.startedAt !== undefined && elapsedNow - tool.startedAt >= LONG_TOOL_MS}
             <span class="tool-call-badge">{t("长时间运行")}</span>
           {/if}
