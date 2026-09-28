@@ -1,0 +1,946 @@
+:root {
+  color-scheme: dark;
+  /* 默认主题 Command Flow（command-flow）。运行时可被主题包覆盖：applyAppearance 会写入内联变量。 */
+  --page-bg: #0c0e0d;
+  --surface: #141815;
+  --surface-alt: #111613;
+  --surface-raised: #1a201c;
+  --surface-hover: #202822;
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.16);
+  --text: #e6ede8;
+  --text-strong: #f4f8f5;
+  --text-muted: #829186;
+  --text-subtle: #6d7a70;
+  --accent: #52e19d;
+  --accent-ink: #0c0e0d;
+  /* 任务状态色：等待 / 运行中 / 失败 / 已完成。 */
+  --status-waiting: #e5c07b;
+  --status-running: #52e19d;
+  --status-failed: #f87171;
+  --status-done: #60a5fa;
+  --app-font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+  --text-font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+  --code-font: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+  /* 顶栏高度：非工作区尽量少占窗口高度。 */
+  --topbar-h: 28px;
+}
+
+:root[data-color-scheme="light"] {
+  color-scheme: light;
+  --page-bg: #f6f8f7;
+  --surface: #ffffff;
+  --surface-alt: #eef2f0;
+  --surface-raised: #e6ece8;
+  --surface-hover: #e2eae5;
+  --border: #dfe6e1;
+  --border-strong: #c2cdc6;
+  --text: #26302a;
+  --text-strong: #141a16;
+  --text-muted: #57635b;
+  --text-subtle: #67736b;
+  --accent: #1f8a58;
+  --accent-ink: #ffffff;
+  --status-waiting: #a9741a;
+  --status-running: #1f8a58;
+  --status-failed: #b23b34;
+  --status-done: #2563b8;
+}
+
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+.startup-status {
+  position: fixed;
+  inset: var(--topbar-h, 32px) 0 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 24px;
+  background: var(--page-bg);
+  color: var(--text-muted);
+}
+.startup-status p { max-width: 640px; margin: 0; overflow-wrap: anywhere; }
+.startup-status button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 6px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+}
+
+body {
+  color: var(--text);
+  background: var(--page-bg);
+  font-family: var(--app-font);
+  font-size: var(--app-font-size, 13px);
+}
+
+button,
+input,
+select {
+  font: inherit;
+  font-family: var(--app-font);
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.app-shell {
+  display: grid;
+  grid-template-columns: var(--sidebar-w, 260px) minmax(0, 1fr);
+  grid-template-rows: var(--topbar-h, 32px) minmax(0, 1fr);
+  width: 100vw;
+  height: 100vh;
+  background: var(--page-bg);
+  font-family: var(--app-font);
+  transition: grid-template-columns .16s ease;
+}
+
+@media (min-width: 1101px) {
+  .app-shell { grid-template-columns: var(--sidebar-w, 260px) minmax(0, 1fr) var(--files-w, 260px); }
+  .app-shell.files-hidden { grid-template-columns: var(--sidebar-w, 260px) minmax(0, 1fr); }
+  .app-shell.files-visible.git-visible { grid-template-columns: var(--sidebar-w, 260px) minmax(0, 1fr) var(--files-w, 260px) var(--git-w, 300px); }
+  .app-shell.files-hidden.git-visible { grid-template-columns: var(--sidebar-w, 260px) minmax(0, 1fr) var(--git-w, 300px); }
+  .app-shell.sidebar-hidden { grid-template-columns: minmax(0, 1fr) var(--files-w, 260px); }
+  .app-shell.sidebar-hidden.files-hidden { grid-template-columns: minmax(0, 1fr); }
+  .app-shell.sidebar-hidden.files-visible.git-visible { grid-template-columns: minmax(0, 1fr) var(--files-w, 260px) var(--git-w, 300px); }
+  .app-shell.sidebar-hidden.files-hidden.git-visible { grid-template-columns: minmax(0, 1fr) var(--git-w, 300px); }
+}
+
+.app-shell.dsh-mode {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.project-sidebar { display: flex; flex-direction: column; min-width: 0; min-height: 0; border-right: 1px solid var(--border); background: var(--surface-alt); }
+.sidebar-panel { flex: 1; min-height: 0; overflow: hidden; }
+.sidebar-panel > .task-sidebar { height: 100%; border: 0; }
+.file-project-selector { display: flex; gap: 4px; padding: 8px 10px 0; }
+.file-project-selector select { flex: 1; min-width: 0; width: 100%; padding: 5px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); color: var(--text); }
+.file-project-selector button { display: grid; place-items: center; border: 0; background: transparent; color: var(--text-muted); cursor: pointer; }
+.file-panel { display: flex; flex-direction: column; min-width: 0; min-height: 0; border-left: 1px solid var(--border); background: var(--surface-alt); }
+.file-panel .sidebar-panel { flex: 1; min-height: 0; overflow: hidden; }
+.file-panel .sidebar-panel > .file-sidebar { height: 100%; border: 0; }
+@media (max-width: 1100px) {
+  .file-panel { position: fixed; top: var(--topbar-h, 32px); bottom: 0; right: 0; width: min(260px, calc(100vw - 44px)); z-index: 5; box-shadow: -4px 0 16px #0002; }
+}
+.panel-hidden { display: none !important; }
+
+/* 面板拖拽调宽把手 */
+.panel-resize-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  z-index: 6;
+  cursor: col-resize;
+  background: transparent;
+}
+.panel-resize-handle:hover, .panel-resize-handle.resizing { background: color-mix(in srgb, var(--accent) 35%, transparent); }
+.resize-right { right: -3px; }
+.resize-left { left: -3px; }
+body.panel-resizing { cursor: col-resize; user-select: none; }
+
+aside.project-sidebar, aside.file-panel, aside.git-sidebar { position: relative; }
+
+/* 面板折叠按钮：骑在侧栏与中间窗口的分界线上（左右各压一半）。 */
+.panel-toggle {
+  position: absolute;
+  z-index: 7;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  color: var(--text-muted);
+  background: var(--surface-raised);
+  cursor: pointer;
+}
+
+.panel-toggle:hover {
+  color: var(--text-strong);
+  background: var(--surface-hover);
+}
+
+.project-sidebar > .panel-toggle { top: 12px; right: -13px; }
+.file-panel > .panel-toggle { top: 8px; left: -13px; }
+
+/* 展开按钮：该侧已收起，没有分界线只有窗口边缘，因此贴窗口边摆放；垂直位置与折叠按钮一致，切换时不跳动。 */
+.workspace > .panel-toggle.sidebar-toggle { top: 12px; left: 3px; }
+.workspace > .panel-toggle.files-toggle { top: 8px; right: 3px; }
+
+/* 为压线/贴边按钮预留位置，避免压住搜索框与标签。 */
+.app-shell .project-sidebar .task-search { margin-right: 24px; }
+.app-shell .file-panel .file-project-selector { padding-left: 30px; }
+.app-shell.sidebar-hidden .workspace .task-tabs-shell,
+.app-shell.files-hidden .workspace .task-tabs-shell {
+  background: var(--surface-alt);
+  border-bottom: 1px solid var(--border);
+}
+.app-shell.sidebar-hidden .workspace .task-tabs-shell { padding-left: 34px; }
+/* 顶部面包屑：替代原品牌区，显示「项目 / 当前任务」。 */
+.stage-crumbs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 12px;
+}
+
+.crumb-project {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  padding: 3px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text-strong);
+  font-weight: 500;
+}
+
+.crumb-dot { width: 6px; height: 6px; flex-shrink: 0; border-radius: 50%; background: var(--accent); }
+.crumb-sep { color: var(--text-subtle); }
+.crumb-task { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); }
+.app-shell.files-hidden .workspace .task-tabs-shell { padding-right: 34px; }
+
+.topbar {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+.topbar.runtime-updates-visible {
+  grid-template-columns: auto minmax(0, auto) minmax(0, 1fr) auto;
+}
+.topbar.runtime-updates-visible .stage-crumbs { overflow: hidden; }
+.topbar.runtime-updates-visible .crumb-project { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+@media (max-width: 660px) {
+  .topbar.runtime-updates-visible { grid-template-columns: auto minmax(0, 1fr) auto; gap: 4px; padding: 0 4px; }
+  .topbar.runtime-updates-visible .stage-crumbs { display: none; }
+}
+
+.workspace-switcher,
+.toolbar {
+  display: flex;
+  align-items: center;
+}
+
+.workspace-switcher {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  background: var(--surface-alt);
+}
+
+.workspace-switcher button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  height: 22px;
+  padding: 0 8px;
+  font-size: 12px;
+  border: 0;
+  border-radius: 3px;
+  color: #89928b;
+  background: transparent;
+}
+
+.workspace-switcher button:hover { color: var(--text); }
+.workspace-switcher button.selected {
+  color: var(--accent-ink);
+  background: var(--accent);
+  font-weight: 700;
+}
+
+.toolbar {
+  justify-self: end;
+  justify-content: flex-end;
+  gap: 5px;
+}
+
+.toolbar button,
+.task-actions button {
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: #aeb7b0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.toolbar button {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+}
+
+.toolbar button:hover,
+.toolbar button.active,
+.task-actions button:hover {
+  border-color: #465048;
+  color: #f4f7f5;
+  background: #252b27;
+}
+
+.toolbar button.primary {
+  color: #111412;
+  background: #8fd6ad;
+}
+
+.toolbar button:disabled,
+.workspace-switcher button:disabled {
+  cursor: default;
+  opacity: 0.42;
+}
+
+.task-sidebar {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: auto;
+  border-right: 1px solid var(--border);
+  background: var(--surface-alt);
+}
+
+/* 侧栏底部不再放设置按钮（已在控制柱），任务列表补满整个高度。 */
+.project-sidebar > .task-sidebar {
+  flex: 1 1 auto;
+}
+
+.projects-section {
+  padding: 10px 8px 4px;
+}
+
+.projects-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 28px;
+  padding: 0 6px;
+  color: #aeb7b0;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.projects-header button,
+.project-open,
+.project-add,
+.add-project-empty {
+  border: 0;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+}
+
+.projects-header button {
+  display: inline-grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: 4px;
+}
+
+.projects-header button:hover,
+.project-open:hover,
+.project-add:hover,
+.add-project-empty:hover {
+  background: var(--surface-hover);
+}
+
+.add-project-empty {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 38px;
+  padding: 0 8px;
+  border: 1px dashed #465048;
+  border-radius: 4px;
+  color: #8fd6ad;
+  font-size: 12px;
+}
+
+.project-group {
+  margin-top: 4px;
+  border-radius: 4px;
+}
+
+.project-group.selected {
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.project-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 26px;
+  align-items: center;
+  gap: 2px;
+  width: 100%;
+  min-height: 46px;
+}
+
+.project-open {
+  display: grid;
+  grid-template-columns: 14px 17px minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: 46px;
+  padding: 5px 6px;
+  text-align: left;
+}
+
+.project-add {
+  display: inline-grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: 4px;
+}
+
+.project-copy {
+  display: grid;
+  min-width: 0;
+}
+
+.project-copy strong,
+.project-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-copy strong {
+  color: #d8ded9;
+  font-size: 12px;
+}
+
+.project-copy small {
+  margin-top: 2px;
+  color: #778078;
+  font-size: 10px;
+}
+
+.project-task-section {
+  padding: 2px 0 4px 14px;
+}
+
+.project-task-section > header {
+  display: flex;
+  justify-content: space-between;
+  min-height: 24px;
+  padding: 3px 8px 0 6px;
+  color: #778078;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.task-section {
+  padding: 10px 8px 4px;
+}
+
+.task-section > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 28px;
+  padding: 0 6px;
+  color: #7f8981;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.task-row {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 5px 6px;
+  border-radius: 4px;
+}
+
+.task-row:hover {
+  background: var(--surface-hover);
+}
+
+.task-row.selected {
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.task-row.selected .task-copy strong {
+  color: var(--accent);
+}
+
+.session-status {
+  display: block;
+  justify-self: center;
+}
+
+.session-status:not(svg) {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #71c99a;
+}
+
+.session-status.failed {
+  background: #ef7b72;
+}
+
+.session-status.waiting {
+  background: #e4c875;
+}
+
+.session-status.cancelled {
+  background: #89928b;
+}
+
+.session-status.running {
+  width: 10px;
+  height: 10px;
+  color: #71c99a;
+  animation: session-spin 0.8s linear infinite;
+}
+
+@keyframes session-spin {
+  to { transform: rotate(360deg); }
+}
+
+.task-copy {
+  display: grid;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  text-align: left;
+  background: transparent;
+  cursor: pointer;
+}
+
+.task-copy strong,
+.task-copy span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-copy strong {
+  color: #d8ded9;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.task-copy span {
+  color: #7f8981;
+  font-size: 11px;
+}
+
+.archived-section {
+  margin: 6px 8px;
+  padding-right: 0;
+  padding-left: 0;
+  border-top: 1px solid var(--border);
+}
+
+.context-menu {
+  position: fixed;
+  z-index: 12;
+  width: 196px;
+  padding: 4px;
+  border: 1px solid #48534b;
+  border-radius: 5px;
+  background: #1b211d;
+  box-shadow: 0 12px 28px rgb(0 0 0 / 34%);
+}
+
+.context-menu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 32px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 3px;
+  color: #d8ded9;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+
+.context-menu button:hover,
+.context-menu button:focus-visible {
+  color: #f4f7f5;
+  background: #252b27;
+}
+
+.workspace {
+  position: relative;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.workspace.settings-view {
+  grid-template-rows: minmax(0, 1fr);
+}
+
+
+/* 任务看板视图：占满整个工作区（跨过标签行）。 */
+.board-view {
+  grid-row: 1 / -1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.workspace-content {
+  min-width: 0;
+  min-height: 0;
+  padding: 8px;
+  overflow: hidden;
+}
+
+.terminal-grid {
+  display: grid;
+  gap: 8px;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+.terminal-grid.single {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.terminal-grid.split {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.terminal-grid.grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+}
+
+.terminal-grid.pane-count-one .terminal-pane:not(.hidden) {
+  grid-column: 1 / -1;
+}
+
+.dsh-placeholder {
+  grid-row: 1 / -1;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 14px;
+  color: #778078;
+}
+
+.dsh-error {
+  display: grid;
+  gap: 6px;
+  max-width: min(720px, 80vw);
+  margin: 0;
+  padding: 12px 14px;
+  border: 1px solid #74423e;
+  border-radius: 6px;
+  color: #ffd2ce;
+  background: #3b201e;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.dsh-error strong { font-size: 13px; }
+.dsh-error small { color: #e3aaa4; line-height: 1.5; }
+.dsh-error-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+
+.empty-state {
+  grid-row: 1 / -1;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  height: 100%;
+  color: #778078;
+}
+
+.empty-state h1 {
+  margin: 12px 0 18px;
+  color: #cbd2cc;
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.start-button {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 32px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 4px;
+  color: #111412;
+  background: #8fd6ad;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.start-button:disabled {
+  opacity: 0.4;
+}
+
+.error-banner {
+  position: absolute;
+  z-index: 3;
+  top: 14px;
+  right: 14px;
+  max-width: min(480px, 80%);
+  padding: 8px 10px;
+  border: 1px solid #74423e;
+  border-radius: 5px;
+  color: #ffd2ce;
+  background: #3b201e;
+}
+
+@media (max-width: 900px) {
+  .app-shell {
+    grid-template-columns: 220px minmax(0, 1fr);
+  }
+
+  .terminal-grid.split,
+  .terminal-grid.grid {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: none;
+    grid-auto-rows: minmax(260px, 1fr);
+    overflow: auto;
+  }
+}
+
+
+@media (max-width: 620px) {
+  .app-shell { grid-template-columns: minmax(150px, 38%) minmax(0, 1fr); }
+  .app-shell.sidebar-hidden { grid-template-columns: minmax(0, 1fr); }
+  .app-shell.dsh-mode { grid-template-columns: minmax(0, 1fr); }
+}
+  /* 只压 .app-shell：body 的背景由上面的基础规则给出，这里若再以
+     `:root[data-color-scheme="light"] body`（特异性 0,2,1）强制 !important，
+     会压过桌宠/任务浮层两页声明的 `html, body { background: transparent !important }`
+     （0,0,1）——浅色模式下这两个窗口会变成不透明白底，盖住桌面与桌宠本体。 */
+:root[data-color-scheme="light"] .app-shell {
+  color: var(--text) !important;
+  background: var(--page-bg) !important;
+}
+
+:root[data-color-scheme="light"] .topbar,
+:root[data-color-scheme="light"] .task-sidebar,
+:root[data-color-scheme="light"] .task-tabs,
+:root[data-color-scheme="light"] .terminal-pane header {
+  border-color: var(--border) !important;
+  background: var(--surface) !important;
+}
+
+:root[data-color-scheme="light"] .workspace-switcher,
+:root[data-color-scheme="light"] .terminal-pane,
+:root[data-color-scheme="light"] .terminal-pane .terminal {
+  border-color: var(--border-strong) !important;
+  background: var(--surface-alt) !important;
+}
+
+:root[data-color-scheme="light"] .project-copy strong,
+:root[data-color-scheme="light"] .task-copy strong,
+:root[data-color-scheme="light"] .empty-state h1 {
+  color: var(--text-strong) !important;
+}
+
+:root[data-color-scheme="light"] .workspace-switcher button,
+:root[data-color-scheme="light"] .toolbar button,
+:root[data-color-scheme="light"] .task-actions button,
+:root[data-color-scheme="light"] .project-add,
+:root[data-color-scheme="light"] .project-open,
+:root[data-color-scheme="light"] .project-copy small,
+:root[data-color-scheme="light"] .task-copy span,
+:root[data-color-scheme="light"] .task-section > header,
+:root[data-color-scheme="light"] .dsh-placeholder,
+:root[data-color-scheme="light"] .empty-state {
+  color: var(--text-muted) !important;
+}
+
+:root[data-color-scheme="light"] .toolbar button:hover,
+:root[data-color-scheme="light"] .toolbar button.active,
+:root[data-color-scheme="light"] .task-actions button:hover,
+:root[data-color-scheme="light"] .project-open:hover,
+:root[data-color-scheme="light"] .project-add:hover,
+:root[data-color-scheme="light"] .task-row:hover {
+  border-color: var(--border-strong) !important;
+  color: var(--text-strong) !important;
+  background: var(--surface-hover) !important;
+}
+
+:root[data-color-scheme="light"] .task-row.selected .task-copy strong {
+  color: var(--accent) !important;
+}
+
+
+:root[data-color-scheme="light"] .workspace-switcher button.selected,
+:root[data-color-scheme="light"] .toolbar button.primary,
+:root[data-color-scheme="light"] .start-button {
+  color: var(--accent-ink) !important;
+  background: var(--accent) !important;
+}
+
+:root[data-color-scheme="light"] .context-menu,
+:root[data-color-scheme="light"] .settings-page,
+:root[data-color-scheme="light"] .provider-page,
+:root[data-color-scheme="light"] .market-page,
+:root[data-color-scheme="light"] .app-dialog {
+  color: var(--text) !important;
+  background: var(--surface) !important;
+}
+
+:root[data-color-scheme="light"] .context-menu,
+:root[data-color-scheme="light"] .provider-editor,
+:root[data-color-scheme="light"] .catalog-panel,
+:root[data-color-scheme="light"] .market-search,
+:root[data-color-scheme="light"] .package-card,
+:root[data-color-scheme="light"] .app-dialog {
+  border-color: var(--border-strong) !important;
+}
+
+:root[data-color-scheme="light"] .context-menu button,
+:root[data-color-scheme="light"] .setting-row,
+:root[data-color-scheme="light"] .provider-row,
+:root[data-color-scheme="light"] .setting-control,
+:root[data-color-scheme="light"] .section-heading,
+:root[data-color-scheme="light"] .market-empty,
+:root[data-color-scheme="light"] .empty,
+:root[data-color-scheme="light"] .provider-page small,
+:root[data-color-scheme="light"] .market-page .package-types,
+:root[data-color-scheme="light"] .market-page .package-card footer,
+:root[data-color-scheme="light"] .market-page .installed-row {
+  color: var(--text-muted) !important;
+}
+
+:root[data-color-scheme="light"] .context-menu button:hover,
+:root[data-color-scheme="light"] .context-menu button:focus-visible,
+:root[data-color-scheme="light"] .setting-row:hover,
+:root[data-color-scheme="light"] .provider-row:hover,
+:root[data-color-scheme="light"] .provider-row.selected {
+  color: var(--text-strong) !important;
+  background: var(--surface-hover) !important;
+}
+
+:root[data-color-scheme="light"] .settings-page h1,
+:root[data-color-scheme="light"] .settings-page .setting-copy strong,
+:root[data-color-scheme="light"] .provider-page strong,
+:root[data-color-scheme="light"] .market-page h1,
+:root[data-color-scheme="light"] .market-page h2,
+:root[data-color-scheme="light"] .market-page .installed-copy strong,
+:root[data-color-scheme="light"] .app-dialog h2 {
+  color: var(--text-strong) !important;
+}
+
+:root[data-color-scheme="light"] .setting-icon,
+:root[data-color-scheme="light"] .provider-editor,
+:root[data-color-scheme="light"] .catalog-panel,
+:root[data-color-scheme="light"] .market-search,
+:root[data-color-scheme="light"] .package-card,
+:root[data-color-scheme="light"] .provider-page input,
+:root[data-color-scheme="light"] .provider-page select,
+:root[data-color-scheme="light"] .setting-control select,
+:root[data-color-scheme="light"] .dialog-input {
+  color: var(--text) !important;
+  background: var(--surface-alt) !important;
+}
+
+:root[data-color-scheme="light"] .market-search input {
+  color: var(--text) !important;
+  background: transparent !important;
+}
+
+:root[data-color-scheme="light"] .provider-page .quiet-button,
+:root[data-color-scheme="light"] .provider-page .catalog-search button,
+:root[data-color-scheme="light"] .market-page .scope-switch,
+:root[data-color-scheme="light"] .market-page .market-search button {
+  border-color: var(--border-strong) !important;
+  color: var(--text-muted) !important;
+  background: var(--surface-raised) !important;
+}
+
+:root[data-color-scheme="light"] .provider-page .primary-button,
+:root[data-color-scheme="light"] .market-page .primary-button,
+:root[data-color-scheme="light"] .choice-button {
+  border-color: var(--accent) !important;
+  color: var(--accent-ink) !important;
+  background: var(--accent) !important;
+}
+
+:root[data-color-scheme="light"] .provider-page .danger-icon,
+:root[data-color-scheme="light"] .market-page .danger-button {
+  color: #a33f3a !important;
+}
+
+:root[data-color-scheme="light"] .app-dialog p {
+  color: var(--text-muted) !important;
+}
+
+:root[data-color-scheme="light"] .secondary-button {
+  border-color: var(--border-strong) !important;
+  color: var(--text-muted) !important;
+  background: var(--surface-raised) !important;
+}
+
+:root[data-color-scheme="light"] .installed-panel,
+:root[data-color-scheme="light"] .provider-list,
+:root[data-color-scheme="light"] .editor-section,
+:root[data-color-scheme="light"] .installed-row,
+:root[data-color-scheme="light"] .configured-model,
+:root[data-color-scheme="light"] .provider-model,
+:root[data-color-scheme="light"] .catalog-model {
+  border-color: var(--border) !important;
+}
+
+:root[data-color-scheme="light"] .error-banner {
+  border-color: #d38b84 !important;
+  color: #7f2925 !important;
+  background: #fbe8e5 !important;
+}

@@ -1,0 +1,14 @@
+{
+  "bundle": {
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "__DEEPPI_UPDATER_PUBLIC_KEY__",
+      "endpoints": ["__DEEPPI_UPDATER_ENDPOINT__"],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}

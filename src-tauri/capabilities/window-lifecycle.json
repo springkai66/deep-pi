@@ -1,0 +1,9 @@
+{
+  "identifier": "main-window-lifecycle",
+  "description": "Allow the main Webview to minimize or destroy its desktop window",
+  "webviews": ["main"],
+  "permissions": [
+    "core:window:allow-destroy",
+    "core:window:allow-minimize"
+  ]
+}

@@ -1,0 +1,1665 @@
+<script lang="ts">
+  import { invoke as nativeInvoke } from "@tauri-apps/api/core";
+  import { Download, Plus, RefreshCw, Search, Store, Trash2 } from "@lucide/svelte";
+  import { onDestroy, onMount } from "svelte";
+  import {
+    agenticCategoryLabel,
+    agenticLevelLabel,
+    agenticPlatformLabel,
+    agenticTransportLabel,
+    agenticTrustLabel,
+  } from "$lib/agentic-labels";
+  import { getLocale, t, tm } from "$lib/i18n.svelte";
+
+  interface McpServerEntry {
+    name: string;
+    config: Record<string, unknown>;
+  }
+
+  interface SkillEntry {
+    name: string;
+    description: string;
+    path: string;
+  }
+
+  /** agenticskills.io 技能条目（后端 search_agentic_skills 返回）。 */
+  interface AgenticSkillEntry {
+    slug: string;
+    name: string;
+    description?: string | null;
+    longDescription?: string | null;
+    author?: string | null;
+    category?: string | null;
+    tags?: string[];
+    platforms?: string[];
+    installs?: number | null;
+    quality?: string | number | null;
+    license?: string | null;
+    lastUpdated?: string | null;
+    /** 原始星标数（schema 已冻结；热度排序统一走 heat）。 */
+    stars?: number | null;
+    /** 热度统一口径（MCP 侧可能由 popularity 文本折算）；缺失表示未知，排序时排最后。 */
+    heat?: number | null;
+    githubUrl?: string | null;
+    skillMdUrl?: string | null;
+    featured?: boolean;
+  }
+
+  interface AgenticSkillDetail {
+    slug: string;
+    name: string;
+    description?: string | null;
+    longDescription?: string | null;
+    author?: string | null;
+    authorUrl?: string | null;
+    tags?: string[];
+    platforms?: string[];
+    license?: string | null;
+    quality?: string | number | null;
+    lastUpdated?: string | null;
+    githubUrl?: string | null;
+    skillMdUrl?: string | null;
+    installCommand?: string | null;
+    sourceUrl?: string | null;
+  }
+
+  /** agenticskills.io MCP 服务器条目（后端 search_agentic_mcp 返回）。 */
+  interface AgenticMcpEntry {
+    slug: string;
+    name: string;
+    description?: string | null;
+    longDescription?: string | null;
+    author?: string | null;
+    category?: string | null;
+    transport?: string[];
+    official?: boolean;
+    requiresApiKey?: boolean;
+    popularity?: number | null;
+    /** 原始星标数（schema 已冻结；热度排序统一走 heat）。 */
+    stars?: number | null;
+    /** 热度统一口径（缺失表示未知，排序时排最后）。 */
+    heat?: number | null;
+    /** 站点审计通过数（后端 summary.passed）；缺失表示未知，排序时排最后。 */
+    auditPassed?: number | null;
+    /** 站点审计检查总数（后端 summary.total）；缺失或为 0 表示无有效审计数据。 */
+    auditTotal?: number | null;
+    websiteUrl?: string | null;
+    configSource?: string | null;
+    tags?: string[];
+    featured?: boolean;
+    snippets?: AgenticMcpSnippet[];
+  }
+
+  interface AgenticMcpSnippet {
+    label: string;
+    file?: string | null;
+    code: string;
+  }
+
+  interface AgenticMcpDetail {
+    slug: string;
+    name: string;
+    description?: string | null;
+    longDescription?: string | null;
+    author?: string | null;
+    authorUrl?: string | null;
+    category?: string | null;
+    official?: boolean;
+    trustLevel?: string | null;
+    transport?: string[];
+    requiresApiKey?: boolean;
+    websiteUrl?: string | null;
+    configSource?: string | null;
+    popularity?: number | null;
+    /** 审计通过数 / 检查总数（详情接口与目录条目同名字段）；缺失表示未知。 */
+    auditPassed?: number | null;
+    auditTotal?: number | null;
+    tags?: string[];
+    snippets?: AgenticMcpSnippet[];
+    sourceUrl?: string | null;
+  }
+
+  /** agenticskills.io 工作流条目（后端 search_agentic_workflows 返回）。 */
+  interface AgenticWorkflowEntry {
+    slug: string;
+    name: string;
+    category?: string | null;
+    level?: string | null;
+    description?: string | null;
+    skillCount: number;
+    mcpCount: number;
+  }
+
+  /** 工作流的组成部分：技能或 MCP。 */
+  interface AgenticWorkflowComponent {
+    kind: "skill" | "mcp";
+    slug: string;
+    name: string;
+    url: string;
+  }
+
+  interface AgenticWorkflowStep {
+    name: string;
+    text: string;
+  }
+
+  interface AgenticWorkflowDetail {
+    slug: string;
+    name: string;
+    description?: string | null;
+    category?: string | null;
+    level?: string | null;
+    setupTime?: string | null;
+    components: AgenticWorkflowComponent[];
+    steps: AgenticWorkflowStep[];
+    kickoffPrompt?: string | null;
+    sourceUrl: string;
+  }
+
+  interface AgenticWorkflowFailure {
+    kind: string;
+    slug: string;
+    error: string;
+  }
+
+  /** 整条工作流的安装结果（后端 install_agentic_workflow 返回）。 */
+  interface AgenticWorkflowInstallResult {
+    skills: string[];
+    mcp: string[];
+    skipped: string[];
+    failures: AgenticWorkflowFailure[];
+  }
+
+  /** 当前 scope 下已安装的工作流（后端 list_installed_workflows 返回）。 */
+  interface InstalledWorkflow {
+    slug: string;
+    name: string;
+    category?: string | null;
+    skillCount: number;
+    mcpCount: number;
+    installedAt: string;
+    components?: AgenticWorkflowComponent[];
+  }
+
+  /** MCP 市场排序方式：「默认」保持后端目录顺序，其余在本地排序。 */
+  /** MCP 市场排序方式：「默认」保持后端目录顺序，其余在本地排序；「audit」按审计通过率降序。 */
+  type McpSortOrder = "default" | "heat" | "audit" | "official" | "name";
+
+  /** Skills 市场排序方式：「最新」按 lastUpdated 降序；「rank」按质量评级 S > A > B > C 降序。 */
+  type SkillSortOrder = "default" | "heat" | "rank" | "updated" | "name";
+  interface Props {
+    mode: "mcp" | "skills" | "workflows";
+    /** 破坏性操作的确认框；只有 MCP / Skills 模式会用到，工作流市场没有删除操作。 */
+    confirm?: (title: string, message: string, confirmLabel?: string) => Promise<boolean>;
+    onError: (error: unknown) => void;
+    projectPath?: string | null;
+    onBusyChange?: (busy: boolean) => void;
+    invokeCommand?: typeof nativeInvoke;
+  }
+
+  let { mode, confirm = async () => false, onError, projectPath = null, onBusyChange = () => {}, invokeCommand = nativeInvoke }: Props = $props();
+  const invoke = <T,>(command: string, args?: Parameters<typeof nativeInvoke>[1]) => invokeCommand<T>(command, args);
+
+  let scope = $state<"global" | "project">("global");
+  let tab = $state<"installed" | "market">("installed");
+  let servers = $state<McpServerEntry[]>([]);
+  let skills = $state<SkillEntry[]>([]);
+  let loading = $state(false);
+  let busy = $state(false);
+  let statusMessage = $state("");
+
+  // 市场状态（MCP 与 Skills 各自独立）。
+  // 目录来自 agenticskills.io：进入市场 tab 时拉一次全量，输入框只在本地过滤。
+  let mcpQuery = $state("");
+  let mcpEntries = $state<AgenticMcpEntry[]>([]);
+  let mcpLoading = $state(false);
+  let mcpSearched = $state(false);
+  let busyMcpEntry = $state<string | null>(null);
+  let mcpDetailSlug = $state<string | null>(null);
+  let mcpDetail = $state<AgenticMcpDetail | null>(null);
+  let mcpDetailLoading = $state<string | null>(null);
+  /** 分类筛选：null = 全部分类。 */
+  let mcpCategory = $state<string | null>(null);
+  /** 市场排序：MCP 与 Skills 各一份状态，只影响本地已加载目录的展示顺序。 */
+  let mcpSort = $state<McpSortOrder>("default");
+
+  let skillQuery = $state("");
+  let skillEntries = $state<AgenticSkillEntry[]>([]);
+  let skillLoading = $state(false);
+  let skillSearched = $state(false);
+  let busySkillEntry = $state<string | null>(null);
+  let skillDetailSlug = $state<string | null>(null);
+  let skillDetail = $state<AgenticSkillDetail | null>(null);
+  let skillDetailLoading = $state<string | null>(null);
+  /** 分类筛选：null = 全部分类。 */
+  let skillCategory = $state<string | null>(null);
+  /** 市场排序：MCP 与 Skills 各一份状态，只影响本地已加载目录的展示顺序。 */
+  let skillSort = $state<SkillSortOrder>("default");
+
+  // 工作流市场状态（与 MCP / Skills 的目录状态各自独立）。
+  let workflowQuery = $state("");
+  let workflowEntries = $state<AgenticWorkflowEntry[]>([]);
+  let workflowLoading = $state(false);
+  let workflowSearched = $state(false);
+  let busyWorkflowEntry = $state<string | null>(null);
+  let workflowDetailSlug = $state<string | null>(null);
+  let workflowDetail = $state<AgenticWorkflowDetail | null>(null);
+  let workflowDetailLoading = $state<string | null>(null);
+  /** 当前 scope 下已安装的工作流：市场条目的「已安装」徽标与已安装列表共用。 */
+  let installedWorkflows = $state<InstalledWorkflow[]>([]);
+  /** 最近一次安装的结果摘要；slug 决定摘要显示在哪一行下面。 */
+  let workflowResult = $state<{ slug: string; name: string; result: AgenticWorkflowInstallResult } | null>(null);
+  let copiedPromptSlug = $state<string | null>(null);
+
+  // 详情翻译：同一会话内按条目 slug 缓存译文，二次展开不再请求（后端也有缓存）。
+  /** slug → （原文 → 译文）；只覆盖自由文本，结构化字段走 agentic-labels。 */
+  let detailTranslations = $state<Record<string, Record<string, string>>>({});
+  /** slug → 翻译状态；失败时保留原文，并在文本旁显示错误文案。 */
+  let translateStates = $state<Record<string, { status: "loading" | "ready" | "error"; message?: string }>>({});
+  /** 正在请求译文的 slug：同一 slug 不并发重复提交。 */
+  const translatingSlugs = new Set<string>();
+
+  // 详情预热：目录加载后把缺详情字段的条目陆续交给后端缓存，失败只写控制台。
+  /** 已提交预热的 slug：同一会话内不重复提交。 */
+  const prefetchedSlugs = new Set<string>();
+  /** 待预热队列：串行分批下发，进程内只跑一个 worker。 */
+  const prefetchQueue: string[] = [];
+  let prefetchRunning = false;
+  /** 组件是否仍挂载；未挂载时预热不再继续。 */
+  let componentAlive = true;
+  /** 挂载时的 mode：同一实例被换市场（mode 变化）时停止预热。 */
+  let mountedMode: Props["mode"] | null = null;
+  /** 面板是否可见：设置页用 hidden 隐藏其余分类，隐藏时停止预热。 */
+  let marketVisible = $state(true);
+  let pageElement = $state<HTMLElement | null>(null);
+  let panelObserver: IntersectionObserver | null = null;
+
+  let serverName = $state("");
+  let serverConfig = $state("");
+  let skillName = $state("");
+  let skillDescription = $state("");
+  let skillContent = $state("");
+
+  const canUseProjectScope = $derived(projectPath !== null);
+  $effect(() => {
+    if (!canUseProjectScope && scope === "project") scope = "global";
+  });
+  const componentBusy = $derived(
+    busy ||
+      busyMcpEntry !== null ||
+      busySkillEntry !== null ||
+      busyWorkflowEntry !== null ||
+      mcpDetailLoading !== null ||
+      skillDetailLoading !== null ||
+      workflowDetailLoading !== null,
+  );
+  $effect(() => onBusyChange(componentBusy));
+
+  /** 已加载的全量目录按关键词 + 分类本地过滤，再按当前排序方式重排；输入时不打后端。 */
+  /**
+   * 三个市场的关键词过滤：**按关键字的语言选择匹配目标**。
+   *
+   * - 含中文的关键字 → 只匹配中文（本地化后的分类/传输/平台/难度）
+   * - 纯英文的关键字 → 只匹配站点英文原文（名称/slug/描述/作者/分类）
+   *
+   * 这样中文界面下「数据库」命中中文分类名，英文界面下「database」命中英文原文，
+   * 两种语言各自匹配各自的展示文案，不会出现跨语言误命中。
+   */
+  const filteredMcpEntries = $derived(
+    sortMcpEntries(
+      mcpEntries.filter(
+        (entry) =>
+          (mcpCategory === null || entry.category === mcpCategory) &&
+          matchesMarketKeyword(
+            mcpQuery,
+            [entry.name, entry.slug, entry.description, entry.author, entry.category],
+            [
+              agenticCategoryLabel(entry.category, getLocale()),
+              (entry.transport ?? []).map((value) => agenticTransportLabel(value, getLocale())).join(" "),
+            ],
+          ),
+      ),
+      mcpSort,
+    ),
+  );
+  const filteredSkillEntries = $derived(
+    sortSkillEntries(
+      skillEntries.filter(
+        (entry) =>
+          (skillCategory === null || entry.category === skillCategory) &&
+          matchesMarketKeyword(
+            skillQuery,
+            [entry.name, entry.slug, entry.description, entry.author, entry.category],
+            [
+              agenticCategoryLabel(entry.category, getLocale()),
+              (entry.platforms ?? []).map((value) => agenticPlatformLabel(value, getLocale())).join(" "),
+            ],
+          ),
+      ),
+      skillSort,
+    ),
+  );
+
+  /** 工作流目录同样按关键词本地过滤；难度等展示名也纳入匹配范围。 */
+  const filteredWorkflowEntries = $derived(
+    workflowEntries.filter((entry) =>
+      matchesMarketKeyword(
+        workflowQuery,
+        [entry.name, entry.slug, entry.description, entry.category],
+        [agenticCategoryLabel(entry.category, getLocale()), agenticLevelLabel(entry.level, getLocale())],
+      ),
+    ),
+  );
+
+  /** 分类筛选选项：当前已加载条目里出现过的分类，按条目数从多到少、同数量按名称排序。 */
+  const mcpCategoryOptions = $derived(categoryOptions(mcpEntries));
+  const skillCategoryOptions = $derived(categoryOptions(skillEntries));
+
+  /** 当前 scope 下已安装工作流的 slug 集合，用来给市场条目打「已安装」徽标。 */
+  const installedWorkflowSlugs = $derived(new Set(installedWorkflows.map((entry) => entry.slug)));
+
+  // 详情面板的派生值：展开哪一条就渲染哪一条；条目自带字段优先，缺字段才回落到详情接口。
+  const skillDetailEntry = $derived(skillEntries.find((entry) => entry.slug === skillDetailSlug) ?? null);
+  const skillDetailView = $derived(mergeSkillDetail(skillDetailEntry, skillDetail));
+  const skillDetailLongDescription = $derived(skillDetailView?.longDescription || skillDetailView?.description || "");
+  const skillDetailTags = $derived(skillDetailView?.tags ?? []);
+  const skillDetailPlatforms = $derived(skillDetailView?.platforms ?? []);
+  const skillDetailLicense = $derived(skillDetailView?.license ?? "");
+  const skillDetailUpdated = $derived(skillDetailView?.lastUpdated ?? "");
+  const skillDetailSiteUrl = $derived(skillSiteUrl(skillDetailView));
+  const skillDetailSkillMdUrl = $derived(skillDetailView?.skillMdUrl ?? "");
+
+  const mcpDetailEntry = $derived(mcpEntries.find((entry) => entry.slug === mcpDetailSlug) ?? null);
+  const mcpDetailView = $derived(mergeMcpDetail(mcpDetailEntry, mcpDetail));
+  const mcpDetailLongDescription = $derived(mcpDetailView?.longDescription || mcpDetailView?.description || "");
+  const mcpDetailAuthor = $derived(mcpDetailView?.author ?? "");
+  const mcpDetailTrustLevel = $derived(mcpDetailView?.trustLevel ?? "");
+  const mcpDetailConfigSource = $derived(mcpDetailView?.configSource ?? "");
+  const mcpDetailTags = $derived(mcpDetailView?.tags ?? []);
+  const mcpDetailSnippets = $derived(mcpDetailView?.snippets ?? []);
+  const mcpDetailAudit = $derived(auditSummary(mcpDetailView));
+  const mcpDetailSiteUrl = $derived(mcpSiteUrl(mcpDetailView));
+
+  // 工作流详情派生值：展开哪一条就渲染哪一条。
+  const workflowSkillComponents = $derived((workflowDetail?.components ?? []).filter((component) => component.kind === "skill"));
+  const workflowMcpComponents = $derived((workflowDetail?.components ?? []).filter((component) => component.kind === "mcp"));
+  const workflowSteps = $derived(workflowDetail?.steps ?? []);
+  const workflowKickoffPrompt = $derived(workflowDetail?.kickoffPrompt ?? "");
+  const mcpDetailWebsiteUrl = $derived(mcpDetailView?.websiteUrl ?? "");
+
+  onDestroy(() => {
+    componentAlive = false;
+    panelObserver?.disconnect();
+    panelObserver = null;
+    onBusyChange(false);
+  });
+
+  async function refresh() {
+    loading = true;
+    try {
+      if (mode === "mcp") {
+        servers = await invoke<McpServerEntry[]>("list_mcp_servers", { scope, projectPath });
+      } else if (mode === "skills") {
+        skills = await invoke<SkillEntry[]>("list_skills", { scope, projectPath });
+      } else {
+        installedWorkflows = await invoke<InstalledWorkflow[]>("list_installed_workflows", { scope, projectPath });
+      }
+    } catch (error) {
+      onError(error);
+    } finally {
+      loading = false;
+    }
+  }
+
+  onMount(() => {
+    mountedMode = mode;
+    void refresh();
+    // 设置页用 hidden 隐藏非当前分类；不可见时停止后台预热，避免用户已经离开还在打后端。
+    if (typeof IntersectionObserver === "function" && pageElement) {
+      panelObserver = new IntersectionObserver((entries) => {
+        marketVisible = entries.some((entry) => entry.isIntersecting);
+      });
+      panelObserver.observe(pageElement);
+    }
+  });
+
+  function serverSummary(config: Record<string, unknown>): string {
+    if (typeof config.url === "string" && config.url) return String(config.url);
+    if (typeof config.command === "string" && config.command) {
+      const args = Array.isArray(config.args) ? config.args.map((argument) => String(argument)).join(" ") : "";
+      return args ? `${config.command} ${args}` : String(config.command);
+    }
+    return t("未配置传输方式");
+  }
+
+  async function addServer() {
+    const name = serverName.trim();
+    if (!name) {
+      onError(t("MCP 服务名称不能为空"));
+      return;
+    }
+    let config: Record<string, unknown>;
+    try {
+      const parsed: unknown = JSON.parse(serverConfig);
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        onError(t("MCP 配置必须是 JSON 对象"));
+        return;
+      }
+      config = parsed as Record<string, unknown>;
+    } catch {
+      onError(t("MCP 配置不是有效的 JSON"));
+      return;
+    }
+    busy = true;
+    try {
+      await invoke("save_mcp_server", { request: { name, config, scope, projectPath } });
+      serverName = "";
+      serverConfig = "";
+      statusMessage = t("MCP 服务 {name} 已保存到{scope}配置", {
+        name,
+        scope: scope === "project" ? t("项目") : t("全局"),
+      });
+      await refresh();
+    } catch (error) {
+      onError(error);
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function removeServer(entry: McpServerEntry) {
+    if (!(await confirm(t("删除 MCP 服务"), t("删除 MCP 服务 “{name}” 吗？", { name: entry.name }), t("删除")))) return;
+    busy = true;
+    try {
+      await invoke("delete_mcp_server", { request: { name: entry.name, scope, projectPath } });
+      statusMessage = t("MCP 服务 {name} 已删除", { name: entry.name });
+      await refresh();
+    } catch (error) {
+      onError(error);
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function addSkill() {
+    const name = skillName.trim();
+    if (!name) {
+      onError(t("Skill 名称不能为空"));
+      return;
+    }
+    if (!skillDescription.trim()) {
+      onError(t("Skill 描述不能为空"));
+      return;
+    }
+    if (!skillContent.trim()) {
+      onError(t("Skill 内容不能为空"));
+      return;
+    }
+    busy = true;
+    try {
+      await invoke("save_skill", {
+        request: { name, description: skillDescription.trim(), content: skillContent, scope, projectPath },
+      });
+      skillName = "";
+      skillDescription = "";
+      skillContent = "";
+      statusMessage = t("Skill {name} 已保存到{scope}配置", {
+        name,
+        scope: scope === "project" ? t("项目") : t("全局"),
+      });
+      await refresh();
+    } catch (error) {
+      onError(error);
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function removeSkill(entry: SkillEntry) {
+    if (!(await confirm(t("删除 Skill"), t("删除 Skill “{name}” 及其目录吗？", { name: entry.name }), t("删除")))) return;
+    busy = true;
+    try {
+      await invoke("delete_skill", { request: { name: entry.name, scope, projectPath } });
+      statusMessage = t("Skill {name} 已删除", { name: entry.name });
+      await refresh();
+    } catch (error) {
+      onError(error);
+    } finally {
+      busy = false;
+    }
+  }
+
+  // ---------- 市场目录（agenticskills.io；后端负责抓取与解析） ----------
+
+  /** 站点根地址：详情里缺少 sourceUrl/websiteUrl 时用它兜底，不引入额外依赖。 */
+  const AGENTIC_SKILLS_SITE = "https://agenticskills.io";
+
+  /** 中文字符（含扩展 A 与兼容区）：用来判断搜索关键字该匹配中文还是英文文案。 */
+  const CJK_PATTERN = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/;
+
+  /**
+   * 按关键字语言选择匹配目标（中文匹配中文、英文匹配英文）。
+   *
+   * `english` 是站点原文（名称/slug/描述/作者/分类原文），`localized` 是本地化后的
+   * 展示文案（分类/传输/平台/难度的当前语言文本）。关键字含中文时只比中文，否则只比
+   * 英文——避免中文界面下输入英文、或英文界面下输入中文时出现跨语言误命中。
+   */
+  function matchesMarketKeyword(
+    keyword: string,
+    english: (string | null | undefined)[],
+    localized: (string | null | undefined)[],
+  ): boolean {
+    const needle = keyword.trim().toLowerCase();
+    if (!needle) return true;
+    const targets = CJK_PATTERN.test(needle) ? localized : english;
+    return targets.some((value) => (value ?? "").toLowerCase().includes(needle));
+  }
+
+  /** 分类筛选选项：当前已加载条目里出现过的分类，按条目数从多到少排序，同数量按名称排序。 */
+  function categoryOptions(entries: { category?: string | null }[]): { category: string; count: number }[] {
+    const counts = new Map<string, number>();
+    for (const entry of entries) {
+      const category = (entry.category ?? "").trim();
+      if (!category) continue;
+      counts.set(category, (counts.get(category) ?? 0) + 1);
+    }
+    return [...counts.entries()]
+      .map(([category, count]) => ({ category, count }))
+      .sort((a, b) => b.count - a.count || a.category.localeCompare(b.category, "en"));
+  }
+
+  /** 稳定排序：比较结果相同时用原始下标兜底，保证「缺失值保持相对顺序」。 */
+  function stableSort<T>(entries: T[], compare: (a: T, b: T) => number): T[] {
+    return entries
+      .map((entry, index) => ({ entry, index }))
+      .sort((a, b) => compare(a.entry, b.entry) || a.index - b.index)
+      .map((item) => item.entry);
+  }
+
+  /** 热度降序；heat 缺失（undefined / null / 非有限数）排最后，缺失项之间保持原有顺序。 */
+  function compareHeat(a: { heat?: number | null }, b: { heat?: number | null }): number {
+    const left = typeof a.heat === "number" && Number.isFinite(a.heat) ? a.heat : null;
+    const right = typeof b.heat === "number" && Number.isFinite(b.heat) ? b.heat : null;
+    if (left === null && right === null) return 0;
+    if (left === null) return 1;
+    if (right === null) return -1;
+    return right - left;
+  }
+
+  /** 审计通过数 / 检查总数：两字段都存在且 total > 0、passed 在 [0, total] 内才算有效，否则返回 null。 */
+  function auditSummary(
+    entry: { auditPassed?: number | null; auditTotal?: number | null } | null | undefined,
+  ): { passed: number; total: number } | null {
+    const total = typeof entry?.auditTotal === "number" && Number.isFinite(entry.auditTotal) ? entry.auditTotal : null;
+    const passed = typeof entry?.auditPassed === "number" && Number.isFinite(entry.auditPassed) ? entry.auditPassed : null;
+    if (total === null || total <= 0 || passed === null || passed < 0 || passed > total) return null;
+    return { passed, total };
+  }
+
+  /** 审计通过率（passed / total）：无有效审计数据（缺失 / total 为 0 / passed 越界）返回 null。 */
+  function auditRatio(entry: { auditPassed?: number | null; auditTotal?: number | null }): number | null {
+    const summary = auditSummary(entry);
+    return summary === null ? null : summary.passed / summary.total;
+  }
+
+  /** 审计评分降序：通过率高的在前；无有效审计数据的排最后，缺失项之间保持原有顺序。 */
+  function compareAudit(
+    a: { auditPassed?: number | null; auditTotal?: number | null },
+    b: { auditPassed?: number | null; auditTotal?: number | null },
+  ): number {
+    const left = auditRatio(a);
+    const right = auditRatio(b);
+    if (left === null && right === null) return 0;
+    if (left === null) return 1;
+    if (right === null) return -1;
+    return right - left;
+  }
+
+  /** 质量评级从好到差（站点实测只有这四档；其余取值视为未知）。 */
+  const SKILL_RANKS: string[] = ["S", "A", "B", "C"];
+
+  /** 评级序号：越小越好；缺失或未知取值返回 -1（排序时排最后）。 */
+  function rankIndex(quality: string | number | null | undefined): number {
+    if (typeof quality !== "string") return -1;
+    return SKILL_RANKS.indexOf(quality.trim().toUpperCase());
+  }
+
+  /** 评级降序（S > A > B > C）：缺失或未知排最后，同评级内保持原有顺序。 */
+  function compareRank(a: { quality?: string | number | null }, b: { quality?: string | number | null }): number {
+    const left = rankIndex(a.quality);
+    const right = rankIndex(b.quality);
+    if (left < 0) return right < 0 ? 0 : 1;
+    if (right < 0) return -1;
+    return left - right;
+  }
+
+  /** 最近更新降序：YYYY-MM-DD 的字典序即时间序；lastUpdated 缺失排最后，保持原有顺序。 */
+  function compareLastUpdated(a: { lastUpdated?: string | null }, b: { lastUpdated?: string | null }): number {
+    const left = (a.lastUpdated ?? "").trim();
+    const right = (b.lastUpdated ?? "").trim();
+    if (!left && !right) return 0;
+    if (!left) return 1;
+    if (!right) return -1;
+    return right.localeCompare(left, "en");
+  }
+
+  /** 官方优先：official === true 的在前，组内保持默认顺序。 */
+  function compareOfficial(a: { official?: boolean }, b: { official?: boolean }): number {
+    return (b.official ? 1 : 0) - (a.official ? 1 : 0);
+  }
+
+  /** 名称升序：忽略大小写，按英文规则比较。 */
+  function compareName(a: { name: string }, b: { name: string }): number {
+    return a.name.toLowerCase().localeCompare(b.name.toLowerCase(), "en");
+  }
+
+  /** MCP 市场本地排序：对已加载目录排序，与关键词 / 分类筛选叠加（先过滤，后排序）。 */
+  function sortMcpEntries(entries: AgenticMcpEntry[], order: McpSortOrder): AgenticMcpEntry[] {
+    if (order === "heat") return stableSort(entries, compareHeat);
+    if (order === "audit") return stableSort(entries, compareAudit);
+    if (order === "official") return stableSort(entries, compareOfficial);
+    if (order === "name") return stableSort(entries, compareName);
+    return entries; // 默认排序：保持后端返回的目录顺序，不重排。
+  }
+
+  /** Skills 市场本地排序：对已加载目录排序，与关键词 / 分类筛选叠加（先过滤，后排序）。 */
+  function sortSkillEntries(entries: AgenticSkillEntry[], order: SkillSortOrder): AgenticSkillEntry[] {
+    if (order === "heat") return stableSort(entries, compareHeat);
+    if (order === "rank") return stableSort(entries, compareRank);
+    if (order === "updated") return stableSort(entries, compareLastUpdated);
+    if (order === "name") return stableSort(entries, compareName);
+    return entries; // 默认排序：保持后端返回的目录顺序，不重排。
+  }
+
+  /** 行内键盘操作：Enter / Space 切换展开；Space 需阻止页面滚动。 */
+  function handleRowKeydown(event: KeyboardEvent, toggle: () => void) {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    toggle();
+  }
+
+  /** 条目自带详情字段：有任意一项就直接渲染，缺字段时才请求详情接口。 */
+  function hasLocalSkillDetail(entry: AgenticSkillEntry): boolean {
+    return Boolean(
+      entry.longDescription ||
+        entry.license ||
+        entry.lastUpdated ||
+        (entry.platforms?.length ?? 0) > 0 ||
+        (entry.tags?.length ?? 0) > 0,
+    );
+  }
+
+  function hasLocalMcpDetail(entry: AgenticMcpEntry): boolean {
+    return Boolean(
+      entry.longDescription ||
+        entry.configSource ||
+        entry.websiteUrl ||
+        (entry.snippets?.length ?? 0) > 0,
+    );
+  }
+
+  /** 列表行最多展示的标签数。 */
+  function topTags(tags: string[] | null | undefined, limit = 3): string[] {
+    return (tags ?? []).slice(0, limit);
+  }
+
+  /** 数字指标用 K/M 缩写（安装量、热度）；字符串（如质量等级）原样显示；缺失返回空串。 */
+  function formatAmount(value: number | string | null | undefined): string {
+    if (typeof value === "number") return formatDownloads(value);
+    if (value === null || value === undefined) return "";
+    return String(value);
+  }
+
+  function skillSiteUrl(detail: AgenticSkillDetail | null | undefined): string {
+    if (!detail) return AGENTIC_SKILLS_SITE;
+    return detail.sourceUrl || detail.githubUrl || `${AGENTIC_SKILLS_SITE}/skills/${detail.slug}`;
+  }
+
+  function mcpSiteUrl(detail: AgenticMcpDetail | null | undefined): string {
+    if (!detail) return AGENTIC_SKILLS_SITE;
+    return detail.sourceUrl || detail.websiteUrl || `${AGENTIC_SKILLS_SITE}/mcp/${detail.slug}`;
+  }
+
+  function workflowSiteUrl(detail: AgenticWorkflowDetail | null | undefined): string {
+    if (!detail) return AGENTIC_SKILLS_SITE;
+    return detail.sourceUrl || `${AGENTIC_SKILLS_SITE}/workflows/${detail.slug}`;
+  }
+
+  /** 详情面板数据：条目自带字段优先，缺失字段才回落到详情接口数据。 */
+  function mergeSkillDetail(entry: AgenticSkillEntry | null, detail: AgenticSkillDetail | null): AgenticSkillDetail | null {
+    if (!entry && !detail) return null;
+    return {
+      slug: entry?.slug ?? detail?.slug ?? "",
+      name: entry?.name ?? detail?.name ?? "",
+      description: entry?.description ?? detail?.description ?? null,
+      longDescription: entry?.longDescription ?? detail?.longDescription ?? null,
+      author: entry?.author ?? detail?.author ?? null,
+      authorUrl: detail?.authorUrl ?? null,
+      tags: entry?.tags?.length ? entry.tags : (detail?.tags ?? []),
+      platforms: entry?.platforms?.length ? entry.platforms : (detail?.platforms ?? []),
+      license: entry?.license ?? detail?.license ?? null,
+      quality: entry?.quality ?? detail?.quality ?? null,
+      lastUpdated: entry?.lastUpdated ?? detail?.lastUpdated ?? null,
+      githubUrl: entry?.githubUrl ?? detail?.githubUrl ?? null,
+      skillMdUrl: entry?.skillMdUrl ?? detail?.skillMdUrl ?? null,
+      installCommand: detail?.installCommand ?? null,
+      sourceUrl: detail?.sourceUrl ?? null,
+    };
+  }
+
+  function mergeMcpDetail(entry: AgenticMcpEntry | null, detail: AgenticMcpDetail | null): AgenticMcpDetail | null {
+    if (!entry && !detail) return null;
+    return {
+      slug: entry?.slug ?? detail?.slug ?? "",
+      name: entry?.name ?? detail?.name ?? "",
+      description: entry?.description ?? detail?.description ?? null,
+      longDescription: entry?.longDescription ?? detail?.longDescription ?? null,
+      author: entry?.author ?? detail?.author ?? null,
+      authorUrl: detail?.authorUrl ?? null,
+      category: entry?.category ?? detail?.category ?? null,
+      official: entry?.official ?? detail?.official ?? false,
+      trustLevel: detail?.trustLevel ?? null,
+      transport: entry?.transport?.length ? entry.transport : (detail?.transport ?? []),
+      requiresApiKey: entry?.requiresApiKey ?? detail?.requiresApiKey ?? false,
+      websiteUrl: entry?.websiteUrl ?? detail?.websiteUrl ?? null,
+      configSource: entry?.configSource ?? detail?.configSource ?? null,
+      popularity: entry?.popularity ?? detail?.popularity ?? null,
+      auditPassed: entry?.auditPassed ?? detail?.auditPassed ?? null,
+      auditTotal: entry?.auditTotal ?? detail?.auditTotal ?? null,
+      tags: entry?.tags?.length ? entry.tags : (detail?.tags ?? []),
+      snippets: entry?.snippets?.length ? entry.snippets : (detail?.snippets ?? []),
+      sourceUrl: detail?.sourceUrl ?? null,
+    };
+  }
+
+  /** 用系统浏览器打开站点链接；opener 插件不可用时回落到 window.open。 */
+  async function openSiteUrl(url: string | null | undefined) {
+    if (!url) return;
+    try {
+      const { openUrl } = await import("@tauri-apps/plugin-opener");
+      await openUrl(url);
+    } catch {
+      window.open(url, "_blank", "noopener,noreferrer");
+    }
+  }
+
+  /** 首次进入市场 tab 时按需拉一次全量目录（query 为空串）。 */
+  function ensureMarketLoaded() {
+    if (mode === "mcp") {
+      if (!mcpSearched && !mcpLoading) void loadMcpMarket();
+      return;
+    }
+    if (mode === "skills") {
+      if (!skillSearched && !skillLoading) void loadSkillMarket();
+      return;
+    }
+    if (!workflowSearched && !workflowLoading) void loadWorkflowMarket();
+  }
+
+  async function loadMcpMarket(refresh = false) {
+    if (mcpLoading) return;
+    mcpLoading = true;
+    mcpSearched = true;
+    try {
+      mcpEntries = await invoke<AgenticMcpEntry[]>("search_agentic_mcp", { request: { query: "", refresh } });
+      if (mcpCategory !== null && !mcpEntries.some((entry) => entry.category === mcpCategory)) mcpCategory = null;
+      mcpDetailSlug = null;
+      mcpDetail = null;
+      // 目录就绪后预热详情：过滤 + 排序后的列表里，缺详情字段的条目按顺序排队。
+      queueDetailPrefetch(filteredMcpEntries.filter((entry) => !hasLocalMcpDetail(entry)).map((entry) => entry.slug));
+    } catch (error) {
+      onError(error);
+    } finally {
+      mcpLoading = false;
+    }
+  }
+
+  async function loadSkillMarket(refresh = false) {
+    if (skillLoading) return;
+    skillLoading = true;
+    skillSearched = true;
+    try {
+      skillEntries = await invoke<AgenticSkillEntry[]>("search_agentic_skills", { request: { query: "", refresh } });
+      if (skillCategory !== null && !skillEntries.some((entry) => entry.category === skillCategory)) skillCategory = null;
+      skillDetailSlug = null;
+      skillDetail = null;
+      // 目录就绪后预热详情：过滤 + 排序后的列表里，缺详情字段的条目按顺序排队。
+      queueDetailPrefetch(filteredSkillEntries.filter((entry) => !hasLocalSkillDetail(entry)).map((entry) => entry.slug));
+    } catch (error) {
+      onError(error);
+    } finally {
+      skillLoading = false;
+    }
+  }
+
+  async function toggleMcpDetail(entry: AgenticMcpEntry) {
+    if (mcpDetailSlug === entry.slug) {
+      mcpDetailSlug = null;
+      mcpDetail = null;
+      return;
+    }
+    mcpDetailSlug = entry.slug;
+    mcpDetail = null;
+    // 条目自带详情字段时直接展开，不打后端；缺字段才请求详情接口兜底。
+    if (!hasLocalMcpDetail(entry)) {
+      mcpDetailLoading = entry.slug;
+      try {
+        const detail = await invoke<AgenticMcpDetail>("agentic_mcp_detail", { request: { slug: entry.slug } });
+        if (mcpDetailSlug === entry.slug) mcpDetail = detail;
+      } catch (error) {
+        if (mcpDetailSlug === entry.slug) mcpDetailSlug = null;
+        onError(error);
+      } finally {
+        if (mcpDetailLoading === entry.slug) mcpDetailLoading = null;
+      }
+    }
+    if (mcpDetailSlug !== entry.slug) return;
+    // 展开后翻译自由文本：英文模式不发请求；已译过的文本直接命中缓存。
+    const view = mergeMcpDetail(entry, mcpDetail);
+    void translateDetailTexts(entry.slug, detailFreeTexts(view?.description, view?.longDescription));
+  }
+
+  async function toggleSkillDetail(entry: AgenticSkillEntry) {
+    if (skillDetailSlug === entry.slug) {
+      skillDetailSlug = null;
+      skillDetail = null;
+      return;
+    }
+    skillDetailSlug = entry.slug;
+    skillDetail = null;
+    // 条目自带详情字段时直接展开，不打后端；缺字段才请求详情接口兜底。
+    if (!hasLocalSkillDetail(entry)) {
+      skillDetailLoading = entry.slug;
+      try {
+        const detail = await invoke<AgenticSkillDetail>("agentic_skill_detail", { request: { slug: entry.slug } });
+        if (skillDetailSlug === entry.slug) skillDetail = detail;
+      } catch (error) {
+        if (skillDetailSlug === entry.slug) skillDetailSlug = null;
+        onError(error);
+      } finally {
+        if (skillDetailLoading === entry.slug) skillDetailLoading = null;
+      }
+    }
+    if (skillDetailSlug !== entry.slug) return;
+    // 展开后翻译自由文本：英文模式不发请求；已译过的文本直接命中缓存。
+    const view = mergeSkillDetail(entry, skillDetail);
+    void translateDetailTexts(entry.slug, detailFreeTexts(view?.description, view?.longDescription));
+  }
+
+  async function installAgenticMcp(entry: AgenticMcpEntry) {
+    if (busyMcpEntry) return;
+    busyMcpEntry = entry.slug;
+    try {
+      const installed = await invoke<string>("install_agentic_mcp", { request: { slug: entry.slug, scope, projectPath } });
+      statusMessage = t("MCP 服务 {name} 已添加{detail}；新服务在重启 Pi 任务后生效", {
+        name: installed || entry.name,
+        detail: t("（来自 agenticskills.io）"),
+      });
+      await refresh();
+    } catch (error) {
+      onError(error);
+    } finally {
+      busyMcpEntry = null;
+    }
+  }
+
+  async function installAgenticSkill(entry: AgenticSkillEntry) {
+    if (busySkillEntry) return;
+    busySkillEntry = entry.slug;
+    try {
+      const installed = await invoke<string>("install_agentic_skill", { request: { slug: entry.slug, scope, projectPath } });
+      statusMessage = t("已安装技能 {name}", { name: installed || entry.name });
+      await refresh();
+    } catch (error) {
+      onError(error);
+    } finally {
+      busySkillEntry = null;
+    }
+  }
+
+  function formatDownloads(value: number) {
+    if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+    if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
+    return String(value);
+  }
+
+  // ---------- 工作流市场（agenticskills.io；一条工作流只留一个安装入口） ----------
+
+  /** 进入市场 tab 时按需拉一次全量工作流目录（query 为空串）。 */
+  async function loadWorkflowMarket(refresh = false) {
+    if (workflowLoading) return;
+    workflowLoading = true;
+    workflowSearched = true;
+    try {
+      workflowEntries = await invoke<AgenticWorkflowEntry[]>("search_agentic_workflows", { request: { query: "", refresh } });
+      workflowDetailSlug = null;
+      workflowDetail = null;
+      // 工作流条目只有摘要字段，详情一律缺失：过滤 + 排序后的整个列表都排队预热。
+      queueDetailPrefetch(filteredWorkflowEntries.map((entry) => entry.slug));
+    } catch (error) {
+      onError(error);
+    } finally {
+      workflowLoading = false;
+    }
+  }
+
+  async function toggleWorkflowDetail(entry: AgenticWorkflowEntry) {
+    if (workflowDetailSlug === entry.slug) {
+      workflowDetailSlug = null;
+      workflowDetail = null;
+      return;
+    }
+    workflowDetailSlug = entry.slug;
+    workflowDetail = null;
+    workflowDetailLoading = entry.slug;
+    try {
+      const detail = await invoke<AgenticWorkflowDetail>("agentic_workflow_detail", { request: { slug: entry.slug } });
+      if (workflowDetailSlug === entry.slug) workflowDetail = detail;
+    } catch (error) {
+      if (workflowDetailSlug === entry.slug) workflowDetailSlug = null;
+      onError(error);
+    } finally {
+      if (workflowDetailLoading === entry.slug) workflowDetailLoading = null;
+    }
+    if (workflowDetailSlug !== entry.slug || !workflowDetail) return;
+    // 展开后翻译自由文本：描述 / 步骤正文 / 起手提示；英文模式不发请求。
+    void translateDetailTexts(entry.slug, detailFreeTexts(
+      workflowDetail.description,
+      ...workflowDetail.steps.map((step) => step.text),
+      workflowDetail.kickoffPrompt,
+    ));
+  }
+
+  /** 安装整条工作流：组件级安装由后端统一处理，界面只保留这一个安装按钮。 */
+  async function installAgenticWorkflow(entry: AgenticWorkflowEntry) {
+    if (busyWorkflowEntry) return;
+    busyWorkflowEntry = entry.slug;
+    try {
+      const result = await invoke<AgenticWorkflowInstallResult>("install_agentic_workflow", {
+        request: { slug: entry.slug, scope, projectPath },
+      });
+      workflowResult = { slug: entry.slug, name: entry.name, result };
+      await refresh();
+    } catch (error) {
+      onError(error);
+    } finally {
+      busyWorkflowEntry = null;
+    }
+  }
+
+  /** 起手提示整段复制；失败时交回上层错误处理。 */
+  async function copyWorkflowPrompt(slug: string, prompt: string) {
+    try {
+      await navigator.clipboard.writeText(prompt);
+      copiedPromptSlug = slug;
+    } catch (error) {
+      onError(t("复制失败：{error}", { error: tm(String(error)) }));
+    }
+  }
+
+  // ---------- 详情翻译（自由文本；结构化字段走 agentic-labels） ----------
+
+  /** 后端单次翻译上限：texts 最多 6 条，超过按顺序分批。 */
+  const TRANSLATE_BATCH_SIZE = 6;
+
+  /** 详情里要展示的文本：非英文模式且已有译文时用译文，其余情况原样返回。 */
+  function detailText(slug: string | null, text: string | null | undefined): string {
+    const raw = text ?? "";
+    if (!raw || !slug || getLocale() === "en") return raw;
+    return detailTranslations[slug]?.[raw] ?? raw;
+  }
+
+  /** 收集自由文本：空白值与重复值不发送。 */
+  function detailFreeTexts(...values: (string | null | undefined)[]): string[] {
+    const texts: string[] = [];
+    const seen = new Set<string>();
+    for (const value of values) {
+      if (typeof value !== "string" || !value.trim() || seen.has(value)) continue;
+      seen.add(value);
+      texts.push(value);
+    }
+    return texts;
+  }
+
+  /**
+   * 翻译一个条目的自由文本：按 slug 缓存，已译过的文本不再请求；
+   * 英文模式完全不翻译、不发请求；失败时保留原文，并在文本旁记录错误文案。
+   */
+  async function translateDetailTexts(slug: string | null, texts: string[]) {
+    if (!slug || texts.length === 0) return;
+    const locale = getLocale();
+    if (locale === "en") return;
+    const cached = detailTranslations[slug] ?? {};
+    const pending = texts.filter((text) => cached[text] === undefined);
+    if (pending.length === 0 || translatingSlugs.has(slug)) return;
+    translatingSlugs.add(slug);
+    translateStates = { ...translateStates, [slug]: { status: "loading" } };
+    try {
+      const translated: string[] = [];
+      for (let start = 0; start < pending.length; start += TRANSLATE_BATCH_SIZE) {
+        const batch = pending.slice(start, start + TRANSLATE_BATCH_SIZE);
+        const result = await invoke<string[]>("translate_agentic_texts", {
+          request: { texts: batch, target: locale },
+        });
+        batch.forEach((text, offset) => {
+          const value = Array.isArray(result) ? result[offset] : undefined;
+          // 返回缺项 / 空串时保留原文，避免译文把内容吃掉。
+          translated.push(typeof value === "string" && value.trim() ? value : text);
+        });
+      }
+      const next = { ...(detailTranslations[slug] ?? {}) };
+      pending.forEach((text, index) => {
+        next[text] = translated[index] ?? text;
+      });
+      detailTranslations = { ...detailTranslations, [slug]: next };
+      translateStates = { ...translateStates, [slug]: { status: "ready" } };
+    } catch (error) {
+      const raw = error instanceof Error ? error.message : String(error);
+      translateStates = { ...translateStates, [slug]: { status: "error", message: tm(raw) } };
+    } finally {
+      translatingSlugs.delete(slug);
+    }
+  }
+
+  // ---------- 后台预热详情（让后续点击命中后端缓存；不触发翻译） ----------
+
+  /** 后端单次预热的 slug 上限。 */
+  const PREFETCH_BATCH_SIZE = 30;
+
+  /** 预热类型：与当前市场一一对应。 */
+  function prefetchKind(): "skill" | "mcp" | "workflow" {
+    return mode === "mcp" ? "mcp" : mode === "skills" ? "skill" : "workflow";
+  }
+
+  /** 预热继续条件：组件仍挂载、mode 未变、面板可见（设置页其他分类会把它 hidden）。 */
+  function canPrefetch(): boolean {
+    return componentAlive && mode === mountedMode && marketVisible;
+  }
+
+  /** 把缺详情字段的 slug 排队；同一 slug 只提交一次，串行分批继续预热剩余条目。 */
+  function queueDetailPrefetch(slugs: string[]) {
+    for (const slug of slugs) {
+      if (!slug || prefetchedSlugs.has(slug)) continue;
+      prefetchedSlugs.add(slug);
+      prefetchQueue.push(slug);
+    }
+    if (!prefetchRunning && prefetchQueue.length > 0) void runDetailPrefetch();
+  }
+
+  async function runDetailPrefetch() {
+    prefetchRunning = true;
+    const kind = prefetchKind();
+    try {
+      while (prefetchQueue.length > 0 && canPrefetch()) {
+        const batch = prefetchQueue.splice(0, PREFETCH_BATCH_SIZE);
+        try {
+          await invoke<number>("prefetch_agentic_details", { request: { kind, slugs: batch } });
+        } catch (error) {
+          // 预热是可选优化：失败不打扰用户。
+          console.warn("prefetch_agentic_details failed", error);
+        }
+      }
+    } finally {
+      prefetchRunning = false;
+    }
+  }
+</script>
+
+<section class="mcp-skills-page" bind:this={pageElement} aria-label={mode === "mcp" ? t("MCP 服务设置") : mode === "skills" ? t("Skills 技能设置") : t("工作流设置")}>
+  {#snippet translateNote(slug: string | null)}
+    {#if slug && translateStates[slug]?.status === "loading"}
+      <small class="translate-note" role="status">{t("翻译中…")}</small>
+    {:else if slug && translateStates[slug]?.status === "error"}
+      <small class="translate-error" role="status">{translateStates[slug]?.message ?? ""}</small>
+    {/if}
+  {/snippet}
+  <div class="page-controls">
+    <div class="scope-switch" role="tablist" aria-label={t("配置范围")}>
+      <button type="button" class:active={scope === "global"} aria-pressed={scope === "global"}
+        onclick={() => { scope = "global"; void refresh(); }}>{t("全局")}</button>
+      <button type="button" class:active={scope === "project"} aria-pressed={scope === "project"}
+        disabled={!canUseProjectScope} title={canUseProjectScope ? "" : t("请先选择一个项目")}
+        onclick={() => { scope = "project"; void refresh(); }}>{t("项目")}</button>
+    </div>
+    <div class="scope-switch tab-switch" role="tablist" aria-label={t("视图")}>
+      <button type="button" class:active={tab === "installed"} aria-pressed={tab === "installed"}
+        onclick={() => { tab = "installed"; void refresh(); }}>{t("已安装")}</button>
+      <button type="button" class:active={tab === "market"} aria-pressed={tab === "market"} onclick={() => { tab = "market"; ensureMarketLoaded(); }}>
+        {t("市场")}
+      </button>
+    </div>
+  </div>
+
+  {#if tab === "installed"}
+    {#if mode === "mcp"}
+      <section class="settings-group">
+        <div class="group-header">
+          <h3>{t("MCP 服务")}</h3>
+          <button type="button" class="icon-action" aria-label={t("刷新 MCP 服务列表")} title={t("刷新")} disabled={loading} onclick={() => void refresh()}>
+            <RefreshCw size={14} />
+          </button>
+        </div>
+        {#if loading}
+          <p class="muted" role="status">{t("正在读取 MCP 服务…")}</p>
+        {:else if servers.length === 0}
+          <p class="muted" role="status">{t("尚未安装 MCP 服务")}</p>
+        {:else}
+          <ul class="entry-list">
+            {#each servers as entry (entry.name)}
+              <li>
+                <div class="entry-main">
+                  <strong>{entry.name}</strong>
+                  <small>{serverSummary(entry.config)}</small>
+                </div>
+                <button type="button" class="danger-action" aria-label={t("删除 MCP 服务 {name}", { name: entry.name })} title={t("删除")} disabled={busy} onclick={() => void removeServer(entry)}>
+                  <Trash2 size={14} />
+                </button>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+        <div class="add-form">
+          <label>{t("MCP 服务名称")}<input bind:value={serverName} placeholder="context7" autocomplete="off" /></label>
+          <label>{t("配置（JSON）")}<textarea bind:value={serverConfig} rows="5" placeholder={'{ "url": "https://mcp.example.com/mcp" }'} spellcheck="false"></textarea></label>
+          <button type="button" class="primary-action" disabled={busy} onclick={() => void addServer()}>
+            <Plus size={14} />{t("添加 MCP 服务")}
+          </button>
+        </div>
+      </section>
+    {:else if mode === "skills"}
+      <section class="settings-group">
+        <div class="group-header">
+          <h3>{t("Skills 技能")}</h3>
+          <button type="button" class="icon-action" aria-label={t("刷新 Skills 列表")} title={t("刷新")} disabled={loading} onclick={() => void refresh()}>
+            <RefreshCw size={14} />
+          </button>
+        </div>
+        {#if loading}
+          <p class="muted" role="status">{t("正在读取 Skills…")}</p>
+        {:else if skills.length === 0}
+          <p class="muted" role="status">{t("尚未安装 Skill")}</p>
+        {:else}
+          <ul class="entry-list">
+            {#each skills as entry (entry.name)}
+              <li>
+                <div class="entry-main">
+                  <strong>{entry.name}</strong>
+                  <small>{entry.description || entry.path}</small>
+                </div>
+                <button type="button" class="danger-action" aria-label={t("删除 Skill {name}", { name: entry.name })} title={t("删除")} disabled={busy} onclick={() => void removeSkill(entry)}>
+                  <Trash2 size={14} />
+                </button>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+        <div class="add-form">
+          <label>{t("Skill 名称")}<input bind:value={skillName} placeholder="my-skill" autocomplete="off" /></label>
+          <label>{t("触发描述")}<input bind:value={skillDescription} placeholder={t("何时使用该技能…")} autocomplete="off" /></label>
+          <label>{t("SKILL.md 内容")}<textarea bind:value={skillContent} rows="6" placeholder={`---\nname: my-skill\ndescription: ${t("何时使用该技能…")}\n---\n\n${t("技能指令正文…")}`} spellcheck="false"></textarea></label>
+          <button type="button" class="primary-action" disabled={busy} onclick={() => void addSkill()}>
+            <Plus size={14} />{t("添加 Skill")}
+          </button>
+        </div>
+      </section>
+    {:else}
+      <section class="settings-group">
+        <div class="group-header">
+          <h3>{t("已安装工作流")}</h3>
+          <button type="button" class="icon-action" aria-label={t("刷新已安装工作流")} title={t("刷新")} disabled={loading} onclick={() => void refresh()}>
+            <RefreshCw size={14} />
+          </button>
+        </div>
+        {#if loading}
+          <p class="muted" role="status">{t("正在读取已安装工作流…")}</p>
+        {:else if installedWorkflows.length === 0}
+          <p class="muted" role="status">{t("尚未安装工作流")}</p>
+        {:else}
+          <ul class="entry-list">
+            {#each installedWorkflows as entry (entry.slug)}
+              <li>
+                <div class="entry-main">
+                  <strong>{entry.name}</strong>
+                  <small>{entry.category ? agenticCategoryLabel(entry.category, getLocale()) : entry.slug}</small>
+                  <span class="market-meta">
+                    <span>{t("{skills} 个技能 · {mcp} 个 MCP", { skills: entry.skillCount, mcp: entry.mcpCount })}</span>
+                    {#if entry.installedAt}<span>{t("安装于 {date}", { date: entry.installedAt })}</span>{/if}
+                  </span>
+                </div>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </section>
+    {/if}
+  {:else if mode === "mcp"}
+    <section class="settings-group">
+      <div class="group-header">
+        <h3>{t("MCP 市场")}</h3>
+        <span class="muted">{t("市场来源：agenticskills.io")}</span>
+      </div>
+      <div class="market-toolbar">
+        <form class="market-search" onsubmit={(event) => { event.preventDefault(); void loadMcpMarket(true); }}>
+          <Search size={14} />
+          <input bind:value={mcpQuery} placeholder={t("按名称、作者或分类筛选 MCP 服务…")} aria-label={t("筛选 MCP 服务")} autocomplete="off" />
+          <button type="submit" class="primary-action compact" disabled={mcpLoading || busyMcpEntry !== null} aria-label={t("刷新市场")} title={t("刷新市场")}>
+            {#if mcpLoading}<span class="spin"><RefreshCw size={13} /></span>{:else}<RefreshCw size={13} />{/if}
+            {t("刷新市场")}
+          </button>
+        </form>
+        <select class="market-sort" bind:value={mcpSort} aria-label={t("排序")}>
+          <option value="default">{t("默认排序")}</option>
+          <option value="heat">{t("热度")}</option>
+          <option value="audit">{t("审计评分")}</option>
+          <option value="official">{t("官方优先")}</option>
+          <option value="name">{t("名称（A–Z）")}</option>
+        </select>
+      </div>
+      {#if mcpEntries.length > 0}
+        <div class="category-filter" role="group" aria-label={t("分类筛选")}>
+          <button type="button" class="category-chip" aria-pressed={mcpCategory === null} onclick={() => (mcpCategory = null)}>
+            {t("全部分类")}
+          </button>
+          {#each mcpCategoryOptions as option (option.category)}
+            <button type="button" class="category-chip" aria-pressed={mcpCategory === option.category}
+              onclick={() => (mcpCategory = mcpCategory === option.category ? null : option.category)}>
+              {agenticCategoryLabel(option.category, getLocale())}
+            </button>
+          {/each}
+        </div>
+      {/if}
+      {#if mcpLoading && mcpEntries.length === 0}
+        <p class="muted" role="status">{t("正在加载 MCP 目录…")}</p>
+      {:else if filteredMcpEntries.length === 0}
+        <p class="muted" role="status">{t("没有匹配的 MCP 服务")}</p>
+      {:else}
+        <ul class="entry-list market-list">
+          {#each filteredMcpEntries as entry (entry.slug)}
+            {@const audit = auditSummary(entry)}
+            <li class:expanded={mcpDetailSlug === entry.slug}>
+              <div class="market-row" role="button" tabindex="0"
+                aria-expanded={mcpDetailSlug === entry.slug} aria-busy={mcpDetailLoading === entry.slug}
+                aria-label={t("展开或收起 {name} 的详情", { name: entry.name })}
+                onclick={() => void toggleMcpDetail(entry)}
+                onkeydown={(event) => handleRowKeydown(event, () => void toggleMcpDetail(entry))}>
+                <div class="entry-main">
+                  <strong>{entry.name}</strong>
+                  <small>{entry.description || entry.slug}</small>
+                  <span class="market-meta">
+                    {#if entry.author}<span>{t("作者：{author}", { author: entry.author })}</span>{/if}
+                    {#if entry.category}<span class="category-chip" title={t("分类：{category}", { category: agenticCategoryLabel(entry.category, getLocale()) })}>{agenticCategoryLabel(entry.category, getLocale())}</span>{/if}
+                    {#if (entry.transport ?? []).length}<span>{t("传输：{transport}", { transport: (entry.transport ?? []).map((value) => agenticTransportLabel(value, getLocale())).join(" · ") })}</span>{/if}
+                    {#if formatAmount(entry.popularity)}<span class="downloads">{t("热度 {count}", { count: formatAmount(entry.popularity) })}</span>{/if}
+                    {#if audit}<span class="market-flag">{t("审计 {passed}/{total}", { passed: audit.passed, total: audit.total })}</span>{/if}
+                    {#if entry.official}<span class="market-flag">{t("官方")}</span>{/if}
+                    {#if entry.requiresApiKey}<span class="market-flag">{t("需要 API Key")}</span>{/if}
+                  </span>
+                </div>
+                <span class="market-source">agenticskills.io</span>
+                {#if mcpDetailLoading === entry.slug}
+                  <span class="spin" aria-hidden="true"><RefreshCw size={12} /></span>
+                {/if}
+                <button type="button" class="primary-action compact" disabled={busyMcpEntry !== null}
+                  onclick={(event) => { event.stopPropagation(); void installAgenticMcp(entry); }}>
+                  {#if busyMcpEntry === entry.slug}<span class="spin"><RefreshCw size={12} /></span>{:else}<Download size={12} />{/if}
+                  {t("安装")}
+                </button>
+              </div>
+              {#if mcpDetailSlug === entry.slug}
+                <div class="market-detail">
+                  {#if mcpDetailLoading === entry.slug}
+                    <p class="muted" role="status">{t("正在加载详情…")}</p>
+                  {:else if mcpDetailView}
+                    {#if mcpDetailLongDescription}
+                      <p class="detail-text">{detailText(mcpDetailSlug, mcpDetailLongDescription)}</p>
+                      {@render translateNote(mcpDetailSlug)}
+                    {/if}
+                    <div class="detail-row">
+                      {#if mcpDetailAuthor}<span>{t("作者：{author}", { author: mcpDetailAuthor })}</span>{/if}
+                      {#if mcpDetailTrustLevel}<span>{t("信任等级：{level}", { level: agenticTrustLabel(mcpDetailTrustLevel, getLocale()) })}</span>{/if}
+                      {#if mcpDetailConfigSource}<span>{t("配置来源：{source}", { source: mcpDetailConfigSource })}</span>{/if}
+                      {#if mcpDetailAudit}<span>{t("审计 {passed}/{total}", { passed: mcpDetailAudit.passed, total: mcpDetailAudit.total })}</span>{/if}
+                      {#if mcpDetailTags.length}<span>{topTags(mcpDetailTags, 6).join(" · ")}</span>{/if}
+                    </div>
+                    {#if mcpDetailSnippets.length}
+                      <small>{t("配置片段")}</small>
+                      {#each mcpDetailSnippets as snippet, index (`${snippet.label}-${index}`)}
+                        <small>{snippet.label}{snippet.file ? ` · ${snippet.file}` : ""}</small>
+                        <pre class="detail-pre">{snippet.code}</pre>
+                      {/each}
+                    {/if}
+                    <div class="detail-actions">
+                      <button type="button" class="link-action" onclick={(event) => { event.stopPropagation(); void openSiteUrl(mcpDetailSiteUrl); }}>{t("在站点打开")}</button>
+                      {#if mcpDetailWebsiteUrl}
+                        <button type="button" class="link-action" onclick={(event) => { event.stopPropagation(); void openSiteUrl(mcpDetailWebsiteUrl); }}>{t("打开官网")}</button>
+                      {/if}
+                    </div>
+                  {/if}
+                </div>
+              {/if}
+            </li>
+          {/each}
+        </ul>
+        <p class="muted" role="status">{t("共 {total} 条，匹配 {shown} 条", { total: mcpEntries.length, shown: filteredMcpEntries.length })}</p>
+      {/if}
+      <p class="muted" role="status">{t("筛选目录后点击「安装」，新服务在重启 Pi 任务后生效。")}</p>
+    </section>
+  {:else if mode === "skills"}
+    <section class="settings-group">
+      <div class="group-header">
+        <h3>{t("Skills 市场")}</h3>
+        <span class="muted">{t("市场来源：agenticskills.io")}</span>
+      </div>
+      <div class="market-toolbar">
+        <form class="market-search" onsubmit={(event) => { event.preventDefault(); void loadSkillMarket(true); }}>
+          <Search size={14} />
+          <input bind:value={skillQuery} placeholder={t("按名称、作者或关键词筛选技能…")} aria-label={t("筛选技能")} autocomplete="off" />
+          <button type="submit" class="primary-action compact" disabled={skillLoading || busySkillEntry !== null} aria-label={t("刷新市场")} title={t("刷新市场")}>
+            {#if skillLoading}<span class="spin"><RefreshCw size={13} /></span>{:else}<RefreshCw size={13} />{/if}
+            {t("刷新市场")}
+          </button>
+        </form>
+        <select class="market-sort" bind:value={skillSort} aria-label={t("排序")}>
+          <option value="default">{t("默认排序")}</option>
+          <option value="heat">{t("热度")}</option>
+          <option value="rank">{t("Rank（评级）")}</option>
+          <option value="updated">{t("最新更新")}</option>
+          <option value="name">{t("名称（A–Z）")}</option>
+        </select>
+      </div>
+      {#if skillEntries.length > 0}
+        <div class="category-filter" role="group" aria-label={t("分类筛选")}>
+          <button type="button" class="category-chip" aria-pressed={skillCategory === null} onclick={() => (skillCategory = null)}>
+            {t("全部分类")}
+          </button>
+          {#each skillCategoryOptions as option (option.category)}
+            <button type="button" class="category-chip" aria-pressed={skillCategory === option.category}
+              onclick={() => (skillCategory = skillCategory === option.category ? null : option.category)}>
+              {agenticCategoryLabel(option.category, getLocale())}
+            </button>
+          {/each}
+        </div>
+      {/if}
+      {#if skillLoading && skillEntries.length === 0}
+        <p class="muted" role="status">{t("正在加载 Skills 目录…")}</p>
+      {:else if filteredSkillEntries.length === 0}
+        <p class="muted" role="status">{t("没有匹配的技能")}</p>
+      {:else}
+        <ul class="entry-list market-list">
+          {#each filteredSkillEntries as entry (entry.slug)}
+            {@const tags = topTags(entry.tags)}
+            <li class:expanded={skillDetailSlug === entry.slug}>
+              <div class="market-row" role="button" tabindex="0"
+                aria-expanded={skillDetailSlug === entry.slug} aria-busy={skillDetailLoading === entry.slug}
+                aria-label={t("展开或收起 {name} 的详情", { name: entry.name })}
+                onclick={() => void toggleSkillDetail(entry)}
+                onkeydown={(event) => handleRowKeydown(event, () => void toggleSkillDetail(entry))}>
+                <div class="entry-main">
+                  <strong>{entry.name}</strong>
+                  <small>{entry.description || entry.slug}</small>
+                  <span class="market-meta">
+                    {#if entry.author}<span>{t("作者：{author}", { author: entry.author })}</span>{/if}
+                    {#if entry.category}<span class="category-chip" title={t("分类：{category}", { category: agenticCategoryLabel(entry.category, getLocale()) })}>{agenticCategoryLabel(entry.category, getLocale())}</span>{/if}
+                    {#if formatAmount(entry.installs)}<span class="downloads">{t("安装量 {count}", { count: formatAmount(entry.installs) })}</span>{/if}
+                    {#if formatAmount(entry.quality)}<span>{t("质量 {level}", { level: formatAmount(entry.quality) })}</span>{/if}
+                    {#each tags as tag (tag)}<span class="tag">{tag}</span>{/each}
+                  </span>
+                </div>
+                <span class="market-source">agenticskills.io</span>
+                {#if skillDetailLoading === entry.slug}
+                  <span class="spin" aria-hidden="true"><RefreshCw size={12} /></span>
+                {/if}
+                <button type="button" class="primary-action compact" disabled={busySkillEntry !== null}
+                  onclick={(event) => { event.stopPropagation(); void installAgenticSkill(entry); }}>
+                  {#if busySkillEntry === entry.slug}<span class="spin"><RefreshCw size={12} /></span>{:else}<Store size={12} />{/if}
+                  {t("安装")}
+                </button>
+              </div>
+              {#if skillDetailSlug === entry.slug}
+                <div class="market-detail">
+                  {#if skillDetailLoading === entry.slug}
+                    <p class="muted" role="status">{t("正在加载详情…")}</p>
+                  {:else if skillDetailView}
+                    {#if skillDetailLongDescription}
+                      <p class="detail-text">{detailText(skillDetailSlug, skillDetailLongDescription)}</p>
+                      {@render translateNote(skillDetailSlug)}
+                    {/if}
+                    <div class="detail-row">
+                      {#if skillDetailLicense}<span>{t("许可证：{license}", { license: skillDetailLicense })}</span>{/if}
+                      {#if skillDetailPlatforms.length}<span>{t("平台：{platforms}", { platforms: skillDetailPlatforms.map((value) => agenticPlatformLabel(value, getLocale())).join(" · ") })}</span>{/if}
+                      {#if skillDetailUpdated}<span>{t("最近更新：{date}", { date: skillDetailUpdated })}</span>{/if}
+                    </div>
+                    {#if topTags(skillDetailTags, 6).length}
+                      <span class="market-meta">{#each topTags(skillDetailTags, 6) as tag (tag)}<span class="tag">{tag}</span>{/each}</span>
+                    {/if}
+                    <div class="detail-actions">
+                      <button type="button" class="link-action" onclick={(event) => { event.stopPropagation(); void openSiteUrl(skillDetailSiteUrl); }}>{t("在站点打开")}</button>
+                      {#if skillDetailSkillMdUrl}
+                        <button type="button" class="link-action" onclick={(event) => { event.stopPropagation(); void openSiteUrl(skillDetailSkillMdUrl); }}>{t("打开 SKILL.md")}</button>
+                      {/if}
+                    </div>
+                  {/if}
+                </div>
+              {/if}
+            </li>
+          {/each}
+        </ul>
+        <p class="muted" role="status">{t("共 {total} 条，匹配 {shown} 条", { total: skillEntries.length, shown: filteredSkillEntries.length })}</p>
+      {/if}
+      <p class="muted" role="status">{t("技能来自 agenticskills.io，安装后重启 Pi 任务生效。")}</p>
+    </section>
+  {:else}
+    <section class="settings-group">
+      <div class="group-header">
+        <h3>{t("工作流市场")}</h3>
+        <span class="muted">{t("市场来源：agenticskills.io")}</span>
+      </div>
+      <form class="market-search" onsubmit={(event) => { event.preventDefault(); void loadWorkflowMarket(true); }}>
+        <Search size={14} />
+        <input bind:value={workflowQuery} placeholder={t("按名称、描述或分类筛选工作流…")} aria-label={t("筛选工作流")} autocomplete="off" />
+        <button type="submit" class="primary-action compact" disabled={workflowLoading || busyWorkflowEntry !== null} aria-label={t("刷新市场")} title={t("刷新市场")}>
+          {#if workflowLoading}<span class="spin"><RefreshCw size={13} /></span>{:else}<RefreshCw size={13} />{/if}
+          {t("刷新市场")}
+        </button>
+      </form>
+      {#if workflowLoading && workflowEntries.length === 0}
+        <p class="muted" role="status">{t("正在加载工作流目录…")}</p>
+      {:else if filteredWorkflowEntries.length === 0}
+        <p class="muted" role="status">{t("没有匹配的工作流")}</p>
+      {:else}
+        <ul class="entry-list market-list">
+          {#each filteredWorkflowEntries as entry (entry.slug)}
+            {@const installed = installedWorkflowSlugs.has(entry.slug)}
+            <li>
+              <div class="entry-main">
+                <strong>{entry.name}</strong>
+                <small>{entry.description || entry.slug}</small>
+                <span class="market-meta">
+                  {#if entry.category}<span class="category-chip" title={t("分类：{category}", { category: agenticCategoryLabel(entry.category, getLocale()) })}>{agenticCategoryLabel(entry.category, getLocale())}</span>{/if}
+                  {#if entry.level}<span>{t("难度：{level}", { level: agenticLevelLabel(entry.level, getLocale()) })}</span>{/if}
+                  <span>{t("{skills} 个技能 · {mcp} 个 MCP", { skills: entry.skillCount, mcp: entry.mcpCount })}</span>
+                  {#if installed}<span class="market-flag">{t("已安装")}</span>{/if}
+                </span>
+              </div>
+              <span class="market-source">agenticskills.io</span>
+              <button type="button" class="secondary-action" disabled={workflowDetailLoading !== null} onclick={() => void toggleWorkflowDetail(entry)}>
+                {workflowDetailLoading === entry.slug ? t("加载中…") : workflowDetailSlug === entry.slug ? t("收起") : t("详情")}
+              </button>
+              <button type="button" class="primary-action compact" disabled={busyWorkflowEntry !== null} onclick={() => void installAgenticWorkflow(entry)}>
+                {#if busyWorkflowEntry === entry.slug}<span class="spin"><RefreshCw size={12} /></span>{:else}<Download size={12} />{/if}
+                {t("安装")}
+              </button>
+              {#if workflowDetailSlug === entry.slug}
+                <div class="market-detail">
+                  {#if workflowDetailLoading === entry.slug}
+                    <p class="muted" role="status">{t("正在加载详情…")}</p>
+                  {:else if workflowDetail}
+                    {#if workflowDetail.description}
+                      <p class="detail-text">{detailText(workflowDetailSlug, workflowDetail.description)}</p>
+                      {@render translateNote(workflowDetailSlug)}
+                    {/if}
+                    <div class="detail-row">
+                      {#if workflowDetail.category}<span>{t("分类：{category}", { category: agenticCategoryLabel(workflowDetail.category, getLocale()) })}</span>{/if}
+                      {#if workflowDetail.level}<span>{t("难度：{level}", { level: agenticLevelLabel(workflowDetail.level, getLocale()) })}</span>{/if}
+                      {#if workflowDetail.setupTime}<span>{t("配置时间：{time}", { time: workflowDetail.setupTime })}</span>{/if}
+                      <span>{t("{skills} 个技能 · {mcp} 个 MCP", { skills: workflowSkillComponents.length, mcp: workflowMcpComponents.length })}</span>
+                    </div>
+                    {#if workflowSkillComponents.length > 0 || workflowMcpComponents.length > 0}
+                      <small class="detail-label">{t("组件")}</small>
+                      <div class="component-groups">
+                        {#if workflowSkillComponents.length > 0}
+                          <div>
+                            <small class="detail-label">{t("技能")} · {workflowSkillComponents.length}</small>
+                            <ul class="component-list">
+                              {#each workflowSkillComponents as component (component.slug)}
+                                <li><span>{component.name}</span><code>{component.slug}</code></li>
+                              {/each}
+                            </ul>
+                          </div>
+                        {/if}
+                        {#if workflowMcpComponents.length > 0}
+                          <div>
+                            <small class="detail-label">{t("MCP 服务")} · {workflowMcpComponents.length}</small>
+                            <ul class="component-list">
+                              {#each workflowMcpComponents as component (component.slug)}
+                                <li><span>{component.name}</span><code>{component.slug}</code></li>
+                              {/each}
+                            </ul>
+                          </div>
+                        {/if}
+                      </div>
+                    {/if}
+                    {#if workflowSteps.length > 0}
+                      <small class="detail-label">{t("步骤")}</small>
+                      <ol class="step-list">
+                        {#each workflowSteps as step, index (`${index}-${step.name}`)}
+                          <li>
+                            <strong>{step.name}</strong>
+                            <p>{detailText(workflowDetailSlug, step.text)}</p>
+                          </li>
+                        {/each}
+                      </ol>
+                    {/if}
+                    {#if !workflowDetail.description}{@render translateNote(workflowDetailSlug)}{/if}
+                    {#if workflowKickoffPrompt}
+                      <small class="detail-label">{t("起手提示")}</small>
+                      <div class="prompt-block">
+                        <pre class="detail-pre">{detailText(workflowDetailSlug, workflowKickoffPrompt)}</pre>
+                        <button type="button" class="secondary-action" onclick={() => void copyWorkflowPrompt(entry.slug, workflowKickoffPrompt)}>
+                          {copiedPromptSlug === entry.slug ? t("已复制") : t("复制")}
+                        </button>
+                      </div>
+                    {/if}
+                    <div class="detail-actions">
+                      <button type="button" class="link-action" onclick={() => void openSiteUrl(workflowSiteUrl(workflowDetail))}>{t("在站点打开")}</button>
+                    </div>
+                  {/if}
+                </div>
+              {/if}
+              {#if workflowResult && workflowResult.slug === entry.slug}
+                <div class="market-detail install-summary" role="status">
+                  <strong>{t("安装结果：{name}", { name: workflowResult.name })}</strong>
+                  <div class="detail-row">
+                    <span>{t("{skills} 个技能 · {mcp} 个 MCP", { skills: workflowResult.result.skills.length, mcp: workflowResult.result.mcp.length })}</span>
+                    <span>{t("跳过 {count} 个已存在的组件", { count: workflowResult.result.skipped.length })}</span>
+                  </div>
+                  {#if workflowResult.result.failures.length > 0}
+                    <small class="detail-label">{t("失败")}</small>
+                    <ul class="failure-list">
+                      {#each workflowResult.result.failures as failure (`${failure.kind}-${failure.slug}`)}
+                        <li><code>{failure.kind} · {failure.slug}</code><span>{tm(failure.error)}</span></li>
+                      {/each}
+                    </ul>
+                  {/if}
+                </div>
+              {/if}
+            </li>
+          {/each}
+        </ul>
+        <p class="muted" role="status">{t("共 {total} 条，匹配 {shown} 条", { total: workflowEntries.length, shown: filteredWorkflowEntries.length })}</p>
+      {/if}
+      <p class="muted" role="status">{t("工作流来自 agenticskills.io，安装会写入技能与 MCP 配置；已存在的组件会被跳过。")}</p>
+    </section>
+  {/if}
+  {#if statusMessage}<p class="status" role="status">{statusMessage}</p>{/if}
+</section>
+
+<style>
+  .mcp-skills-page { display: grid; gap: 16px; }
+  .page-controls { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+  .scope-switch { display: inline-flex; gap: 2px; justify-self: start; padding: 2px; border: 1px solid var(--border-strong); border-radius: 5px; background: var(--page-bg); }
+  .scope-switch button { min-width: 68px; padding: 6px 12px; border: 0; border-radius: 3px; color: var(--text-muted); background: transparent; font-size: 13px; cursor: pointer; }
+  .scope-switch button.active { color: var(--accent-ink); background: var(--accent); font-weight: 700; }
+  .scope-switch button:disabled { opacity: .4; cursor: default; }
+  .group-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  h3 { margin: 0; font-size: 14px; font-weight: 650; color: var(--text-strong); }
+  .icon-action, .danger-action { display: grid; place-items: center; width: 32px; height: 32px; border: 1px solid transparent; border-radius: 4px; background: transparent; color: var(--text-muted); cursor: pointer; }
+  .icon-action:hover:not(:disabled) { border-color: var(--border-strong); color: var(--text); background: var(--surface-hover); }
+  .danger-action { color: #d88989; }
+  .danger-action:hover:not(:disabled) { border-color: #74423e; color: #ffd2ce; background: #3b201e; }
+  .entry-list { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 6px; }
+  .entry-list li { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); }
+  .entry-main { flex: 1; min-width: 0; display: grid; gap: 2px; }
+  .entry-main strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; color: var(--text-strong); }
+  .entry-main small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--text-muted); }
+  .downloads { flex-shrink: 0; color: var(--text-muted); font-size: 12px; }
+  .add-form { display: grid; gap: 8px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+  .add-form label { display: grid; gap: 4px; font-size: 11px; color: var(--text-muted); }
+  .add-form input, .add-form textarea { min-width: 0; padding: 6px 8px; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--surface); color: var(--text); font: inherit; }
+  .add-form textarea { font-family: var(--code-font); font-size: 12px; resize: vertical; }
+  .primary-action { display: inline-flex; align-items: center; justify-content: center; gap: 5px; justify-self: start; min-height: 30px; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--surface-hover); color: var(--text); cursor: pointer; }
+  .primary-action:hover:not(:disabled) { border-color: var(--accent); color: var(--text-strong); }
+  .primary-action.compact { min-height: 32px; padding: 0 12px; font-size: 12px; flex-shrink: 0; }
+  .market-search { display: flex; align-items: center; gap: 8px; margin-top: 10px; padding: 2px 4px 2px 10px; border: 1px solid var(--border-strong); border-radius: 5px; background: var(--surface); color: var(--text-muted); }
+  .market-search input { flex: 1; min-width: 0; height: 34px; border: 0; outline: 0; background: transparent; color: var(--text); font: inherit; font-size: 13px; }
+  .market-search .primary-action { justify-self: auto; }
+  .market-toolbar { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+  .market-toolbar .market-search { flex: 1; min-width: 0; margin-top: 0; }
+  .market-sort { flex-shrink: 0; height: 32px; max-width: 180px; padding: 0 6px; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--surface); color: var(--text); font: inherit; font-size: 12px; cursor: pointer; }
+  .market-sort:hover { border-color: var(--accent); color: var(--text-strong); }
+  .status { margin: 0; font-size: 13px; color: var(--accent); }
+  .spin { display: inline-grid; animation: mcp-spin 0.8s linear infinite; }
+  @keyframes mcp-spin { to { transform: rotate(360deg); } }
+  button:disabled { opacity: .45; cursor: default; }
+  /* ---------- 市场列表（agenticskills.io） ---------- */
+  .market-list li { flex-wrap: wrap; }
+  /* 整行可点击：展开/收起详情；行内安装按钮与展开区链接各自 stopPropagation。 */
+  .market-row { flex: 1 1 100%; min-width: 0; display: flex; align-items: center; gap: 10px; cursor: pointer; }
+  .market-row:hover { background: var(--surface-hover); }
+  .market-row:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+  .market-list li.expanded { border-color: var(--accent); }
+  .market-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; color: var(--text-muted); }
+  .market-flag { flex-shrink: 0; padding: 3px 7px; border: 1px solid var(--border-strong); border-radius: 4px; color: var(--text); font-size: 12px; }
+  .category-chip { flex-shrink: 0; display: inline-flex; align-items: center; padding: 3px 8px; border: 1px solid var(--border-strong); border-radius: 4px; color: var(--text-muted); font-family: var(--code-font); font-size: 12px; }
+  button.category-chip { background: transparent; cursor: pointer; }
+  button.category-chip:hover { border-color: var(--accent); color: var(--text-strong); }
+  .category-chip[aria-pressed="true"] { border-color: var(--accent); background: var(--accent); color: var(--accent-ink); font-weight: 700; }
+  .category-filter { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; min-width: 0; max-width: 100%; overflow-x: auto; }
+  .market-source { flex-shrink: 0; padding: 3px 7px; border: 1px solid var(--border); border-radius: 4px; color: var(--text-muted); font-size: 12px; }
+  .tag { padding: 1px 5px; border-radius: 3px; background: var(--surface-hover); color: var(--text-muted); font-size: 10px; }
+  .secondary-action { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; min-height: 32px; padding: 0 12px; border: 1px solid var(--border); border-radius: 4px; background: transparent; color: var(--text-muted); font-size: 12px; cursor: pointer; }
+  .secondary-action:hover:not(:disabled) { border-color: var(--border-strong); color: var(--text); background: var(--surface-hover); }
+  .market-detail { flex: 1 1 100%; min-width: 0; display: grid; gap: 6px; margin-top: 4px; padding-top: 8px; border-top: 1px solid var(--border); }
+  .detail-text { margin: 0; font-size: 13px; line-height: 1.55; color: var(--text-muted); white-space: pre-wrap; }
+  .translate-note { font-size: 12px; color: var(--text-muted); }
+  .translate-error { font-size: 12px; color: var(--status-failed); }
+  .detail-row { display: flex; flex-wrap: wrap; gap: 12px; font-size: 12px; color: var(--text-muted); }
+  .detail-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+  .link-action { padding: 0; border: 0; background: transparent; color: var(--accent); font: inherit; font-size: 12px; text-decoration: underline; cursor: pointer; }
+  .detail-pre { max-height: 220px; margin: 0; padding: 8px 10px; overflow: auto; border: 1px solid var(--border); border-radius: 4px; background: var(--page-bg); color: var(--text); font-family: var(--code-font); font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+  /* ---------- 工作流市场（agenticskills.io） ---------- */
+  .detail-label { font-size: 12px; color: var(--text-muted); }
+  .component-groups { display: grid; gap: 8px; }
+  .component-list, .step-list, .failure-list { list-style: none; margin: 4px 0 0; padding: 0; display: grid; gap: 4px; }
+  .component-list li, .step-list li, .failure-list li { padding: 0; border: 0; border-radius: 0; background: transparent; color: var(--text); font-size: 12px; }
+  .component-list li { display: flex; align-items: baseline; gap: 8px; }
+  .component-list code, .failure-list code { color: var(--text-muted); font-family: var(--code-font); font-size: 11px; }
+  .failure-list li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; }
+  .failure-list span { color: var(--status-failed); overflow-wrap: anywhere; }
+  .step-list li { display: block; }
+  .step-list strong { font-size: 12px; color: var(--text-strong); }
+  .step-list p { margin: 2px 0 0; color: var(--text-muted); white-space: pre-wrap; }
+  .prompt-block { display: grid; gap: 6px; justify-items: start; }
+  .install-summary { border-top-color: var(--accent); }
+  .install-summary strong { font-size: 13px; color: var(--text-strong); }
+</style>

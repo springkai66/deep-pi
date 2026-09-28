@@ -1,0 +1,13 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "board-window",
+  "description": "任务看板浮窗：事件监听/派发、关闭自身、按标题栏拖动无边框窗口、边缘手柄缩放、按当前语言设置窗口标题",
+  "windows": ["board"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-close",
+    "core:window:allow-set-title",
+    "core:window:allow-start-dragging",
+    "core:window:allow-start-resize-dragging"
+  ]
+}
