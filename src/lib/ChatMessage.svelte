@@ -2,6 +2,7 @@
   import { Check, Copy, FileText } from "@lucide/svelte";
   import type { RpcMessage } from "./rpc-state";
   import { messageParts, messageSource } from "./message-parts";
+  import { visibleMessageText } from "./chat-presentation";
   import type { ChatDetailLevel } from "./settings";
   import MessageMarkdown from "./MessageMarkdown.svelte";
   import MessageCodeBlock from "./MessageCodeBlock.svelte";
@@ -9,8 +10,8 @@
   import FileChangeDiff from "./FileChangeDiff.svelte";
   import { computeLineDiff, extractFileChange, type FileChange, type LineDiff } from "./file-change-diff";
   import { t, tm } from "$lib/i18n.svelte";
-  let { message, onOpenLink, detail = "standard", resolvedToolIds }: { message: RpcMessage; onOpenLink: (url: string) => void; detail?: ChatDetailLevel; resolvedToolIds?: Set<string> } = $props();
-  /// 「简洁」档只显示文本与图片（隐藏思考/工具调用等过程内容）；「详细」档过程内容默认展开。
+  let { message, onOpenLink, detail = "concise", resolvedToolIds }: { message: RpcMessage; onOpenLink: (url: string) => void; detail?: ChatDetailLevel; resolvedToolIds?: Set<string> } = $props();
+  /// 简洁档只显示文本与图片；完整档默认展开思考与工具细节。
   const parts = $derived(
     detail === "concise"
       ? messageParts(message.content).filter((part) => part.kind === "text" || part.kind === "image")
@@ -34,20 +35,21 @@
   let copied = $state(false);
   let copying = $state(false);
   let error = $state("");
-  $effect(() => { void message.content; copied = false; });
+  $effect(() => { void message.content; void detail; copied = false; if (detail === "concise") sourceMode = false; });
   async function copy() {
     if (copying) return;
     const content = message.content;
+    const text = detail === "concise" ? visibleMessageText(message) : messageSource(content);
     copying = true;
     error = "";
-    try { await navigator.clipboard.writeText(messageSource(content)); copied = content === message.content; }
+    try { await navigator.clipboard.writeText(text); copied = content === message.content; }
     catch (cause) { error = t("复制失败：{error}", { error: tm(String(cause)) }); }
     finally { copying = false; }
   }
 </script>
 
 <div class="chat-message-content">
-  {#if sourceMode}
+  {#if sourceMode && detail === "verbose"}
     <pre class="source">{messageSource(message.content)}</pre>
   {:else}
     {#each parts as part}
@@ -56,22 +58,26 @@
         {:else if message.role === "user"}<div class="user-text">{part.content}</div>
         {:else}<MessageMarkdown content={part.content} {onOpenLink} />{/if}
       {:else if part.kind === "thinking"}
-        <MessageDisclosure title={t("思考")} variant="thinking" defaultOpen={detailOpen}><MessageMarkdown content={part.content} {onOpenLink} /></MessageDisclosure>
+        <MessageDisclosure title={t("思考")} variant="thinking" defaultOpen={detailOpen} resetKey={detail}><MessageMarkdown content={part.content} {onOpenLink} /></MessageDisclosure>
       {:else if part.kind === "tool"}
         {@const fileChange = fileChangeDiffs.get(part.content)}
         {#if fileChange && (!part.id || !resolvedToolIds || resolvedToolIds.has(part.id))}
-          <!-- 文件修改工具：差异卡片展示。同一调用的实时卡片存在时
-               （尚未收到工具结果）不重复渲染，避免双重显示。 -->
+          <!-- 已有实时卡片时不重复展示同一调用的差异。 -->
           <FileChangeDiff change={fileChange.change} diff={fileChange.diff} tone="plain" />
         {/if}
-        <MessageDisclosure title={t("{name} · 工具参数", { name: part.name })} defaultOpen={detailOpen}><MessageCodeBlock content={part.content} language="json" /></MessageDisclosure>
+        <MessageDisclosure title={t("{name} · 工具参数", { name: part.name })} defaultOpen={detailOpen} resetKey={detail}><MessageCodeBlock content={part.content} language="json" /></MessageDisclosure>
       {:else if part.kind === "image"}
-        <MessageDisclosure title={part.content} defaultOpen={detailOpen}>
+        {#if detail === "concise"}
           {#if part.source}<img src={part.source} alt={t("会话图片")} loading="lazy" onerror={(event) => { event.currentTarget.setAttribute("alt", t("图片无法解码")); }} />
           {:else}<p>{t("图片类型或大小不受支持。")}</p>{/if}
-        </MessageDisclosure>
+        {:else}
+          <MessageDisclosure title={part.content} defaultOpen={detailOpen} resetKey={detail}>
+            {#if part.source}<img src={part.source} alt={t("会话图片")} loading="lazy" onerror={(event) => { event.currentTarget.setAttribute("alt", t("图片无法解码")); }} />
+            {:else}<p>{t("图片类型或大小不受支持。")}</p>{/if}
+          </MessageDisclosure>
+        {/if}
       {:else}
-        <MessageDisclosure title={t("未识别的消息内容")} defaultOpen={detailOpen}><MessageCodeBlock content={part.content} language="json" /></MessageDisclosure>
+        <MessageDisclosure title={t("未识别的消息内容")} defaultOpen={detailOpen} resetKey={detail}><MessageCodeBlock content={part.content} language="json" /></MessageDisclosure>
       {/if}
     {/each}
   {/if}
@@ -80,7 +86,7 @@
     <button type="button" title={copied ? t("已复制") : t("复制消息")} aria-label={copied ? t("已复制") : t("复制消息")} disabled={copying} onclick={copy}>
       {#if copied}<Check size={14} />{:else}<Copy size={14} />{/if}
     </button>
-    {#if message.role !== "user"}
+    {#if message.role !== "user" && detail === "verbose"}
       <button type="button" title={t("原始文本")} aria-label={t("原始文本")} aria-pressed={sourceMode} onclick={() => { sourceMode = !sourceMode; }}><FileText size={14} /></button>
     {/if}
   </footer>

@@ -19,12 +19,51 @@ describe("message components server rendering", () => {
   it("renders assistant thinking separately and keeps user text literal", () => {
     const assistant = render(ChatMessage, { props: { message: { role: "assistant", content: [
       { type: "thinking", thinking: "check" }, { type: "text", text: "**answer**" },
-    ] }, onOpenLink: () => {} } }).body;
+    ] }, detail: "verbose", onOpenLink: () => {} } }).body;
     expect(assistant).toContain("<summary");
     expect(assistant).toContain("<strong");
-    expect(assistant).not.toContain(">check<");
+    expect(assistant).toContain(">check<");
     const user = render(ChatMessage, { props: { message: { role: "user", content: "**literal**" }, onOpenLink: () => {} } }).body;
     expect(user).toContain("**literal**");
     expect(user).not.toContain("<strong");
   });
+
+describe("Pi conversation display modes", () => {
+  const content = [
+    { type: "thinking", thinking: "private reasoning" },
+    { type: "toolCall", id: "tool", name: "read", arguments: { path: "secret.txt" } },
+    { type: "text", text: "Visible answer" },
+    { type: "image", mimeType: "image/png", data: "aGVsbG8=" },
+    { type: "future", value: "internal detail" },
+  ];
+  const show = (detail: "concise" | "verbose") => render(ChatMessage, { props: {
+    message: { role: "assistant", content }, detail, onOpenLink: () => {},
+  } }).body;
+
+  it("keeps answers and images visible without process or raw-source access in concise mode", () => {
+    const body = show("concise");
+    expect(body).toContain("Visible answer");
+    expect(body).toContain('alt="会话图片"');
+    expect(body).not.toContain("private reasoning");
+    expect(body).not.toContain("secret.txt");
+    expect(body).not.toContain("internal detail");
+    expect(body).not.toContain('aria-label="原始文本"');
+  });
+
+  it("shows process and raw-source access in full mode", () => {
+    const body = show("verbose");
+    expect(body).toContain("Visible answer");
+    expect(body).toContain("private reasoning");
+    expect(body).toContain("secret.txt");
+    expect(body).toContain("internal detail");
+    expect(body).toContain('aria-label="原始文本"');
+  });
+
+  it("keeps invalid images visibly reported in concise mode", () => {
+    const body = render(ChatMessage, { props: { message: { role: "user", content: [
+      { type: "image", mimeType: "image/png", data: "invalid" },
+    ] }, detail: "concise", onOpenLink: () => {} } }).body;
+    expect(body).toContain("图片类型或大小不受支持。");
+  });
+});
 });

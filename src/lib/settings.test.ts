@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_APP_SETTINGS, cssCodeFontFamily, cssTerminalFontFamily } from "./settings";
+import { CHAT_DETAIL_LEVELS, DEFAULT_APP_SETTINGS, cssCodeFontFamily, cssTerminalFontFamily } from "./settings";
 
 describe("managed workspace defaults", () => {
   it("uses only the DeepPi environment for new tasks", () => {
@@ -10,6 +10,15 @@ describe("managed workspace defaults", () => {
     expect(DEFAULT_APP_SETTINGS.proxyMode).toBe("system");
     expect(DEFAULT_APP_SETTINGS.proxyUrl).toBe("");
     expect(DEFAULT_APP_SETTINGS.proxyNoProxy).toBe("");
+  });
+});
+describe("Pi conversation display choices", () => {
+  it("offers only concise and full, defaulting new settings to concise", () => {
+    expect(CHAT_DETAIL_LEVELS).toEqual([
+      { value: "concise", label: "简洁模式" },
+      { value: "verbose", label: "完整模式" },
+    ]);
+    expect(DEFAULT_APP_SETTINGS.chatDetailLevel).toBe("concise");
   });
 });
 

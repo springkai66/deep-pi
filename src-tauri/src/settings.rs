@@ -49,21 +49,23 @@ fn default_terminal_shell() -> String {
 }
 
 fn default_chat_detail_level() -> String {
-    "standard".into()
+    "concise".into()
 }
 
-/// AI 对话内容显示详细程度：只允许 concise / standard / verbose，其余收敛为默认值。
+fn normalize_chat_detail_level(value: &str) -> String {
+    match value {
+        "standard" | "verbose" => "verbose".into(),
+        "concise" => "concise".into(),
+        _ => default_chat_detail_level(),
+    }
+}
+
+/// 将旧标准档归入完整档，未知值回落简洁档。
 fn deserialize_chat_detail_level<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<String, D::Error> {
     let value = String::deserialize(deserializer)?;
-    Ok(
-        if matches!(value.as_str(), "concise" | "standard" | "verbose") {
-            value
-        } else {
-            default_chat_detail_level()
-        },
-    )
+    Ok(normalize_chat_detail_level(&value))
 }
 
 fn default_pi_environment() -> String {
@@ -211,7 +213,7 @@ pub struct AppSettings {
         deserialize_with = "deserialize_pi_environment"
     )]
     pub pi_environment: String,
-    /// AI 对话内容的显示详细程度：concise / standard / verbose。
+    /// Pi 对话显示级别：concise / verbose；读取旧 standard 时迁移到 verbose。
     #[serde(
         default = "default_chat_detail_level",
         deserialize_with = "deserialize_chat_detail_level"
@@ -367,6 +369,7 @@ impl SettingsStore {
     }
 
     pub fn save(&self, mut settings: AppSettings) -> Result<(), String> {
+        settings.chat_detail_level = normalize_chat_detail_level(&settings.chat_detail_level);
         // 旧前端/旧配置仍可能提交 direct；持久化前迁移，避免界面出现无选项的值。
         settings.proxy_mode = crate::proxy::normalize_mode(&settings.proxy_mode).into();
         if matches!(settings.pi_environment.as_str(), "auto" | "native") {
@@ -431,10 +434,7 @@ fn validate(settings: &AppSettings) -> Result<(), String> {
     ) {
         return Err("terminalShell is invalid".into());
     }
-    if !matches!(
-        settings.chat_detail_level.as_str(),
-        "concise" | "standard" | "verbose"
-    ) {
+    if !matches!(settings.chat_detail_level.as_str(), "concise" | "verbose") {
         return Err("chatDetailLevel is invalid".into());
     }
     if let Some(editor) = &settings.external_editor {
@@ -576,7 +576,7 @@ pub async fn save_settings(app: AppHandle, settings: AppSettings) -> Result<(), 
 
 #[cfg(test)]
 mod tests {
-    use super::{default_theme, migrate_legacy_settings, AppSettings, SettingsStore};
+    use super::{default_theme, migrate_legacy_settings, now_millis, AppSettings, SettingsStore};
     use serde_json::Value;
     use std::fs;
 
@@ -613,29 +613,48 @@ mod tests {
     }
 
     #[test]
-    /// chatDetailLevel：缺省回落 standard，未知值收敛，合法值原样保留。
-    fn chat_detail_level_defaults_and_rejects_unknown_values() {
+    fn chat_detail_level_defaults_and_migrates_legacy_values() {
         let base = serde_json::json!({
             "schemaVersion": 1, "maxConcurrentTasks": 3, "lastProject": null,
         });
         let settings: AppSettings = serde_json::from_value(base).unwrap();
-        assert_eq!(settings.chat_detail_level, "standard");
+        assert_eq!(settings.chat_detail_level, "concise");
 
-        for stored in ["concise", "standard", "verbose"] {
+        for (stored, expected) in [
+            ("concise", "concise"),
+            ("standard", "verbose"),
+            ("verbose", "verbose"),
+            ("ultra", "concise"),
+        ] {
             let value = serde_json::json!({
                 "schemaVersion": 1, "maxConcurrentTasks": 3, "lastProject": null,
                 "chatDetailLevel": stored,
             });
             let settings: AppSettings = serde_json::from_value(value).unwrap();
-            assert_eq!(settings.chat_detail_level, stored);
+            assert_eq!(settings.chat_detail_level, expected);
         }
+    }
 
-        let value = serde_json::json!({
-            "schemaVersion": 1, "maxConcurrentTasks": 3, "lastProject": null,
-            "chatDetailLevel": "ultra",
-        });
-        let settings: AppSettings = serde_json::from_value(value).unwrap();
-        assert_eq!(settings.chat_detail_level, "standard");
+    #[test]
+    fn chat_detail_level_save_normalizes_legacy_values() {
+        let root =
+            std::env::temp_dir().join(format!("deeppi-chat-detail-{}", now_millis().unwrap()));
+        let path = root.join("settings.json");
+        let backups = root.join("backups");
+        let store = SettingsStore::open(path.clone(), backups.clone()).unwrap();
+        let mut settings = store.get().unwrap();
+        settings.chat_detail_level = "standard".into();
+        store.save(settings).unwrap();
+        assert_eq!(store.get().unwrap().chat_detail_level, "verbose");
+        assert_eq!(
+            SettingsStore::open(path, backups)
+                .unwrap()
+                .get()
+                .unwrap()
+                .chat_detail_level,
+            "verbose"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

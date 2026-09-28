@@ -453,13 +453,13 @@
         </section>
         <section class="settings-group" aria-labelledby="chat-detail-heading">
           <h3 id="chat-detail-heading">{t("会话内容")}</h3>
-          <label class="setting-control"><strong>{t("AI 对话内容显示")}</strong>
-            <select value={runtime.settings.chatDetailLevel} aria-label={t("AI 对话内容显示")}
+          <label class="setting-control"><strong>{t("对话内容显示")}</strong>
+            <select value={runtime.settings.chatDetailLevel} aria-label={t("对话内容显示")}
               onchange={(event) => updateSettings({ chatDetailLevel: event.currentTarget.value as AppSettings["chatDetailLevel"] })}>
               {#each CHAT_DETAIL_LEVELS as option}<option value={option.value}>{t(option.label)}</option>{/each}
             </select>
           </label>
-          <p class="muted">{t("控制思考过程与工具调用等过程内容的展示：简洁只显示回复正文；标准折叠过程内容；详细默认展开全部过程内容。")}</p>
+          <p class="muted">{t("简洁模式显示回复和必要运行状态；完整模式显示思考、工具调用及输出等过程内容。")}</p>
         </section>
       </div>
       <div class="settings-panel embedded-panel" hidden={category !== "models"}>{#if modelsVisited}{@render models()}{/if}</div>

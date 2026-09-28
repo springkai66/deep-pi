@@ -224,12 +224,12 @@ export const EN_CHAT: Record<string, string> = {
   "会话字体大小": "Session font size",
   "代码字体": "Code font",
   "会话内容": "Conversation content",
-  "AI 对话内容显示": "AI conversation detail",
-  "简洁": "Concise",
-  "标准": "Standard",
-  "详细": "Detailed",
-  "控制思考过程与工具调用等过程内容的展示：简洁只显示回复正文；标准折叠过程内容；详细默认展开全部过程内容。":
-    "Controls how process content (thinking, tool calls, and more) is shown: Concise shows only reply text; Standard keeps process content collapsed; Detailed expands it by default.",
+  "对话内容显示": "Conversation display",
+  "简洁模式": "Concise",
+  "完整模式": "Full",
+  "简洁模式显示回复和必要运行状态；完整模式显示思考、工具调用及输出等过程内容。":
+    "Concise shows replies and essential progress. Full also shows thinking, tool calls, and output.",
+  "切换到完整模式查看详情": "Switch to Full to view details",
 
   // —— 设置页：运行环境 ——
   "运行环境": "Runtime environment",

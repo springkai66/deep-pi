@@ -1,9 +1,10 @@
 <script lang="ts">
   import { untrack } from "svelte";
   import type { Snippet } from "svelte";
-  let { title, children, variant, defaultOpen = false }: { title: string; children: Snippet; variant?: "thinking"; defaultOpen?: boolean } = $props();
-  /// 折叠状态只在挂载时取 defaultOpen 初值（「详细」档默认展开）；之后由用户手动开合，设置变更不回写已渲染的消息。
+  let { title, children, variant, defaultOpen = false, resetKey }: { title: string; children: Snippet; variant?: "thinking"; defaultOpen?: boolean; resetKey?: string } = $props();
+  /// 用户可手动开合；切换显示级别时重新采用新模式的默认展开状态。
   let expanded = $state(untrack(() => defaultOpen));
+  $effect(() => { void resetKey; expanded = defaultOpen; });
 </script>
 
 <details bind:open={expanded} class:thinking={variant === "thinking"}>

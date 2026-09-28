@@ -3,15 +3,16 @@
   import { ArrowDown, ArrowDownUp, ArrowUp, Bot, ChevronDown, CircleAlert, History, Image as ImageIcon, Pencil, RefreshCw, Shrink, Sparkles, Square, Terminal, Undo2, UserRound, X } from "@lucide/svelte";
   import { onMount, tick, untrack, type Snippet } from "svelte";
   import type { DialogRequest, DialogValue } from "./dialog";
-  import { applyRpcEvent, canSubmitPrompt, contentText, emptyConversation, loadHistory, messageRenderable, readableRpcError, record, type RpcEvent, type RpcMessage, type RpcTool } from "./rpc-state";
+  import { applyRpcEvent, canSubmitPrompt, contentText, emptyConversation, loadHistory, readableRpcError, record, type RpcEvent, type RpcMessage, type RpcTool } from "./rpc-state";
   import FileChangeDiff from "./FileChangeDiff.svelte";
   import { computeLineDiff, extractFileChange, type FileChange, type LineDiff } from "./file-change-diff";
   import { onModelsChanged } from "./model-config-sync";
   import { findSavedModel, parseModelKey, shouldApplySavedChoice, validSavedThinkingLevel, type SavedModelChoice } from "./model-memory";
-import type { ChatDetailLevel } from "./settings";
+  import type { ChatDetailLevel } from "./settings";
   import { captureTranscriptAnchor, restoreTranscriptAnchor, messageWindowStart, transcriptPort } from "./transcript-scroll";
   import MessageDisclosure from "./MessageDisclosure.svelte";
   import { messageSource } from "./message-parts";
+  import { showConversationMessage, visibleMessageText } from "./chat-presentation";
   import { clipboardImageFiles } from "./clipboard-images";
   import { hasQueuedImages, rekeyQueuedImages, takeQueuedImages, type QueuedImageEntry } from "./queued-images";
   import { formatDuration } from "./duration";
@@ -55,10 +56,10 @@ import type { ChatDetailLevel } from "./settings";
     onAutoRename: (title: string) => void;
     onOpenModelSettings?: () => void;
     onReloadSession?: () => void;
-    /** AI 对话内容显示详细程度（简洁/标准/详细），来自全局设置。 */
+    /** Pi 对话内容显示级别，来自全局设置。 */
     chatDetailLevel?: ChatDetailLevel;
   }
-  let { taskId, runId, title, tabs, visible, active, switching, focusToken, autoName, onUseTerminal, onDialog, onCancelDialogs, onActivity, onAutoRename, onOpenModelSettings, onReloadSession, chatDetailLevel = "standard" }: Props = $props();
+  let { taskId, runId, title, tabs, visible, active, switching, focusToken, autoName, onUseTerminal, onDialog, onCancelDialogs, onActivity, onAutoRename, onOpenModelSettings, onReloadSession, chatDetailLevel = "concise" }: Props = $props();
   let conversation = $state(emptyConversation());
   let draft = $state("");
   let restoredDraft = $state("");
@@ -288,7 +289,7 @@ import type { ChatDetailLevel } from "./settings";
   const visibleEntries = $derived(
     visibleMessages
       .map((message, offset) => ({ message, index: messageStart + offset }))
-      .filter((entry) => messageRenderable(entry.message)),
+      .filter((entry) => showConversationMessage(entry.message, chatDetailLevel)),
   );
   const toolResults = $derived(
     new Set(conversation.messages.map((message) => message.toolCallId).filter((id): id is string => Boolean(id))),
@@ -418,11 +419,6 @@ import type { ChatDetailLevel } from "./settings";
     return lines.slice(-LIVE_OUTPUT_LINES).join("\n");
   }
 
-  function liveOutputLastLine(tool: RpcTool): string {
-    const tail = liveOutputTail(tool);
-    return tail ? tail.split("\n").pop() ?? "" : "";
-  }
-
   /// 把实时输出滚动钉在底部（tail -f 效果）；依赖的文本变化时触发，rAF 等 DOM 更新后再定位。
   function pinOutputBottom(node: HTMLPreElement, _text: string) {
     const scrollToEnd = () => { requestAnimationFrame(() => { node.scrollTop = node.scrollHeight; }); };
@@ -433,7 +429,7 @@ import type { ChatDetailLevel } from "./settings";
   /// 上滚时悬浮胶囊的文案：工具摘要 + 已运行 + 静默时长。
   function activeToolChipLabel(tool: RpcTool): string {
     const elapsed = tool.startedAt !== undefined ? formatDuration(elapsedNow - tool.startedAt) : "";
-    return `${t("{name} 执行中", { name: toolCallSummary(tool.name, tool.args) })}${elapsed ? ` · ${elapsed}` : ""}${silenceLabel(tool, elapsedNow)}`;
+    return `${t("{name} 执行中", { name: chatDetailLevel === "concise" ? tool.name : toolCallSummary(tool.name, tool.args) })}${elapsed ? ` · ${elapsed}` : ""}${silenceLabel(tool, elapsedNow)}`;
   }
 
   /// 回到最新消息并恢复自动跟随；悬浮胶囊与回底按钮共用。
@@ -823,7 +819,7 @@ import type { ChatDetailLevel } from "./settings";
     if (!connected) return t("未连接");
     const turnPart = turnStartedAt !== null ? ` · ${t("本轮 {duration}", { duration: formatDuration(elapsedNow - turnStartedAt) })}` : "";
     if (conversation.phase === "tool" && activeTool) {
-      const summary = toolCallSummary(activeTool.name, activeTool.args);
+      const summary = chatDetailLevel === "concise" ? activeTool.name : toolCallSummary(activeTool.name, activeTool.args);
       const toolPart = activeTool.startedAt !== undefined ? formatDuration(elapsedNow - activeTool.startedAt) : "";
       return `${summary}${toolPart ? ` · ${toolPart}` : ""}${silenceLabel(activeTool, elapsedNow)}${turnPart}`;
     }
@@ -1835,33 +1831,37 @@ import type { ChatDetailLevel } from "./settings";
           {#if message.role === "user"}<UserRound size={14} />{t("你")}
             {#if turnDurationFor(entry.index)}<span class="turn-duration">{t("耗时 {duration}", { duration: turnDurationFor(entry.index) })}</span>{/if}
           {:else if message.role === "compactionSummary"}<Shrink size={14} />{t("上下文压缩")}
-            {#if compactionStatLabel(message)}<span class="compaction-tokens">{compactionStatLabel(message)}</span>{/if}
+            {#if chatDetailLevel === "verbose" && compactionStatLabel(message)}<span class="compaction-tokens">{compactionStatLabel(message)}</span>{/if}
           {:else if message.role === "toolResult"}<Terminal size={14} />{message.toolName ?? t("工具结果")}
             {#if message.toolStartedAt !== undefined}<span class="tool-took">{t("耗时 {duration}", { duration: formatDuration((message.toolEndedAt ?? Date.now()) - message.toolStartedAt) })}</span>{/if}
           {:else}<Bot size={14} />Pi{/if}
         </div>
         {#if message.role === "compactionSummary"}
-          <div class="compaction-summary">{typeof message.summary === "string" ? message.summary : contentText(message.content)}</div>
+          {#if chatDetailLevel === "verbose"}<div class="compaction-summary">{typeof message.summary === "string" ? message.summary : contentText(message.content)}</div>{/if}
         {:else if message.role === "toolResult"}
-          <MessageDisclosure title={message.toolName ?? t("工具输出")} defaultOpen={chatDetailLevel === "verbose"}>
-            {#if messageModule}
-              {#await messageModule}
-                <pre>{messageSource(message.content)}</pre>
-              {:then module}<module.default {message} onOpenLink={openMessageLink} detail={chatDetailLevel} resolvedToolIds={toolResults} />
-              {:catch}<pre>{messageSource(message.content)}</pre>{/await}
-            {/if}
-          </MessageDisclosure>
+          {#if chatDetailLevel === "concise"}
+            <p class="tool-call-waiting">{t("失败")} · {t("切换到完整模式查看详情")}</p>
+          {:else}
+            <MessageDisclosure title={message.toolName ?? t("工具输出")} defaultOpen resetKey={chatDetailLevel}>
+              {#if messageModule}
+                {#await messageModule}
+                  <pre>{messageSource(message.content)}</pre>
+                {:then module}<module.default {message} onOpenLink={openMessageLink} detail={chatDetailLevel} resolvedToolIds={toolResults} />
+                {:catch}<pre>{messageSource(message.content)}</pre>{/await}
+              {/if}
+            </MessageDisclosure>
+          {/if}
         {:else}
           <div class="message-content">
             {#if messageModule}
               {#await messageModule}
-                <div class="plain-message">{messageSource(message.content)}</div>
+                <div class="plain-message">{chatDetailLevel === "concise" ? visibleMessageText(message) : messageSource(message.content)}</div>
               {:then module}<module.default {message} onOpenLink={openMessageLink} detail={chatDetailLevel} resolvedToolIds={toolResults} />
               {:catch}
-                <div class="plain-message">{messageSource(message.content)}</div>
+                <div class="plain-message">{chatDetailLevel === "concise" ? visibleMessageText(message) : messageSource(message.content)}</div>
                 <button type="button" title={t("重新加载消息显示")} aria-label={t("重新加载消息显示")} onclick={() => { messageModule = null; }}><RefreshCw size={15} /></button>
               {/await}
-            {:else}<div class="plain-message">{messageSource(message.content)}</div>{/if}
+            {:else}<div class="plain-message">{chatDetailLevel === "concise" ? visibleMessageText(message) : messageSource(message.content)}</div>{/if}
           </div>
         {/if}
       </article>
@@ -1897,7 +1897,7 @@ import type { ChatDetailLevel } from "./settings";
         <div class="tool-call-head">
           <span class="activity-dot {outputActivity(tool, elapsedNow)}" aria-hidden="true"></span>
           <Terminal size={14} />
-          <span class="tool-call-name">{toolCallSummary(tool.name, tool.args)}</span>
+          <span class="tool-call-name">{chatDetailLevel === "concise" ? tool.name : toolCallSummary(tool.name, tool.args)}</span>
           {#if tool.startedAt !== undefined && elapsedNow - tool.startedAt >= LONG_TOOL_MS}
             <span class="tool-call-badge">{t("长时间运行")}</span>
           {/if}
@@ -1907,22 +1907,22 @@ import type { ChatDetailLevel } from "./settings";
           <button type="button" class="tool-call-interrupt" disabled={stopping} title={t("中断当前执行")} aria-label={t("中断当前执行")}
             onclick={() => void interrupt()}><Square size={11} />{t("中断")}</button>
         </div>
-        {#if fileChangeDiffs.get(tool.id)}
-          {@const runningChange = fileChangeDiffs.get(tool.id)!}
-          <FileChangeDiff change={runningChange.change} diff={runningChange.diff} tone="pending" />
-        {/if}
-        {#if chatDetailLevel === "concise"}
-          {#if liveOutputLastLine(tool)}<p class="tool-call-preview">{liveOutputLastLine(tool)}</p>{/if}
-        {:else if liveOutputTail(tool)}
-          <pre class="tool-call-live-output" use:pinOutputBottom={liveOutputTail(tool)}>{liveOutputTail(tool)}</pre>
-        {:else}
-          <p class="tool-call-waiting">{t("等待工具输出…")}</p>
+        {#if chatDetailLevel === "verbose"}
+          {#if fileChangeDiffs.get(tool.id)}
+            {@const runningChange = fileChangeDiffs.get(tool.id)!}
+            <FileChangeDiff change={runningChange.change} diff={runningChange.diff} tone="pending" />
+          {/if}
+          {#if liveOutputTail(tool)}
+            <pre class="tool-call-live-output" use:pinOutputBottom={liveOutputTail(tool)}>{liveOutputTail(tool)}</pre>
+          {:else}
+            <p class="tool-call-waiting">{t("等待工具输出…")}</p>
+          {/if}
         {/if}
       </div>
     {/each}
-    {#if chatDetailLevel !== "concise"}
-      {#each finishedLiveTools as tool (tool.id)}
-        <details class="tool-call" open={chatDetailLevel === "verbose"}>
+    {#each finishedLiveTools as tool (tool.id)}
+      {#if chatDetailLevel === "verbose"}
+        <details class="tool-call" open>
           <summary>
             <Terminal size={14} /><span class="tool-call-name">{toolCallSummary(tool.name, tool.args)}</span>
             <span class="tool-call-state">{tool.isError ? t("失败") : t("完成")}</span>
@@ -1934,8 +1934,10 @@ import type { ChatDetailLevel } from "./settings";
           <pre>{JSON.stringify(tool.args, null, 2)}</pre>
           {#if tool.result}<pre>{contentText(record(tool.result).content)}</pre>{/if}
         </details>
-      {/each}
-    {/if}
+      {:else if tool.isError}
+        <div class="tool-call" role="alert"><Terminal size={14} /> {tool.name} · {t("失败")} · {t("切换到完整模式查看详情")}</div>
+      {/if}
+    {/each}
     {#if liveStatusVisible}
       <p class="turn-total live-status" role="status" class:stalled={toolStalled}>
         {#if activeTool}<span class="activity-dot {outputActivity(activeTool, elapsedNow)}" aria-hidden="true"></span>{/if}

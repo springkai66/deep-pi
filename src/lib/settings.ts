@@ -8,15 +8,14 @@ export type Theme = string;
 export type CodeFont = string;
 export type CloseBehavior = "ask" | "minimize" | "exit";
 export type TerminalShell = "powershell" | "pwsh" | "bash" | "cmd";
-/** AI 对话内容的显示详细程度：简洁（只看正文）/ 标准（过程内容折叠）/ 详细（过程内容默认展开）。 */
-export type ChatDetailLevel = "concise" | "standard" | "verbose";
+/** Pi 对话显示级别：简洁只看结果与状态，完整展示过程。 */
+export type ChatDetailLevel = "concise" | "verbose";
 /** 全局网络代理模式：跟随 Windows 系统代理（关闭时按操作系统路由）/ 手动指定代理地址。 */
 export type ProxyMode = "system" | "manual";
 
 export const CHAT_DETAIL_LEVELS: Array<{ value: ChatDetailLevel; label: string }> = [
-  { value: "concise", label: "简洁" },
-  { value: "standard", label: "标准" },
-  { value: "verbose", label: "详细" },
+  { value: "concise", label: "简洁模式" },
+  { value: "verbose", label: "完整模式" },
 ];
 export interface ExternalEditor {
   kind: "vscode" | "notepadPlusPlus";
@@ -83,7 +82,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   externalEditor: null,
   terminalShell: "powershell",
   piEnvironment: "managed",
-  chatDetailLevel: "standard",
+  chatDetailLevel: "concise",
   customThemes: [],
   proxyMode: "system",
   proxyUrl: "",
