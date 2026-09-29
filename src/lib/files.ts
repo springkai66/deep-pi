@@ -1,3 +1,11 @@
+export type FileTreeAction = "open" | "external" | "newFile" | "newFolder" | "rename" | "copyPath" | "delete";
+
+export function pathContainsEntry(target: string, path: string, directory: boolean): boolean {
+  const source = target.toLowerCase();
+  const candidate = path.toLowerCase();
+  return source === candidate || directory && candidate.startsWith(`${source}/`);
+}
+
 import { matchesSearch } from "./navigation";
 
 export interface FileEntry {
@@ -58,4 +66,10 @@ export function visibleFiles(entries: FileEntry[], query: string, expanded: Read
   }
   visit("");
   return result;
+}
+
+export function retainEmptyDirectories(previous: readonly string[], entries: readonly FileEntry[]): string[] {
+  const directories = new Set(entries.filter((entry) => entry.isDirectory).map((entry) => entry.path));
+  const withChildren = new Set(entries.map((entry) => parentPath(entry.path)));
+  return previous.filter((path) => directories.has(path) && !withChildren.has(path));
 }

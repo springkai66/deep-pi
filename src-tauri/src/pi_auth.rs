@@ -104,6 +104,7 @@ pub struct PiAuthProviderInfo {
     pub name: String,
     pub oauth: bool,
     pub oauth_name: Option<String>,
+    pub api_key: bool,
     pub is_subscription: bool,
 }
 
@@ -138,6 +139,8 @@ pub struct PiAuthLoginRequest {
     /// 为 None 时由 pi 的默认流程决定，选择提示照常转发给界面。
     #[serde(default)]
     login_method: Option<String>,
+    #[serde(default)]
+    auth_type: Option<String>,
 }
 
 /// 官方供应商可用模型（pi 运行时自带目录，官方登录后免 API Key）。
@@ -149,6 +152,8 @@ pub struct PiOfficialModel {
     pub context_window: Option<u64>,
     pub max_tokens: Option<u64>,
     pub reasoning: bool,
+    #[serde(default)]
+    pub thinking_levels: Vec<String>,
     pub input: Vec<String>,
     pub input_cost: Option<f64>,
     pub output_cost: Option<f64>,
@@ -158,6 +163,75 @@ pub struct PiOfficialModel {
 #[serde(rename_all = "camelCase")]
 pub struct PiAuthProviderRef {
     provider_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PiModelDefaults {
+    pub default_provider: Option<String>,
+    pub default_model: Option<String>,
+    pub model_thinking_levels: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PiAuthModelDefaultsRequest {
+    provider_id: String,
+    model_id: String,
+    thinking_level: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PiAuthModelTestRequest {
+    provider_id: String,
+    model_id: String,
+}
+
+#[derive(Serialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PiAuthModelTestResult {
+    model_id: String,
+    ok: bool,
+    status: Option<u16>,
+    latency_ms: u64,
+    error: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProbeReply {
+    ok: bool,
+    latency_ms: u64,
+    error: Option<String>,
+}
+
+fn validate_model_probe(
+    request: &PiAuthModelTestRequest,
+    catalog: &[PiOfficialModel],
+) -> Result<(), String> {
+    if request.provider_id != "openai-codex" {
+        return Err("Unsupported subscription provider".into());
+    }
+    if request.model_id.is_empty()
+        || request.model_id.len() > 512
+        || request.model_id.chars().any(char::is_control)
+        || !catalog.iter().any(|model| model.id == request.model_id)
+    {
+        return Err("Model is not present in the subscription catalog".into());
+    }
+    Ok(())
+}
+
+fn parse_model_probe(model_id: String, value: Value) -> Result<PiAuthModelTestResult, String> {
+    let reply: ProbeReply = serde_json::from_value(value).map_err(|_| msg("pi.auth.models_invalid"))?;
+    Ok(PiAuthModelTestResult {
+        model_id,
+        ok: reply.ok,
+        status: None,
+        latency_ms: reply.latency_ms,
+        error: reply.error.map(|error| redact(&error)),
+    })
 }
 
 #[derive(Deserialize)]
@@ -528,6 +602,16 @@ impl PiAuthManager {
     }
 }
 
+/// Refresh the managed Pi Codex OAuth token without sending it over the bridge protocol.
+pub(crate) fn refresh_codex_oauth(app: &AppHandle, paths: &AppPaths) -> Result<bool, ()> {
+    let manager = app.state::<PiAuthManager>();
+    let bridge = manager.ensure(Some(app), paths).map_err(|_| ())?;
+    let value = bridge
+        .request(json!({ "op": "refresh_codex" }), Duration::from_secs(25))
+        .map_err(|_| ())?;
+    value.get("present").and_then(Value::as_bool).ok_or(())
+}
+
 #[tauri::command]
 pub async fn pi_auth_providers(app: AppHandle) -> Result<Vec<PiAuthProviderInfo>, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -592,21 +676,92 @@ pub async fn pi_auth_provider_models(
     request: PiAuthProviderRef,
 ) -> Result<Vec<PiOfficialModel>, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        validate_provider_id(&request.provider_id)?;
-        let manager = app.state::<PiAuthManager>();
-        let paths = app.state::<AppPaths>();
-        let bridge = manager.ensure(Some(&app), &paths)?;
-        let value = bridge.request(
-            json!({ "op": "models", "provider": request.provider_id }),
-            REQUEST_TIMEOUT,
-        )?;
-        serde_json::from_value::<Vec<PiOfficialModel>>(
-            value.get("models").cloned().unwrap_or(Value::Null),
-        )
-        .map_err(|error| msg_with("pi.auth.models_invalid", &[("error", &error.to_string())]))
+        official_models_for(&app, &app.state::<AppPaths>(), &request.provider_id)
     })
     .await
     .map_err(|error| msg_with("pi.auth.worker_failed", &[("error", &error.to_string())]))?
+}
+
+pub(crate) fn official_models_for(
+    app: &AppHandle,
+    paths: &AppPaths,
+    provider: &str,
+) -> Result<Vec<PiOfficialModel>, String> {
+    validate_provider_id(provider)?;
+    let bridge = app.state::<PiAuthManager>().ensure(Some(app), paths)?;
+    let value = bridge.request(
+        json!({ "op": "models", "provider": provider }),
+        REQUEST_TIMEOUT,
+    )?;
+    serde_json::from_value(value.get("models").cloned().unwrap_or(Value::Null))
+        .map_err(|_| msg("pi.auth.models_invalid"))
+}
+
+#[tauri::command]
+pub async fn pi_auth_test_model_connection(
+    app: AppHandle,
+    request: PiAuthModelTestRequest,
+) -> Result<PiAuthModelTestResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if request.provider_id != "openai-codex" {
+            return Err("Unsupported subscription provider".into());
+        }
+        if request.model_id.is_empty()
+            || request.model_id.len() > 512
+            || request.model_id.chars().any(char::is_control)
+        {
+            return Err("Invalid subscription model".into());
+        }
+        let paths = app.state::<AppPaths>();
+        let catalog = official_models_for(&app, &paths, &request.provider_id)?;
+        validate_model_probe(&request, &catalog)?;
+        let bridge = app.state::<PiAuthManager>().ensure(Some(&app), &paths)?;
+        let value = bridge.request(
+            json!({ "op": "test_model_connection", "provider": request.provider_id, "modelId": request.model_id }),
+            CONTROL_TIMEOUT,
+        )?;
+        parse_model_probe(request.model_id, value.get("result").cloned().unwrap_or(Value::Null))
+    })
+    .await
+    .map_err(|error| msg_with("pi.auth.worker_failed", &[("error", &error.to_string())]))?
+}
+
+#[tauri::command]
+pub async fn pi_auth_model_settings(
+    app: AppHandle,
+    request: PiAuthProviderRef,
+) -> Result<PiModelDefaults, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if request.provider_id != "openai-codex" {
+            return Err("Unsupported subscription settings provider".into());
+        }
+        let bridge = app
+            .state::<PiAuthManager>()
+            .ensure(Some(&app), &app.state::<AppPaths>())?;
+        let value = bridge.request(
+            json!({"op":"model_settings","provider":request.provider_id}),
+            REQUEST_TIMEOUT,
+        )?;
+        serde_json::from_value(value.get("settings").cloned().unwrap_or(Value::Null))
+            .map_err(|_| msg("pi.auth.models_invalid"))
+    })
+    .await
+    .map_err(|_| msg("pi.auth.internal_unavailable"))?
+}
+
+#[tauri::command]
+pub async fn pi_auth_set_model_defaults(
+    app: AppHandle,
+    request: PiAuthModelDefaultsRequest,
+) -> Result<PiModelDefaults, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if request.provider_id != "openai-codex" || request.model_id.is_empty() || request.model_id.len() > 512 {
+            return Err("Invalid subscription model selection".into());
+        }
+        let bridge = app.state::<PiAuthManager>().ensure(Some(&app), &app.state::<AppPaths>())?;
+        let value = bridge.request(json!({"op":"set_model_defaults","provider":request.provider_id,"modelId":request.model_id,"thinkingLevel":request.thinking_level}), REQUEST_TIMEOUT)?;
+        serde_json::from_value(value.get("settings").cloned().unwrap_or(Value::Null)).map_err(|_| msg("pi.auth.models_invalid"))
+    }).await.map_err(|_| msg("pi.auth.internal_unavailable"))?
 }
 
 #[tauri::command]
@@ -616,6 +771,10 @@ pub async fn pi_auth_start_login(
 ) -> Result<PiAuthLoginAck, String> {
     tauri::async_runtime::spawn_blocking(move || {
         validate_provider_id(&request.provider_id)?;
+        let auth_type = request.auth_type.as_deref().unwrap_or("oauth");
+        if !matches!(auth_type, "oauth" | "api_key") {
+            return Err(msg("pi.auth.providers_invalid"));
+        }
         let manager = app.state::<PiAuthManager>();
         let paths = app.state::<AppPaths>();
         let _serial = manager
@@ -630,6 +789,7 @@ pub async fn pi_auth_start_login(
             json!({
                 "op": "login",
                 "provider": request.provider_id,
+                "type": auth_type,
                 "method": request.login_method,
             }),
             REQUEST_TIMEOUT,
@@ -807,8 +967,8 @@ mod tests {
     #[test]
     fn parses_provider_list_and_status_replies() {
         let providers: Vec<PiAuthProviderInfo> = serde_json::from_value(json!([
-            { "id": "anthropic", "name": "Anthropic", "oauth": true, "oauthName": "Anthropic (Claude Pro/Max)", "isSubscription": true },
-            { "id": "deepseek", "name": "DeepSeek", "oauth": false, "oauthName": null, "isSubscription": false },
+            { "id": "anthropic", "name": "Anthropic", "oauth": true, "oauthName": "Anthropic (Claude Pro/Max)", "apiKey": true, "isSubscription": true },
+            { "id": "deepseek", "name": "DeepSeek", "oauth": false, "oauthName": null, "apiKey": true, "isSubscription": false },
         ]))
         .unwrap();
         assert_eq!(providers.len(), 2);
@@ -817,6 +977,7 @@ mod tests {
             Some("Anthropic (Claude Pro/Max)")
         );
         assert!(!providers[1].oauth);
+        assert!(providers[1].api_key);
 
         let status: Vec<PiAuthCredentialSummary> = serde_json::from_value(json!([
             { "provider": "anthropic", "authType": "oauth", "expires": 1_900_000_000_000u64 },
@@ -825,6 +986,31 @@ mod tests {
         .unwrap();
         assert_eq!(status[0].auth_type, "oauth");
         assert_eq!(status[1].expires, None);
+    }
+    #[test]
+    fn model_probe_rejects_invalid_targets_and_parses_only_metadata() {
+        let catalog: Vec<PiOfficialModel> = serde_json::from_value(json!([{
+            "id": "fixture-codex", "name": "Fixture", "reasoning": false, "input": ["text"],
+            "contextWindow": null, "maxTokens": null, "inputCost": null, "outputCost": null
+        }])).unwrap();
+        let request = |provider_id: &str, model_id: &str| PiAuthModelTestRequest {
+            provider_id: provider_id.into(), model_id: model_id.into(),
+        };
+        assert!(validate_model_probe(&request("openai-codex", "fixture-codex"), &catalog).is_ok());
+        for (provider, model) in [
+            ("openai", "fixture-codex"), ("openai-codex", "unknown"),
+            ("openai-codex", ""), ("openai-codex", "bad\nmodel"),
+        ] {
+            assert!(validate_model_probe(&request(provider, model), &catalog).is_err());
+        }
+        let result = parse_model_probe("fixture-codex".into(), json!({
+            "ok": true, "latencyMs": 12, "error": null
+        })).unwrap();
+        assert_eq!(serde_json::to_value(result).unwrap(), json!({
+            "modelId": "fixture-codex", "ok": true, "status": null,
+            "latencyMs": 12, "error": null
+        }));
+        assert!(parse_model_probe("fixture-codex".into(), json!({"ok": true})).is_err());
     }
 }
 
@@ -920,10 +1106,63 @@ mod bridge_tests {
         }
     }
 
-    /// 登录 provider 列表必须覆盖 pi 内置的全部 OAuth 通道。
+    #[test]
+    fn model_probe_uses_only_fixture_oauth_and_leaves_settings_untouched() {
+        let Some((paths, fixture)) = fixture_with_dev_runtime() else {
+            return;
+        };
+        let inject = fixture.0.join("probe-fixture.mjs");
+        fs::write(&inject, r#"export default {
+  async createRuntime() {
+    return {
+      async refresh(options) {
+        if (options.allowNetwork !== false) throw new Error("Unexpected network refresh");
+      },
+      getModels(provider) {
+        return provider === "openai-codex" ? ["fixture-codex", "fixture-fail", "fixture-key"].map(id => ({ id, provider })) : [];
+      },
+      async getAuth(model) {
+        if (!model.id.startsWith("fixture-")) throw new Error("Unexpected model");
+        return { source: model.id === "fixture-key" ? "API key" : "OAuth" };
+      },
+      async completeSimple(model, context, options) {
+        if (!model.id.startsWith("fixture-") || context.messages.length !== 1 ||
+            context.messages[0].content !== "ping" || options.maxTokens !== 1 ||
+            !options.signal) throw new Error("Unexpected probe request");
+        if (model.id === "fixture-fail") return { stopReason: "error", errorMessage: "fixture-secret-error" };
+        return { stopReason: "stop", content: [{ type: "text", text: "fixture-secret-output" }] };
+      },
+    };
+  },
+};"#).unwrap();
+        let settings = paths.pi_home.join("settings.json");
+        fs::write(&settings, br#"{"defaultProvider":"other","defaultModel":"other-model"}"#).unwrap();
+        let auth = paths.pi_auth_file();
+        let original_auth = br#"{"openai-codex":{"type":"oauth","access":"fixture-secret-access","refresh":"fixture-secret-refresh","expires":9999999999999}}"#;
+        fs::write(&auth, original_auth).unwrap();
+        let bridge = spawn_bridge(None, &paths, Some(&inject), None).unwrap();
+        for (provider, model) in [("other", "fixture-codex"), ("openai-codex", "missing")] {
+            assert!(bridge.request(json!({"op":"test_model_connection", "provider":provider, "modelId":model}), REQUEST_TIMEOUT).is_err());
+        }
+        let reply = bridge.request(json!({"op":"test_model_connection", "provider":"openai-codex", "modelId":"fixture-codex"}), REQUEST_TIMEOUT).unwrap();
+        assert_eq!(reply["result"]["ok"], json!(true));
+        assert!(reply["result"]["latencyMs"].is_number());
+        assert!(!reply.to_string().contains("fixture-secret"));
+        let failed = bridge.request(json!({"op":"test_model_connection", "provider":"openai-codex", "modelId":"fixture-fail"}), REQUEST_TIMEOUT).unwrap();
+        assert_eq!(failed["result"]["ok"], json!(false));
+        assert_eq!(failed["result"]["error"], json!("Model request failed"));
+        assert!(!failed.to_string().contains("fixture-secret"));
+        assert!(bridge.request(json!({"op":"test_model_connection", "provider":"openai-codex", "modelId":"fixture-key"}), REQUEST_TIMEOUT).is_err());
+        assert_eq!(fs::read(&auth).unwrap(), original_auth);
+        assert_eq!(fs::read(&settings).unwrap(), br#"{"defaultProvider":"other","defaultModel":"other-model"}"#);
+        fs::write(&auth, br#"{"openai-codex":{"type":"api_key","key":"fixture-only"}}"#).unwrap();
+        assert!(bridge.request(json!({"op":"test_model_connection", "provider":"openai-codex", "modelId":"fixture-codex"}), REQUEST_TIMEOUT).is_err());
+    }
+
+    /// 官方入口涵盖已支持的 OAuth 与 API Key 通道，排除非名单供应商。
     #[test]
     #[ignore = "requires the managed Pi SDK; exercised with --include-ignored"]
-    fn bridge_lists_official_oauth_providers() {
+    fn bridge_lists_official_providers() {
         let Some((paths, _fixture)) = fixture_with_dev_runtime() else {
             return;
         };
@@ -949,12 +1188,23 @@ mod bridge_tests {
             assert!(provider.oauth, "provider {id} should expose OAuth login");
             assert!(provider.oauth_name.is_some());
         }
-        assert!(
-            providers
-                .iter()
-                .all(|provider| provider.id != "deepseek" || !provider.oauth),
-            "API-key providers must not offer official login"
-        );
+        for id in [
+            "deepseek",
+            "google",
+            "openai",
+            "moonshotai-cn",
+            "minimax-cn",
+            "zai",
+        ] {
+            let provider = providers.iter().find(|provider| provider.id == id).unwrap();
+            assert!(
+                provider.api_key,
+                "provider {id} should support API key login"
+            );
+        }
+        assert!(!providers
+            .iter()
+            .any(|provider| provider.id == "radius" || provider.id == "mistral"));
     }
 
     /// 模拟 OAuth 登录：替身运行时驱动完整交互（auth_url → manual_code 提示 →
@@ -1059,6 +1309,54 @@ export default {{
         assert!(
             auth.get("fixture-oauth").is_none(),
             "logout must remove the entry"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the managed Pi SDK; exercised with --include-ignored"]
+    fn codex_refresh_uses_managed_oauth_without_returning_tokens() {
+        let Some((paths, fixture)) = fixture_with_dev_runtime() else {
+            return;
+        };
+        let inject = fixture.0.join("codex-refresh.mjs");
+        fs::write(
+            &inject,
+            r#"import { pathToFileURL } from "node:url";
+
+export default {
+  async createRuntime() {
+    const sdk = pathToFileURL(process.env.PI_AUTH_PI_SDK).href;
+    const { AuthStorage } = await import(new URL("core/auth-storage.js", sdk).href);
+    return {
+      async getAuth(provider) {
+        if (provider !== "openai-codex") throw new Error("Unexpected provider");
+        await AuthStorage.create(process.env.PI_AUTH_AUTH_JSON).modify(provider, async () => ({
+          type: "oauth", access: "refreshed-secret-token", refresh: "refresh-secret-token",
+          accountId: "acct-1", expires: Date.now() + 3600_000,
+        }));
+        return { source: "OAuth", auth: { apiKey: "refreshed-secret-token" } };
+      },
+    };
+  },
+};"#,
+        )
+        .unwrap();
+        let bridge = spawn_bridge(None, &paths, Some(&inject), None).unwrap();
+        let missing = bridge
+            .request(json!({"op":"refresh_codex"}), REQUEST_TIMEOUT)
+            .unwrap();
+        assert_eq!(missing["present"], json!(false));
+        fs::write(paths.pi_auth_file(), r#"{"openai-codex":{"type":"oauth","access":"old","refresh":"old","accountId":"acct-1","expires":1}}"#).unwrap();
+        let refreshed = bridge
+            .request(json!({"op":"refresh_codex"}), REQUEST_TIMEOUT)
+            .unwrap();
+        assert_eq!(refreshed["present"], json!(true));
+        assert!(!refreshed.to_string().contains("secret-token"));
+        let auth: Value =
+            serde_json::from_str(&fs::read_to_string(paths.pi_auth_file()).unwrap()).unwrap();
+        assert_eq!(
+            auth["openai-codex"]["access"],
+            json!("refreshed-secret-token")
         );
     }
 

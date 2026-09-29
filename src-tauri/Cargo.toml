@@ -1,6 +1,6 @@
 [package]
 name = "deeppi"
-version = "1.0.0"
+version = "0.1.0"
 description = "Desktop host for Pi Coding Agent and DeepSeek Harness"
 authors = ["DeepPi contributors"]
 edition = "2021"
@@ -17,7 +17,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
- 
+
 [target.'cfg(windows)'.build-dependencies]
 embed-resource = "3"
 
@@ -61,3 +61,5 @@ tauri-plugin-updater = "2"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
+windows = { version = "0.61.3", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Shell"] }
+windows-core = "0.61.2"

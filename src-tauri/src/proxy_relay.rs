@@ -287,10 +287,16 @@ fn relay_connect(
         }
         Upstream::Direct => match dial(&host, port, limits) {
             Ok(target) => {
-                respond_connect_established(&mut client);
                 let Ok(target_reader) = target.try_clone().map(BufReader::new) else {
+                    respond_status(
+                        &mut client,
+                        502,
+                        "Bad Gateway",
+                        "CONNECT target is unusable",
+                    );
                     return;
                 };
+                respond_connect_established(&mut client);
                 tunnel(reader, client, target_reader, target);
             }
             Err(_) => {
@@ -544,7 +550,10 @@ fn read_head_raw<R: BufRead>(reader: &mut R) -> std::io::Result<Option<(u16, Vec
         .and_then(|code| code.parse::<u16>().ok());
     let mut lines = vec![first];
     let mut total = 0usize;
-    while let Some(line) = read_line_bounded(reader, MAX_HEADER_BYTES)? {
+    loop {
+        let Some(line) = read_line_bounded(reader, MAX_HEADER_BYTES)? else {
+            return Err(unexpected_eof());
+        };
         let trimmed = line.trim_end_matches(['\r', '\n']).to_string();
         if trimmed.is_empty() {
             break;
@@ -661,14 +670,35 @@ fn tunnel<R: Read + Send + 'static>(
     mut target_reader: impl Read,
     mut target_writer: TcpStream,
 ) {
+    static NEXT_TUNNEL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let connection = NEXT_TUNNEL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let started = std::time::Instant::now();
+    // Fixed directions, numeric timing and ErrorKind only: never log endpoints or payloads.
+    let observe = move |direction: &'static str, result: std::io::Result<u64>| {
+        let elapsed_ms = started.elapsed().as_millis();
+        match result {
+            Ok(bytes) => log::info!("event=proxy_tunnel connection={connection} direction={direction} outcome=eof elapsed_ms={elapsed_ms} bytes={bytes}"),
+            Err(error) => log::warn!("event=proxy_tunnel connection={connection} direction={direction} outcome=io_error elapsed_ms={elapsed_ms} error_kind={:?} os_code={:?}", error.kind(), error.raw_os_error()),
+        }
+    };
     let upstream = thread::Builder::new()
         .name("proxy-relay-pipe".into())
         .spawn(move || {
             let mut reader = client_reader;
-            let _ = std::io::copy(&mut reader, &mut target_writer);
+            observe(
+                "client_to_upstream",
+                std::io::copy(&mut reader, &mut target_writer),
+            );
             let _ = target_writer.shutdown(Shutdown::Write);
         });
-    let _ = std::io::copy(&mut target_reader, &mut client_writer);
+    if upstream.is_err() {
+        log::warn!("event=proxy_tunnel connection={connection} outcome=pipe_thread_unavailable");
+        return;
+    }
+    observe(
+        "upstream_to_client",
+        std::io::copy(&mut target_reader, &mut client_writer),
+    );
     let _ = client_writer.shutdown(Shutdown::Write);
     if let Ok(handle) = upstream {
         let _ = handle.join();
@@ -886,6 +916,64 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    #[test]
+    #[ignore = "requires PI_RPC_TEST_CLI; local fixtures only, no subscription requests"]
+    fn real_pi_websocket_recovers_through_two_proxy_hops() {
+        let cli = std::env::var_os("PI_RPC_TEST_CLI").expect("Set PI_RPC_TEST_CLI");
+        let upstream = bind_loopback().unwrap();
+        let upstream_port = upstream.local_addr().unwrap().port();
+        let upstream_hits = Arc::new(AtomicUsize::new(0));
+        let counted = upstream_hits.clone();
+        spawn_accept_loop(
+            upstream,
+            move |_| {
+                counted.fetch_add(1, Ordering::SeqCst);
+                Upstream::Direct
+            },
+            Limits::default(),
+        )
+        .unwrap();
+        let relay = bind_loopback().unwrap();
+        let relay_port = relay.local_addr().unwrap().port();
+        let relay_hits = Arc::new(AtomicUsize::new(0));
+        let counted = relay_hits.clone();
+        spawn_accept_loop(
+            relay,
+            move |_| {
+                counted.fetch_add(1, Ordering::SeqCst);
+                Upstream::ViaProxy(format!("http://127.0.0.1:{upstream_port}"))
+            },
+            Limits::default(),
+        )
+        .unwrap();
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap();
+        let output = std::process::Command::new("node.exe")
+            .args(["--test", "scripts/pi-websocket-recovery.node-test.mjs"])
+            .current_dir(root)
+            .env("PI_RPC_TEST_CLI", cli)
+            .env(
+                "PI_TEST_RELAY_PROXY",
+                format!("http://127.0.0.1:{relay_port}"),
+            )
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "Local fixture tests: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(
+            relay_hits.load(Ordering::SeqCst) >= 4,
+            "model requests bypassed relay"
+        );
+        assert!(
+            upstream_hits.load(Ordering::SeqCst) >= 4,
+            "model requests bypassed upstream proxy"
+        );
+    }
+
     /// 起一个单连接的假服务器，返回端口与被连接计数。
     fn spawn_server<F>(handler: F) -> (u16, Arc<AtomicUsize>)
     where
@@ -1099,6 +1187,33 @@ mod tests {
         assert_eq!(
             proxy_seen.lock().unwrap().as_slice(),
             [format!("CONNECT 127.0.0.1:{target_port}")]
+        );
+    }
+
+    #[test]
+    fn incomplete_upstream_connect_head_returns_502() {
+        let (proxy_port, _hits) = spawn_server(|mut stream| {
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            read_head(&mut reader).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 Connection established\r\n")
+                .unwrap();
+        });
+        let (relay_port, _shared) =
+            relay_with(Upstream::ViaProxy(format!("http://127.0.0.1:{proxy_port}")));
+        let mut client = TcpStream::connect((LOOPBACK, relay_port)).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        client
+            .write_all(b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
+            .unwrap();
+        client.shutdown(Shutdown::Write).unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        assert!(
+            response.starts_with("HTTP/1.1 502"),
+            "response: {response:?}"
         );
     }
 

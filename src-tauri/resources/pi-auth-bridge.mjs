@@ -15,6 +15,8 @@
  */
 import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
+import { dirname, join } from "node:path";
+import { existsSync } from "node:fs";
 
 const PROTOCOL = 1;
 const SDK_PATH = process.env.PI_AUTH_PI_SDK;
@@ -113,6 +115,78 @@ function getRuntime() {
   return runtimePromise;
 }
 
+let thinkingHelpersPromise;
+function getThinkingHelpers() {
+  if (!thinkingHelpersPromise) {
+    const packageRoot = dirname(dirname(SDK_PATH));
+    const modulePath = [
+      join(packageRoot, "node_modules/@earendil-works/pi-ai/dist/models.js"),
+      join(dirname(packageRoot), "pi-ai/dist/models.js"),
+    ].find((path) => existsSync(path));
+    if (!modulePath) throw new Error("Managed Pi thinking-level API is unavailable");
+    thinkingHelpersPromise = import(pathToFileURL(modulePath).href);
+  }
+  return thinkingHelpersPromise;
+}
+
+async function modelPreferences(provider) {
+  if (provider !== "openai-codex" || !AUTH_PATH) throw new Error("Unsupported subscription settings provider");
+  const pi = await getRealPi();
+  const home = dirname(AUTH_PATH);
+  const settings = pi.SettingsManager.create(home, home);
+  if (settings.drainErrors().length) throw new Error("Could not read Pi model preferences");
+  return settings;
+}
+
+async function opModelSettings(request) {
+  const provider = String(request.provider ?? "");
+  const settings = await modelPreferences(provider);
+  const runtime = await getRuntime();
+  await runtime.refresh?.({ allowNetwork: false });
+  const models = runtime.getModels(provider) ?? [];
+  const { getSupportedThinkingLevels } = await getThinkingHelpers();
+  const defaultModel = settings.getDefaultProvider() === provider
+    && models.some((model) => model.id === settings.getDefaultModel()) ? settings.getDefaultModel() : null;
+  const modelThinkingLevels = {};
+  for (const model of models) {
+    const level = settings.getModelThinkingLevel(provider, model.id);
+    if (getSupportedThinkingLevels(model).includes(level)) modelThinkingLevels[model.id] = level;
+  }
+  return { defaultProvider: defaultModel ? provider : null, defaultModel, modelThinkingLevels };
+}
+
+let preferencesWrite = Promise.resolve();
+function opSetModelDefaults(request) {
+  const operation = preferencesWrite.then(async () => {
+    const provider = String(request.provider ?? "");
+    const settings = await modelPreferences(provider);
+    const runtime = await getRuntime();
+    await runtime.refresh?.({ allowNetwork: false });
+    const model = (runtime.getModels(provider) ?? []).find((model) => model.id === request.modelId);
+    if (!model) throw new Error("Model is not present in the subscription catalog");
+    const { getSupportedThinkingLevels } = await getThinkingHelpers();
+    const level = request.thinkingLevel ?? null;
+    if (level !== null && !getSupportedThinkingLevels(model).includes(level)) throw new Error("Thinking level is not supported by this model");
+    settings.setDefaultModelAndProvider(provider, model.id);
+    if (level === null) settings.removeModelThinkingLevel(provider, model.id);
+    else settings.setModelThinkingLevel(provider, model.id, level);
+    await settings.flush();
+    if (settings.drainErrors().length) throw new Error("Could not save Pi model preferences");
+    return opModelSettings(request);
+  });
+  preferencesWrite = operation.catch(() => {});
+  return operation;
+}
+
+// DeepPi 官方入口只列出经当前 Pi 运行时支持且面向用户的供应商。
+const OFFICIAL_PROVIDER_IDS = new Set([
+  "anthropic", "openai", "openai-codex", "google", "google-vertex", "github-copilot",
+  "xai", "openrouter", "groq", "cerebras", "together", "fireworks",
+  "opencode", "opencode-go", "deepseek", "kimi-coding", "moonshotai", "moonshotai-cn",
+  "qwen-token-plan", "qwen-token-plan-cn", "qwen-token-plan-individual",
+  "minimax", "minimax-cn", "xiaomi", "zai", "zai-coding-cn",
+]);
+
 function providerInfo(provider) {
   const oauth = provider?.auth?.oauth;
   return {
@@ -120,13 +194,17 @@ function providerInfo(provider) {
     name: String(provider?.name ?? ""),
     oauth: !!oauth,
     oauthName: oauth?.name ?? null,
+    apiKey: !!provider?.auth?.apiKey?.login,
     isSubscription: !!oauth?.isSubscription,
   };
 }
 
 async function opProviders() {
   const runtime = await getRuntime();
-  return runtime.getProviders().map(providerInfo);
+  return runtime.getProviders()
+    .filter((provider) => OFFICIAL_PROVIDER_IDS.has(provider.id) && runtime.getModels(provider.id).length > 0)
+    .map(providerInfo)
+    .filter((provider) => provider.oauth || provider.apiKey);
 }
 
 /** 列出 auth.json 中的凭据（只给元数据与 OAuth 过期时间，不落令牌）。 */
@@ -223,6 +301,7 @@ async function opLogin(id, request) {
     typeof request.method === "string" && request.method.trim() !== ""
       ? request.method.trim()
       : null;
+  const type = request.type === "api_key" ? "api_key" : "oauth";
   const loginId = `login-${id}`;
   const controller = new AbortController();
   activeLogins.set(loginId, { controller, provider });
@@ -232,7 +311,7 @@ async function opLogin(id, request) {
     const runtime = await getRuntime();
     const credential = await runtime.login(
       provider,
-      "oauth",
+      type,
       interactionFor(loginId, controller, preferredMethod),
     );
     send({
@@ -240,7 +319,7 @@ async function opLogin(id, request) {
       login: loginId,
       ok: true,
       provider,
-      credentialType: credential?.type ?? "oauth",
+      credentialType: credential?.type ?? type,
       expires: typeof credential?.expires === "number" ? credential.expires : null,
     });
   } catch (error) {
@@ -264,6 +343,8 @@ async function opModels(request) {
   const provider = String(request.provider ?? "");
   if (!provider) throw new Error("provider is required");
   const runtime = await getRuntime();
+  await runtime.refresh?.({ allowNetwork: false });
+  const { getSupportedThinkingLevels } = await getThinkingHelpers();
   let models = [];
   try {
     models = runtime.getModels(provider) ?? [];
@@ -277,11 +358,66 @@ async function opModels(request) {
       contextWindow: typeof model?.contextWindow === "number" ? model.contextWindow : null,
       maxTokens: typeof model?.maxTokens === "number" ? model.maxTokens : null,
       reasoning: !!model?.reasoning,
+      thinkingLevels: getSupportedThinkingLevels(model),
       input: Array.isArray(model?.input) ? model.input.map(String) : [],
       inputCost: typeof model?.cost?.input === "number" ? model.cost.input : null,
       outputCost: typeof model?.cost?.output === "number" ? model.cost.output : null,
     }))
     .filter((model) => model.id !== "");
+}
+
+/** 只触发 Pi 自有的 OAuth 续期；不把令牌传过桥接协议。 */
+async function opRefreshCodex() {
+  const storage = await getStorage();
+  const stored = storage.readStoredCredential("openai-codex", AUTH_PATH);
+  if (stored?.type !== "oauth") return false;
+  const runtime = await getRuntime();
+  const resolution = await runtime.getAuth("openai-codex");
+  const current = storage.readStoredCredential("openai-codex", AUTH_PATH);
+  if (resolution?.source !== "OAuth" || current?.type !== "oauth") {
+    throw new Error("Managed Codex OAuth is unavailable");
+  }
+  return true;
+}
+
+/** One explicit, sessionless Codex request; no project tools, settings writes, or model output. */
+async function opTestModelConnection(request) {
+  if (request.provider !== "openai-codex") throw new Error("Unsupported subscription provider");
+  const modelId = request.modelId;
+  if (typeof modelId !== "string" || !modelId || modelId.length > 512 || /[\x00-\x1f\x7f]/.test(modelId)) {
+    throw new Error("Invalid subscription model");
+  }
+  const runtime = await getRuntime();
+  await runtime.refresh?.({ allowNetwork: false });
+  const model = (runtime.getModels("openai-codex") ?? []).find((entry) => entry.id === modelId);
+  if (!model || model.provider !== "openai-codex") throw new Error("Model is not present in the subscription catalog");
+  const storage = await getStorage();
+  if (storage.readStoredCredential("openai-codex", AUTH_PATH)?.type !== "oauth") {
+    throw new Error("Managed Codex OAuth is unavailable");
+  }
+  let resolution;
+  try {
+    resolution = await runtime.getAuth(model);
+  } catch {
+    throw new Error("Managed Codex OAuth is unavailable");
+  }
+  if (resolution?.source !== "OAuth" || storage.readStoredCredential("openai-codex", AUTH_PATH)?.type !== "oauth") {
+    throw new Error("Managed Codex OAuth is unavailable");
+  }
+  const started = performance.now();
+  try {
+    const response = await runtime.completeSimple(model, {
+      systemPrompt: "Reply briefly.",
+      messages: [{ role: "user", content: "ping", timestamp: Date.now() }],
+    }, { maxTokens: 1, signal: AbortSignal.timeout(20_000) });
+    return {
+      ok: response?.stopReason === "stop" || response?.stopReason === "length",
+      latencyMs: Math.round(performance.now() - started),
+      error: response?.stopReason === "stop" || response?.stopReason === "length" ? null : "Model request failed",
+    };
+  } catch {
+    return { ok: false, latencyMs: Math.round(performance.now() - started), error: "Model request failed" };
+  }
 }
 
 async function dispatch(id, request) {
@@ -316,11 +452,23 @@ async function dispatch(id, request) {
       }
       break;
     }
+    case "refresh_codex":
+      reply(id, { ok: true, present: await opRefreshCodex() });
+      break;
     case "login":
       await opLogin(id, request);
       break;
     case "models":
       reply(id, { ok: true, models: await opModels(request) });
+      break;
+    case "test_model_connection":
+      reply(id, { ok: true, result: await opTestModelConnection(request) });
+      break;
+    case "model_settings":
+      reply(id, { ok: true, settings: await opModelSettings(request) });
+      break;
+    case "set_model_defaults":
+      reply(id, { ok: true, settings: await opSetModelDefaults(request) });
       break;
     case "respond": {
       const promptId = String(request.promptId ?? "");

@@ -4,9 +4,9 @@ import { SETTINGS_CATEGORIES, nextSettingsCategory, parseTaskLimit, settingsGrou
 describe("settings navigation", () => {
   it("provides the planned categories with stable unique identifiers", () => {
     expect(SETTINGS_CATEGORIES.map((category) => category.id)).toEqual([
-      "general", "appearance", "models", "extensions", "mcp", "skills", "workflows", "dsh", "runtime", "network", "advanced",
+      "general", "appearance", "pi", "models", "extensions", "mcp", "skills", "workflows", "dsh", "runtime", "network", "advanced",
     ]);
-    expect(new Set(SETTINGS_CATEGORIES.map((category) => category.id)).size).toBe(11);
+    expect(new Set(SETTINGS_CATEGORIES.map((category) => category.id)).size).toBe(12);
   });
 
   it("separates Pi and DSH categories into their own navigation groups", () => {
@@ -15,7 +15,7 @@ describe("settings navigation", () => {
     const dshGroup = groups.find((group) => group.label === "DSH (DeepSeek Harness)");
     expect(dshGroup?.categories.map((category) => category.id)).toEqual(["dsh"]);
     const piGroup = groups.find((group) => group.label === "Pi Coding Agent");
-    expect(piGroup?.categories.map((category) => category.id)).toEqual(["models", "extensions", "mcp", "skills", "workflows"]);
+    expect(piGroup?.categories.map((category) => category.id)).toEqual(["pi", "models", "extensions", "mcp", "skills", "workflows"]);
   });
 
   it("supports arrows and boundary keys without capturing unrelated keys", () => {

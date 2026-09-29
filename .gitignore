@@ -17,6 +17,11 @@ vite.config.ts.timestamp-*
 /DEVELOPMENT_PLAN.md
 **/*_RESULTS.md
 **/*_RESULTS.MD
+/.probe-scratch/
+/UI_REDESIGN_PLAN.md
+/NATIVE_ACCEPTANCE.md
+/REVIEW.md
+/SIGNING_APPLICATION.md
 
 # Local editor settings and scaffold-only assets
 /.vscode
@@ -27,3 +32,8 @@ vite.config.ts.timestamp-*
 # pi goal state is local agent data, not part of the source distribution
 /.pi
 .dev-*.log
+
+# Legacy root-level artifacts are not part of the initial source release
+/DeepPi_1.0.0_x64-setup.exe
+/installer.bin
+/pelican-bicycle.svg

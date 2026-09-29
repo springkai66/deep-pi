@@ -1,43 +1,27 @@
 import { describe, expect, it } from "vitest";
-import { deriveSessionTitle, isTruncatedTitleUpgrade, SESSION_TITLE_LIMIT } from "./session-title";
+import { sessionTitleContext } from "./session-title";
 import type { RpcMessage } from "./rpc-state";
 
 const message = (role: string, content: unknown): RpcMessage => ({ role, content } as RpcMessage);
 
-describe("session title derivation", () => {
-  it("uses the first non-empty line of the first user message", () => {
-    expect(deriveSessionTitle([
-      message("user", "\n\n  修复启动流程  \n后续内容"),
-      message("assistant", "好的"),
-    ])).toBe("修复启动流程");
+describe("title model context", () => {
+  it("keeps user and assistant text, excluding tools and private thinking", () => {
+    expect(sessionTitleContext([
+      message("user", [{ type: "text", text: "修复启动" }, { type: "image", data: "secret" }]),
+      message("assistant", [{ type: "thinking", thinking: "private" }, { type: "text", text: "已找到原因" }]),
+      message("toolResult", "ignore"),
+    ])).toEqual([{ role: "user", text: "修复启动" }, { role: "assistant", text: "已找到原因" }]);
   });
 
-  it("keeps long first lines under the limit without cutting the common case", () => {
-    const long = "长".repeat(SESSION_TITLE_LIMIT + 50);
-    const title = deriveSessionTitle([message("user", long)]);
-    expect(title).toBe(`${"长".repeat(SESSION_TITLE_LIMIT)}…`);
-    const short = "有些改动没有进最新的release包，输入框下方显示的AI当前执行状态和用时并没有移动";
-    expect(deriveSessionTitle([message("user", short)])).toBe(short);
+  it("retains the initial goal and most recent turns within the request limit", () => {
+    const context = sessionTitleContext(Array.from({ length: 30 }, (_, index) => message("user", `prompt ${index}`)));
+    expect(context).toHaveLength(16);
+    expect(context[0].text).toBe("prompt 0");
+    expect(context.at(-1)?.text).toBe("prompt 29");
   });
 
-  it("returns null for empty or reply-only sessions", () => {
-    expect(deriveSessionTitle([])).toBeNull();
-    expect(deriveSessionTitle([message("assistant", "hi")])).toBeNull();
-    expect(deriveSessionTitle([message("user", "   ")])).toBeNull();
-  });
-});
-
-describe("truncated auto title upgrades", () => {
-  it("upgrades a legacy ellipsized title when the new title continues it", () => {
-    const legacy = "有些改动没有进最新的release包，输入框下方…";
-    const next = "有些改动没有进最新的release包，输入框下方显示的AI当前执行状态和用时并没有移动";
-    expect(isTruncatedTitleUpgrade(legacy, next)).toBe(true);
-    expect(isTruncatedTitleUpgrade(legacy.replace("…", "..."), next)).toBe(true);
-  });
-
-  it("does not touch manual titles or unrelated renamed titles", () => {
-    expect(isTruncatedTitleUpgrade("手工命名的标题", "新的自动标题")).toBe(false);
-    expect(isTruncatedTitleUpgrade("some title...", "something else entirely")).toBe(false);
-    expect(isTruncatedTitleUpgrade("截断…", "截断")).toBe(false);
+  it("skips empty and unsupported content while bounding individual messages", () => {
+    expect(sessionTitleContext([message("user", "  "), message("toolResult", "result")])).toEqual([]);
+    expect(sessionTitleContext([message("user", "长".repeat(900))])[0].text).toHaveLength(700);
   });
 });

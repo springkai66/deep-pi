@@ -48,6 +48,7 @@ export function createFileWorkspace(ports: WorkspacePorts) {
   const documents = new Map<string, FileDocument>();
   const reserved = new Set<string>();
   const removing = new Set<string>();
+  const mutating = new Set<string>();
   const pendingRefresh = new Set<string>();
   let exiting = false;
   let generationCounter = 0;
@@ -97,7 +98,7 @@ export function createFileWorkspace(ports: WorkspacePorts) {
 
   async function save(id: string, targetPath?: string, exitSave = false): Promise<string | null> {
     const initial = documents.get(id);
-    if (!initial?.state || initial.saving || initial.locked && !exitSave) return null;
+    if (!initial?.state || initial.saving || mutating.has(initial.projectId) || initial.locked && !exitSave) return null;
     const path = targetPath ?? initial.path;
     const target = key(initial.projectId, path);
     const saveAs = targetPath !== undefined;
@@ -168,10 +169,10 @@ export function createFileWorkspace(ports: WorkspacePorts) {
   return {
     get: (id: string) => documents.get(id),
     id: key,
-    busy: () => reserved.size > 0 || removing.size > 0,
+    busy: () => reserved.size > 0 || removing.size > 0 || mutating.size > 0,
     async open(projectId: string, path: string) {
       if (exiting) throw new Error(t("窗口正在退出，请等待当前关闭操作完成。"));
-      if (removing.has(projectId)) throw new Error(t("项目正在移除，请稍后操作。"));
+      if (removing.has(projectId) || mutating.has(projectId)) throw new Error(t("项目文件正在处理，请稍后操作。"));
       const id = key(projectId, path);
       if (reserved.has(id) && !documents.has(id)) throw new Error(t("目标文件正在保存，请稍后打开。"));
       if (!documents.has(id)) {
@@ -208,7 +209,7 @@ export function createFileWorkspace(ports: WorkspacePorts) {
       return [...documents.values()].filter((doc) => !projectId || doc.projectId === projectId).every((doc) => ids.includes(doc.id));
     },
     async prepareExit(): Promise<false | (() => void)> {
-      if (exiting || reserved.size || removing.size) return false;
+      if (exiting || reserved.size || removing.size || mutating.size) return false;
       exiting = true;
       let released = false;
       const release = () => {
@@ -233,8 +234,41 @@ export function createFileWorkspace(ports: WorkspacePorts) {
         return false;
       } catch (error) { release(); throw error; }
     },
+    async mutatePaths(projectId: string, affected: (path: string) => boolean, mutate: () => Promise<unknown>) {
+      if (exiting || removing.has(projectId) || mutating.has(projectId)) return false;
+      const selected = [...documents.values()].filter((doc) => doc.projectId === projectId && affected(doc.path));
+      if (!await prepare(selected.map((doc) => doc.id))) return false;
+      const current = [...documents.values()].filter((doc) => doc.projectId === projectId && affected(doc.path));
+      if (exiting || removing.has(projectId) || mutating.has(projectId)
+        || [...documents.values()].some((doc) => doc.projectId === projectId && doc.saving)
+        || current.length !== selected.length || current.some((doc) => !selected.some((item) => item.id === doc.id)
+        || doc.saving || doc.locked)) return false;
+      const ids = current.map((doc) => doc.id);
+      mutating.add(projectId);
+      for (const id of ids) {
+        const doc = documents.get(id)!;
+        documents.set(id, { ...doc, locked: true, loading: false, generation: ++generationCounter });
+      }
+      publish();
+      try {
+        await mutate();
+        for (const id of ids) { documents.delete(id); pendingRefresh.delete(id); }
+        return true;
+      } finally {
+        for (const id of ids) {
+          const doc = documents.get(id);
+          if (doc) documents.set(id, { ...doc, locked: false });
+        }
+        publish();
+        for (const id of ids) {
+          const doc = documents.get(id);
+          if (doc) { if (!doc.state) void read(id); else drainRefresh(id); }
+        }
+        mutating.delete(projectId);
+      }
+    },
     async removeProject(projectId: string, remove: () => Promise<unknown>) {
-      if (exiting || removing.has(projectId) || [...documents.values()].some((doc) => doc.projectId === projectId && doc.saving)) {
+      if (exiting || removing.has(projectId) || mutating.has(projectId) || [...documents.values()].some((doc) => doc.projectId === projectId && doc.saving)) {
         throw new Error(t("项目文件正在处理，请稍后移除。"));
       }
       removing.add(projectId);

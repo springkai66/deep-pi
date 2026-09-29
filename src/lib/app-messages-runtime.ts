@@ -10,6 +10,16 @@ export const APP_MESSAGES_RUNTIME: Record<string, import("./app-messages").AppMe
     "zh-TW": "上游已有 {latest}；該版本尚未通過 DeepPi 相容驗證，暫時固定 {pinned}",
     en: "Upstream has {latest}; that version has not passed DeepPi compatibility verification, so {pinned} stays pinned for now.",
   },
+  "runtime.dsh.compatibility_warning": {
+    "zh-CN": "新版 DSH 可能与现有插件不兼容，安装前请确认插件支持目标版本。",
+    "zh-TW": "新版 DSH 可能與現有外掛不相容，安裝前請確認外掛支援目標版本。",
+    en: "A newer DSH may be incompatible with existing plugins. Check plugin support before installing.",
+  },
+  "runtime.dsh.npm_only_warning": {
+    "zh-CN": "仅 npm 已发布的 DSH 版本可安装。若 GitHub 版本尚未发布到 npm，暂无法安装。",
+    "zh-TW": "僅 npm 已發佈的 DSH 版本可安裝。若 GitHub 版本尚未發佈到 npm，暫無法安裝。",
+    en: "Only DSH versions published to npm can be installed. A GitHub-only release is not yet installable.",
+  },
   "runtime.install.preparing": {
     "zh-CN": "准备安装 {version}",
     "zh-TW": "準備安裝 {version}",
@@ -166,9 +176,9 @@ export const APP_MESSAGES_RUNTIME: Record<string, import("./app-messages").AppMe
     en: "The Node archive contains an unsafe path.",
   },
   "dsh.repair.official_package": {
-    "zh-CN": "内置 DSH 组件不能通过修复移除，请改用“运行时与更新”修复 DSH 本体",
-    "zh-TW": "內建 DSH 元件不能透過修復移除，請改用「運行時與更新」修復 DSH 本體",
-    en: "Built-in DSH components cannot be removed by repair. Use “Runtime & Updates” to repair DSH itself.",
+    "zh-CN": "内置 DSH 组件不能通过插件移除操作处理，请在“DSH 服务”中管理 DSH 组件",
+    "zh-TW": "內建 DSH 元件不能透過外掛移除操作處理，請在「DSH 服務」管理 DSH 元件",
+    en: "Built-in DSH components cannot be removed as plugins. Manage the DSH component under DSH Service.",
   },
   "dsh.repair.running": {
     "zh-CN": "DSH 正在运行，请先停止 DSH 再执行修复",

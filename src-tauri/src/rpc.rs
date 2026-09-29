@@ -67,6 +67,13 @@ impl RpcManager {
         self.get_for_stop(task_id, run_id)?
             .ok_or_else(|| "RPC run is no longer current".into())
     }
+    pub(crate) fn transport(
+        &self,
+        task_id: &str,
+        run_id: &str,
+    ) -> Result<Arc<RpcTransport>, String> {
+        self.get(task_id, run_id)
+    }
 
     fn get_for_stop(
         &self,
@@ -144,7 +151,8 @@ fn start(app: &AppHandle, request: StartRpcRequest) -> Result<TaskRecord, String
     let manager = app.state::<RpcManager>();
     let pty = app.state::<PtyManager>();
     let store = app.state::<TaskStore>();
-    let maximum = app.state::<SettingsStore>().get()?.max_concurrent_tasks;
+    let settings = app.state::<SettingsStore>().get()?;
+    let maximum = settings.max_concurrent_tasks;
     // 并发额度只统计 AI 正在执行任务的会话：RPC 会话以 status = Running 为准
     //（get_state bridge 随 isStreaming/isCompacting 维护），空闲打开的会话不占额度；
     // TUI 会话无法感知内部忙闲，存活即占额度。额度外另设进程数硬上限。
@@ -196,12 +204,25 @@ fn start(app: &AppHandle, request: StartRpcRequest) -> Result<TaskRecord, String
         }
     };
     let mut command = Command::new(paths.node_runtime()?);
+    if let Err(error) = crate::pi_transport::configure(&mut command, &paths.cache) {
+        let _ = store.finish_if_active(&record.id, TaskStatus::Failed);
+        return Err(error);
+    }
     command
-        .arg(cli)
+        .arg(&cli)
         .args(["--mode", "rpc"])
         .args(arguments)
         .current_dir(&record.project_path)
         .env("PI_CODING_AGENT_DIR", home);
+    if let Err(error) = crate::pi_transport::configure_codex(
+        &mut command,
+        &paths.cache,
+        &cli,
+        &settings.codex_transport,
+    ) {
+        let _ = store.finish_if_active(&record.id, TaskStatus::Failed);
+        return Err(error);
+    }
     command.env_remove("PI_CODING_AGENT_SESSION_DIR");
     // 全局代理注入；手动模式附带 NODE_USE_ENV_PROXY=1，pi 的 fetch 才会走代理。
     crate::proxy::apply_to_command(&mut command);
@@ -308,6 +329,9 @@ fn validate_command(command: &Value) -> Result<&str, String> {
             | "abort"
             | "extension_ui_response"
             | "set_session_name"
+            | "get_fork_messages"
+            | "fork"
+            | "clone"
     ) {
         return Err("RPC command is not supported by this host".into());
     }
@@ -325,6 +349,17 @@ fn validate_command(command: &Value) -> Result<&str, String> {
         if (!has_text && !has_images) || text_too_long {
             return Err("Prompt must contain 1 to 524288 bytes or at least one image".into());
         }
+    }
+    if kind == "fork"
+        && !command["entryId"].as_str().is_some_and(|id| {
+            !id.is_empty()
+                && id.len() <= 128
+                && id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        })
+    {
+        return Err("Fork requires a valid entry ID".into());
     }
     Ok(kind)
 }
@@ -357,7 +392,7 @@ pub async fn rpc_command(
         } else {
             Duration::from_secs(30)
         };
-        let result = transport.request(command, timeout).map_err(|error| {
+        let mut result = transport.request(command, timeout).map_err(|error| {
             if !kind.starts_with("get_")
                 && (error.contains("timed out") || error.contains("process exited"))
             {
@@ -366,6 +401,34 @@ pub async fn rpc_command(
                 error
             }
         })?;
+        if kind == "get_available_models" {
+            let selected = app.state::<SettingsStore>().get()?.codex_selected_models;
+            crate::pi_model_selection::filter_available_models(&mut result, selected.as_deref());
+        }
+        if matches!(kind.as_str(), "fork" | "clone") && result["cancelled"] != true {
+            let state = transport.request(json!({"type":"get_state"}), Duration::from_secs(30))?;
+            let id = state["sessionId"]
+                .as_str()
+                .ok_or("New session ID is missing")?;
+            let path = state["sessionFile"]
+                .as_str()
+                .ok_or("New session path is missing")?;
+            let store = app.state::<TaskStore>();
+            let task = store.get(&task_id)?.ok_or("Task not found")?;
+            if id == task.session_id || !crate::native_pi::valid_session_id(id) {
+                return Err("Fork did not create a valid new session".into());
+            }
+            let mut target = task.clone();
+            target.session_id = id.to_owned();
+            target.session_file = None;
+            crate::native_pi::validate_reported_session(
+                &app.state::<AppPaths>(),
+                &target,
+                id,
+                path,
+            )?;
+            store.rebind_session(&task_id, &task.session_id, id, path)?;
+        }
         if kind == "get_state" {
             app.state::<RpcManager>().get(&task_id, &run_id)?;
             if let (Some(id), Some(path)) =
@@ -609,6 +672,15 @@ mod tests {
         }))
         .is_err());
         assert!(validate_command(&json!({"type":"clear_queue"})).is_ok());
+        assert!(validate_command(&json!({"type":"get_fork_messages"})).is_ok());
+        assert!(validate_command(&json!({"type":"clone"})).is_ok());
+        assert!(validate_command(&json!({"type":"fork","entryId":"message-1"})).is_ok());
+        assert!(validate_command(&json!({"type":"fork","entryId":"../foreign"})).is_err());
+        assert!(validate_command(&json!({"type":"fork","entryId":""})).is_err());
+        assert!(validate_command(
+            &json!({"type":"switch_session","sessionPath":"C:/foreign.jsonl"})
+        )
+        .is_err());
     }
 
     #[test]

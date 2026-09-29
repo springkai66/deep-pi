@@ -1,4 +1,5 @@
 use crate::message::msg;
+use crate::pi_transport::TransportFailure;
 use serde::Serialize;
 use std::{
     collections::VecDeque,
@@ -38,6 +39,11 @@ pub enum DiagnosticCode {
     IncompleteFrame,
     OutputReadFailed,
     HistoryFailed,
+    ModelTransportFailure,
+    ModelStreamTerminated,
+    ModelRetryStart,
+    ModelRetrySucceeded,
+    ModelRetryExhausted,
 }
 
 #[derive(Clone, Serialize)]
@@ -49,6 +55,8 @@ pub struct DiagnosticEvent {
     code: DiagnosticCode,
     count: u64,
     exit_code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transport: Option<TransportFailure>,
 }
 
 #[derive(Clone, Serialize)]
@@ -103,12 +111,43 @@ impl Diagnostics {
 
     // No free-form input is accepted here: child output, paths and identifiers never enter the journal.
     pub fn record(&self, run: u64, code: DiagnosticCode, count: u64, exit_code: Option<i32>) {
+        self.record_event(run, code, count, exit_code, None);
+    }
+
+    pub fn record_transport(&self, run: u64, transport: TransportFailure) {
+        self.record_event(
+            run,
+            DiagnosticCode::ModelTransportFailure,
+            1,
+            None,
+            Some(transport),
+        );
+    }
+
+    fn record_event(
+        &self,
+        run: u64,
+        code: DiagnosticCode,
+        count: u64,
+        exit_code: Option<i32>,
+        transport: Option<TransportFailure>,
+    ) {
         let Ok(mut journal) = self.inner.lock() else {
             return;
         };
         let elapsed_ms = self.elapsed_ms();
+        // Only enum/numeric data can reach durable logs. Never retain child stderr or error text.
+        if code != DiagnosticCode::StderrObserved {
+            let safe = serde_json::json!({"run":run,"code":code,"elapsedMs":elapsed_ms,"count":count,"exitCode":exit_code,"transport":transport});
+            log::info!("event=pi_diagnostic data={safe}");
+        }
         if let Some(last) = journal.events.back_mut() {
-            if last.run == run && last.code == code && last.exit_code == exit_code {
+            if transport.is_none()
+                && last.transport.is_none()
+                && last.run == run
+                && last.code == code
+                && last.exit_code == exit_code
+            {
                 last.count = last.count.saturating_add(count);
                 last.elapsed_ms = elapsed_ms;
                 return;
@@ -123,6 +162,7 @@ impl Diagnostics {
             code,
             count,
             exit_code,
+            transport,
         });
         while journal.events.len() > MAX_EVENTS {
             journal.events.pop_front();
@@ -364,6 +404,96 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"first");
         assert!(write_export(Path::new("relative.json"), b"no").is_err());
         assert!(write_export(&directory.path().join("report.json:stream"), b"no").is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn real_preload_records_socket_cause_without_polluting_rpc_replay() {
+        use std::{
+            process::Command,
+            sync::{Arc, Mutex},
+        };
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(Diagnostics::default());
+        let mut command = Command::new("node.exe");
+        crate::pi_transport::configure(&mut command, root.path()).unwrap();
+        command.args(["-e", r#"
+            const http = require('node:http');
+            process.env.NO_PROXY = process.env.no_proxy = '127.0.0.1';
+            const write = process.stdout.write.bind(process.stdout);
+            const send = value => write(JSON.stringify(value) + '\n');
+            // Model the real Pi RPC output guard after the host preload has run.
+            process.stdout.write = process.stderr.write.bind(process.stderr);
+            const server = http.createServer((req, res) => {
+                req.resume(); res.writeHead(200, {'Content-Type':'text/event-stream'});
+                res.write('data: SECRET_TEST_ONLY\n\n');
+                setTimeout(() => res.destroy(), 50);
+            });
+            server.listen(0, '127.0.0.1', async () => {
+                try {
+                    const response = await fetch('http://127.0.0.1:' + server.address().port + '/codex/responses?SECRET_TEST_ONLY');
+                    await response.text();
+                } catch {}
+                server.close();
+                send({type:'deeppi_transport_diagnostic',transport:{protocol:'sse',phase:'body',cause:'SECRET_TEST_ONLY',durationMs:1}});
+                send({type:'auto_retry_start',attempt:1,maxAttempts:3,errorMessage:'SECRET_TEST_ONLY'});
+                send({type:'auto_retry_end',success:true,attempt:1});
+                let pending = '';
+                process.stdin.on('data', bytes => {
+                    pending += bytes;
+                    const end = pending.indexOf('\n');
+                    if (end < 0) return;
+                    const request = JSON.parse(pending.slice(0, end)); pending = pending.slice(end + 1);
+                    send({type:'response',id:request.id,success:true,data:{ready:true}});
+                });
+            });
+        "#]);
+        let transport =
+            crate::rpc_transport::RpcTransport::spawn_observed(&mut command, store.clone(), |_| {})
+                .unwrap();
+        let replay = Arc::new(Mutex::new(Vec::new()));
+        let collected = replay.clone();
+        transport
+            .subscribe(Box::new(move |event| {
+                collected
+                    .lock()
+                    .unwrap()
+                    .push(event.payload["type"].clone());
+                Ok(())
+            }))
+            .unwrap();
+        assert_eq!(
+            transport
+                .request(
+                    serde_json::json!({"type":"get_state"}),
+                    Duration::from_secs(10)
+                )
+                .unwrap()["ready"],
+            true
+        );
+        assert!(transport.is_open());
+        let report = store.snapshot().unwrap();
+        let failures: Vec<_> = report
+            .events
+            .iter()
+            .filter_map(|event| event.transport.as_ref())
+            .collect();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].cause, crate::pi_transport::Cause::UndErrSocket);
+        assert_eq!(failures[0].phase, crate::pi_transport::Phase::Body);
+        assert!(report
+            .events
+            .iter()
+            .any(|event| event.code == DiagnosticCode::ModelRetrySucceeded));
+        assert!(!serde_json::to_string(&report)
+            .unwrap()
+            .contains("SECRET_TEST_ONLY"));
+        assert!(!replay
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|kind| kind == "deeppi_transport_diagnostic"));
+        transport.shutdown(Duration::from_secs(5)).unwrap();
     }
 
     #[cfg(windows)]

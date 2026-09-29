@@ -35,11 +35,6 @@ const COMPONENT_PI: &str = "pi";
 const COMPONENT_DSH: &str = "dsh";
 const COMPONENT_DSHMARKET: &str = "dshmarket";
 
-/// v1.1 兼容基线：0.1.5-rc.2。启动 URL 带 launch token，Host API 需要先
-/// 用 token 交换签名 cookie（`dsh-auth-…`），且 RPC 端点改为
-/// `POST /api/<namespace>/<method>` 信封（`{args:{…}}`）；宿主已适配。
-const VERIFIED_DSH_VERSION: &str = "0.1.5-rc.2";
-
 /// DeepPi 托管的 Node 版本。Pi、DSH、dshmarket 均由它执行；
 /// 不使用电脑上安装的 Node/npm。版本变更需与兼容矩阵一起验证。
 const MANAGED_NODE_VERSION: &str = "24.13.0";
@@ -53,6 +48,7 @@ pub struct RuntimeComponent {
     pub current_version: Option<String>,
     pub source: &'static str,
     pub available: bool,
+    pub installed: bool,
 }
 
 fn extract_version(output: &str) -> Option<String> {
@@ -153,6 +149,7 @@ pub(crate) fn runtime_status_for_paths(paths: &AppPaths) -> Result<Vec<RuntimeCo
             id: COMPONENT_DEEPPI,
             name: "DeepPi",
             available: true,
+            installed: false,
             current_version: Some(env!("CARGO_PKG_VERSION").to_owned()),
             source: "managed",
         },
@@ -160,6 +157,7 @@ pub(crate) fn runtime_status_for_paths(paths: &AppPaths) -> Result<Vec<RuntimeCo
             id: COMPONENT_NODE,
             name: "Node.js",
             available: node_version.is_some(),
+            installed: paths.runtimes.join("node").is_dir(),
             current_version: node_version,
             source: "managed",
         },
@@ -167,6 +165,7 @@ pub(crate) fn runtime_status_for_paths(paths: &AppPaths) -> Result<Vec<RuntimeCo
             id: COMPONENT_PI,
             name: "Pi Coding Agent",
             available: pi_version.is_some(),
+            installed: paths.runtimes.join("pi").is_dir(),
             current_version: pi_version,
             source: "managed",
         },
@@ -174,6 +173,7 @@ pub(crate) fn runtime_status_for_paths(paths: &AppPaths) -> Result<Vec<RuntimeCo
             id: COMPONENT_DSH,
             name: "DeepSeek Harness",
             available: dsh_version.is_some(),
+            installed: paths.runtimes.join("dsh").is_dir(),
             current_version: dsh_version,
             source: dsh_source,
         },
@@ -181,6 +181,7 @@ pub(crate) fn runtime_status_for_paths(paths: &AppPaths) -> Result<Vec<RuntimeCo
             id: COMPONENT_DSHMARKET,
             name: "DSH Plugin Market",
             available: market_version.is_some(),
+            installed: paths.dshmarket_package().is_dir(),
             current_version: market_version,
             source: "profile",
         },
@@ -283,10 +284,34 @@ fn read_persisted_updates(paths: &AppPaths) -> Option<Vec<RuntimeUpdate>> {
             .into_iter()
             .map(|mut update| {
                 update.stale = true;
+                update.installable = false;
+                update.update_available = false;
                 update
             })
             .collect()
     })
+}
+
+fn merge_offline_updates(
+    fresh: Vec<RuntimeUpdate>,
+    cached: &[RuntimeUpdate],
+) -> Vec<RuntimeUpdate> {
+    fresh
+        .into_iter()
+        .map(|update| {
+            if let Some(error) = update.error.as_ref() {
+                if let Some(mut entry) = cached.iter().find(|entry| entry.id == update.id).cloned()
+                {
+                    entry.error = Some(error.clone());
+                    entry.stale = true;
+                    entry.installable = false;
+                    entry.update_available = false;
+                    return entry;
+                }
+            }
+            update
+        })
+        .collect()
 }
 
 fn write_persisted_updates(paths: &AppPaths, updates: &[RuntimeUpdate]) {
@@ -341,11 +366,22 @@ fn configured_update_proxy() -> Result<Option<String>, String> {
     Ok(crate::proxy::current_url())
 }
 
-/// 按顺序尝试的 npm registry。npmmirror（阿里 CDN）国内最快、最稳，作为主源；
-/// 官方源与腾讯镜像作为备用。镜像与官方同步，仅新版本发布后的短时间内可能滞后。
+fn update_available(current: Option<&str>, latest: &str) -> bool {
+    current.is_none_or(|version| version_is_newer(version, latest))
+}
+
+fn require_latest_version(requested: &str, registry_latest: &str) -> Result<(), String> {
+    if requested == registry_latest {
+        Ok(())
+    } else {
+        Err(msg("runtime.install.not_latest"))
+    }
+}
+
+/// 查询 npm 官方源的 latest；镜像仅在官方源不可用时作为回退。
 const REGISTRY_CANDIDATES: [&str; 3] = [
-    "https://registry.npmmirror.com",
     "https://registry.npmjs.org",
+    "https://registry.npmmirror.com",
     "https://mirrors.cloud.tencent.com/npm/",
 ];
 
@@ -422,13 +458,40 @@ fn fetch_latest_from_registry(
     .map_err(|failure| failure.message)?;
     let value: serde_json::Value = serde_json::from_str(&body)
         .map_err(|error| format!("update response is invalid JSON: {error}"))?;
-    let version = value
+    let version = registry_version_from_metadata(&value, package)?;
+    Ok(version.to_owned())
+}
+
+/// `next` 是 DSH 预发布的 npm 可安装标签；只采信已发布到 npm 的版本。
+/// 插件市场及 Pi 均保持独立的 latest 标签，不借用 DSH 的版本。
+fn registry_version_from_metadata<'a>(
+    value: &'a serde_json::Value,
+    package: &str,
+) -> Result<&'a str, String> {
+    let tags = value
         .get("dist-tags")
-        .and_then(|tags| tags.get("latest"))
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| "update response has no dist-tags".to_string())?;
+    let latest = tags
+        .get("latest")
         .and_then(serde_json::Value::as_str)
         .filter(|version| valid_package_version(version))
         .ok_or_else(|| "update response has no valid latest version".to_string())?;
-    Ok(version.to_owned())
+    let mut selected = latest;
+    if package == "@deepseek-ai/dsh" {
+        for tag in ["next", "rc", "beta"] {
+            if let Some(version) = tags
+                .get(tag)
+                .and_then(serde_json::Value::as_str)
+                .filter(|version| valid_package_version(version) && version.contains('-'))
+            {
+                if version_is_newer(selected, version) {
+                    selected = version;
+                }
+            }
+        }
+    }
+    Ok(selected)
 }
 
 /// 查询包的最新版本：按候选源顺序尝试（npmmirror → 官方 → 腾讯），
@@ -509,6 +572,8 @@ fn dshmarket_is_compatible(paths: &AppPaths) -> bool {
 
 fn component_installable(paths: &AppPaths, component: &str) -> bool {
     runtime_installable(component)
+        && (component == COMPONENT_NODE
+            || (paths.node_runtime().is_ok() && paths.npm_runtime().is_ok()))
         && (component != COMPONENT_DSHMARKET || dshmarket_is_compatible(paths))
 }
 
@@ -856,6 +921,7 @@ pub(crate) fn reconcile_dshmarket_bundle(profile: &Path) -> Result<bool, String>
 fn install_dshmarket(
     paths: &AppPaths,
     version: &str,
+    registry: &'static str,
     cancellation: &Cancellation,
     progress: &dyn RuntimeProgressSink,
 ) -> Result<RuntimeOperationResult, String> {
@@ -877,7 +943,7 @@ fn install_dshmarket(
         paths,
         &staging,
         &spec,
-        Some(REGISTRY_CANDIDATES[0]),
+        Some(registry),
         cancellation,
         Some(progress),
     ) {
@@ -892,47 +958,53 @@ fn install_dshmarket(
         let _ = fs::remove_dir_all(&staging);
         return Err("dshmarket failed its version verification".into());
     }
-    // Install into the profile only after a restorable snapshot exists, including dependencies.
-    let snapshot = crate::snapshot::Snapshot::capture(
-        &[
-            profile.join("package.json"),
-            profile.join("package-lock.json"),
-            profile.join("node_modules"),
-        ],
-        &paths.backups,
-    )?;
-    snapshot.preserve_entry(
-        &package,
-        &backups.join(format!("dshmarket-previous-{}", Uuid::new_v4())),
-    )?;
-    let installed = npm_install_with_fallback(
-        paths,
-        &profile,
-        &spec,
-        Some(REGISTRY_CANDIDATES[0]),
-        cancellation,
-        Some(progress),
-    )
-    .and_then(|()| reconcile_dshmarket_bundle(&profile).map(|_| ()))
-    .and_then(|()| {
-        let installed = fs::read_to_string(paths.dshmarket_manifest())
-            .ok()
-            .and_then(|content| package_version_from_json(&content));
-        if installed.as_deref() == Some(version) {
-            cancellation.commit()
-        } else {
-            Err("dshmarket failed its profile verification".into())
+    // No failure after staging may leave a temporary install behind, including snapshot errors.
+    let result = (|| {
+        let snapshot = crate::snapshot::Snapshot::capture(
+            &[
+                profile.join("package.json"),
+                profile.join("package-lock.json"),
+                profile.join("node_modules"),
+            ],
+            &paths.backups,
+        )?;
+        if let Err(error) = snapshot.preserve_entry(
+            &package,
+            &backups.join(format!("dshmarket-previous-{}", Uuid::new_v4())),
+        ) {
+            snapshot.commit()?;
+            return Err(error);
         }
-    });
+        let installed = npm_install_with_fallback(
+            paths,
+            &profile,
+            &spec,
+            Some(registry),
+            cancellation,
+            Some(progress),
+        )
+        .and_then(|()| reconcile_dshmarket_bundle(&profile).map(|_| ()))
+        .and_then(|()| {
+            let installed = fs::read_to_string(paths.dshmarket_manifest())
+                .ok()
+                .and_then(|content| package_version_from_json(&content));
+            if installed.as_deref() == Some(version) {
+                cancellation.commit()
+            } else {
+                Err("dshmarket failed its profile verification".into())
+            }
+        });
+        if let Err(error) = installed {
+            return Err(snapshot.restore_error(error));
+        }
+        snapshot.commit()?;
+        Ok(RuntimeOperationResult {
+            component_id: "dshmarket".into(),
+            version: version.into(),
+        })
+    })();
     let _ = fs::remove_dir_all(&staging);
-    if let Err(error) = installed {
-        return Err(snapshot.restore_error(error));
-    }
-    snapshot.commit()?;
-    Ok(RuntimeOperationResult {
-        component_id: "dshmarket".into(),
-        version: version.into(),
-    })
+    result
 }
 
 /// 下载 Node 用于校验的 SHA-256 清单/小文件。
@@ -1448,22 +1520,15 @@ fn install_runtime_inner(
     let proxy = configured_update_proxy()?;
     let (registry_latest, registry_used) = latest_package_version(package, proxy.as_deref())?;
     cancellation.check()?;
-    // DSH 固定兼容版本：即使通过 IPC 直接请求，也不能安装未验证的上游版本。
-    if request.component_id == COMPONENT_DSH && request.version != VERIFIED_DSH_VERSION {
-        let requested = &request.version;
-        return Err(msg_with(
-            "runtime.dsh.unsupported",
-            &[
-                ("requested", requested.as_str()),
-                ("verified", VERIFIED_DSH_VERSION),
-            ],
-        ));
-    }
-    if registry_latest != request.version && request.component_id != COMPONENT_DSH {
-        return Err(msg("runtime.install.not_latest"));
-    }
+    require_latest_version(&request.version, &registry_latest)?;
     if request.component_id == COMPONENT_DSHMARKET {
-        let result = install_dshmarket(&paths, &request.version, cancellation, progress)?;
+        let result = install_dshmarket(
+            &paths,
+            &request.version,
+            registry_used,
+            cancellation,
+            progress,
+        )?;
         log::info!(
             "event=runtime_install component={} version={} status=active",
             request.component_id,
@@ -1520,6 +1585,177 @@ fn install_runtime_inner(
         component_id: request.component_id,
         version: request.version,
     })
+}
+
+/// 仅清理 DSH 程序、插件和配置白名单；会话、凭据以及未知用户文件原样保留。
+fn dsh_reset_targets(paths: &AppPaths) -> Result<Vec<PathBuf>, String> {
+    let mut targets = vec![
+        paths.runtimes.join("dsh"),
+        paths.runtimes.join("dshmarket"),
+        paths.dsh_home.join("cordis.patch.yml"),
+    ];
+    let profiles = paths.dsh_home.join("profiles");
+    crate::snapshot::reject_link(&profiles)?;
+    if profiles.is_dir() {
+        for entry in fs::read_dir(&profiles)
+            .map_err(|error| format!("failed to list DSH profiles: {error}"))?
+        {
+            let entry = entry.map_err(|error| format!("failed to list DSH profile: {error}"))?;
+            let profile = entry.path();
+            crate::snapshot::reject_link(&profile)?;
+            if entry
+                .file_type()
+                .map_err(|error| error.to_string())?
+                .is_dir()
+            {
+                for name in [
+                    "package.json",
+                    "package-lock.json",
+                    "pnpm-lock.yaml",
+                    "cordis.patch.yml",
+                    "node_modules",
+                ] {
+                    targets.push(profile.join(name));
+                }
+            }
+        }
+    }
+    Ok(targets)
+}
+
+fn reset_dsh_files(paths: &AppPaths) -> Result<(), String> {
+    let targets = dsh_reset_targets(paths)?;
+    // 先检查所有目标，避免清理到一半才发现链接指向用户的其他目录。
+    for target in &targets {
+        crate::snapshot::reject_link(target)?;
+    }
+    let mut staged: Vec<(PathBuf, PathBuf)> = Vec::new();
+    for target in targets {
+        if !target.exists() {
+            continue;
+        }
+        let name = target
+            .file_name()
+            .ok_or("invalid DSH reset target")?
+            .to_string_lossy();
+        let quarantine = target.with_file_name(format!("{name}-deeppi-reset-{}", Uuid::new_v4()));
+        if let Err(error) = fs::rename(&target, &quarantine) {
+            for (original, moved) in staged.iter().rev() {
+                let _ = fs::rename(moved, original);
+            }
+            return Err(format!(
+                "failed to stage DSH reset for {}: {error}",
+                target.display()
+            ));
+        }
+        staged.push((target, quarantine));
+    }
+    // 所有目标都已从激活路径撤离；删除失败明确报错，不会假装重装成功。
+    for (_, quarantine) in staged {
+        let result = if quarantine.is_dir() {
+            fs::remove_dir_all(&quarantine)
+        } else {
+            fs::remove_file(&quarantine)
+        };
+        result.map_err(|error| {
+            format!(
+                "failed to clear DSH data at {}: {error}",
+                quarantine.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn reset_dsh_installation(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let lock = app.state::<RuntimeOperationLock>();
+        let _guard = lock.acquire()?;
+        let paths = app.state::<AppPaths>();
+        crate::snapshot::Snapshot::ensure_ready(&paths.backups)?;
+        ensure_runtime_idle(
+            COMPONENT_DSH,
+            &app.state::<TaskStore>(),
+            &app.state::<DshManager>(),
+            &app.state::<crate::pty::PtyManager>(),
+        )?;
+        reset_dsh_files(&paths)?;
+        app.state::<UpdateCache>().clear();
+        Ok(())
+    })
+    .await
+    .map_err(|error| format!("DSH reset worker failed: {error}"))?
+}
+
+/// 卸载仅接受托管运行时；DSH 仍沿用保留会话与凭据的白名单清理。
+fn uninstall_runtime_files(paths: &AppPaths, component: &str) -> Result<(), String> {
+    match component {
+        COMPONENT_DSH => reset_dsh_files(paths),
+        COMPONENT_DSHMARKET => {
+            let profile = paths.dsh_profile();
+            let snapshot = crate::snapshot::Snapshot::capture(
+                &[profile.join("package.json"), paths.dshmarket_package()],
+                &paths.backups,
+            )?;
+            match crate::dsh::uninstall_market_from_profile(&profile) {
+                Ok(_) => snapshot.commit(),
+                Err(error) => Err(snapshot.restore_error(error)),
+            }
+        }
+        COMPONENT_NODE | COMPONENT_PI => {
+            if component == COMPONENT_NODE
+                && (paths.runtimes.join("pi").exists()
+                    || paths.runtimes.join("dsh").exists()
+                    || paths.dsh_runtime().is_ok()
+                    || paths.dshmarket_package().exists())
+            {
+                return Err("Uninstall Pi, DSH and dshmarket before uninstalling Node.js".into());
+            }
+            let root = runtime_root(paths, component)?;
+            crate::snapshot::reject_link(&root)?;
+            if !root.exists() {
+                return Ok(());
+            }
+            let quarantine = paths
+                .runtimes
+                .join(format!("{component}-deeppi-uninstall-{}", Uuid::new_v4()));
+            fs::rename(&root, &quarantine)
+                .map_err(|error| format!("failed to stage {component} uninstall: {error}"))?;
+            if let Err(error) = fs::remove_dir_all(&quarantine) {
+                return Err(format!(
+                    "failed to remove {component}: {error}; remaining files are isolated at {}",
+                    quarantine.display()
+                ));
+            }
+            Ok(())
+        }
+        _ => Err("this component cannot be uninstalled".into()),
+    }
+}
+
+#[tauri::command]
+pub async fn uninstall_runtime(app: AppHandle, component_id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let lifecycle = app.state::<RuntimeOperationLock>();
+        let _guard = lifecycle.acquire()?;
+        if !runtime_installable(&component_id) {
+            return Err("this component cannot be uninstalled".into());
+        }
+        let paths = app.state::<AppPaths>();
+        crate::snapshot::Snapshot::ensure_ready(&paths.backups)?;
+        ensure_runtime_idle(
+            &component_id,
+            &app.state::<TaskStore>(),
+            &app.state::<DshManager>(),
+            &app.state::<crate::pty::PtyManager>(),
+        )?;
+        uninstall_runtime_files(&paths, &component_id)?;
+        app.state::<UpdateCache>().clear();
+        Ok(())
+    })
+    .await
+    .map_err(|error| format!("runtime uninstall worker failed: {error}"))?
 }
 
 #[tauri::command]
@@ -1657,46 +1893,22 @@ fn check_runtime_updates_inner(
                 .and_then(|proxy| latest_package_version(package, proxy.as_deref()))
                 .map(|(version, _registry)| version)
             {
-                Ok(registry_latest) => {
-                    // DSH 固定在已验证版本：上游有更新时只提示，不提供安装。
-                    let (latest_version, note) = if component.id == COMPONENT_DSH {
-                        (
-                            VERIFIED_DSH_VERSION.to_owned(),
-                            (registry_latest != VERIFIED_DSH_VERSION).then(|| {
-                                msg_with(
-                                    "runtime.dsh.pinned",
-                                    &[
-                                        ("latest", registry_latest.as_str()),
-                                        ("pinned", VERIFIED_DSH_VERSION),
-                                    ],
-                                )
-                            }),
-                        )
-                    } else {
-                        (registry_latest, None)
-                    };
-                    RuntimeUpdate {
-                        id: component.id.to_owned(),
-                        name: component.name.to_owned(),
-                        // DSH 固定版本：版本不一致（含高于兼容上限）时都提供安装入口，
-                        // 让误装未验证版本的用户能回到已验证版本。
-                        update_available: if component.id == COMPONENT_DSH {
-                            component.current_version.as_deref() != Some(latest_version.as_str())
-                        } else {
-                            component
-                                .current_version
-                                .as_deref()
-                                .is_some_and(|current| version_is_newer(current, &latest_version))
-                        },
-                        current_version: component.current_version,
-                        latest_version: Some(latest_version),
-                        installable: component_installable(&paths, component.id),
-                        can_rollback: runtime_backup_exists(&paths, component.id),
-                        stale: false,
-                        error: None,
-                        note,
-                    }
-                }
+                Ok(registry_latest) => RuntimeUpdate {
+                    id: component.id.to_owned(),
+                    name: component.name.to_owned(),
+                    update_available: update_available(
+                        component.current_version.as_deref(),
+                        &registry_latest,
+                    ),
+                    current_version: component.current_version,
+                    latest_version: Some(registry_latest),
+                    installable: component_installable(&paths, component.id),
+                    can_rollback: runtime_backup_exists(&paths, component.id),
+                    stale: false,
+                    error: None,
+                    note: (component.id == COMPONENT_DSH)
+                        .then(|| msg("runtime.dsh.npm_only_warning")),
+                },
                 Err(error) => {
                     // 失败原因必须落日志：否则事后只能看到 `errors=1` 这样的计数，
                     // 无法区分「哪个组件」「哪个源」「什么原因」（见 #30）。
@@ -1730,7 +1942,7 @@ fn check_runtime_updates_inner(
             "event=runtime_update_check status=offline_cache duration_ms={}",
             started.elapsed().as_millis()
         );
-        return Ok(cached);
+        return Ok(merge_offline_updates(updates, &cached));
     }
     log::info!(
         "event=runtime_update_check status=complete duration_ms={} errors={} available={}",
@@ -1748,12 +1960,204 @@ fn check_runtime_updates_inner(
 }
 
 #[cfg(test)]
+mod dsh_reset_tests {
+    use super::{registry_version_from_metadata, reset_dsh_files};
+    use crate::app_paths::AppPaths;
+
+    #[test]
+    fn dsh_next_is_selected_only_when_npm_publishes_a_newer_prerelease() {
+        let metadata = serde_json::json!({"dist-tags": {"latest":"0.1.7-rc.2", "next":"0.2.0-rc.1", "beta":"0.1.8-beta.1"}});
+        assert_eq!(
+            registry_version_from_metadata(&metadata, "@deepseek-ai/dsh").unwrap(),
+            "0.2.0-rc.1"
+        );
+        let market = serde_json::json!({"dist-tags": {"latest":"1.66.5", "next":"2.0.0-rc.1"}});
+        assert_eq!(
+            registry_version_from_metadata(&market, "dshmarket").unwrap(),
+            "1.66.5"
+        );
+        let stable = serde_json::json!({"dist-tags": {"latest":"0.2.0", "next":"0.2.0-rc.1"}});
+        assert_eq!(
+            registry_version_from_metadata(&stable, "@deepseek-ai/dsh").unwrap(),
+            "0.2.0"
+        );
+        let unpublished = serde_json::json!({"dist-tags": {"latest":"0.1.7-rc.2"}});
+        assert_eq!(
+            registry_version_from_metadata(&unpublished, "@deepseek-ai/dsh").unwrap(),
+            "0.1.7-rc.2"
+        );
+    }
+    #[test]
+    fn uninstall_node_requires_dependents_to_be_removed_first() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_roots(
+            root.path().join("roaming"),
+            root.path().join("local"),
+            root.path().to_path_buf(),
+        )
+        .unwrap();
+        std::fs::create_dir_all(paths.runtimes.join("node")).unwrap();
+        std::fs::create_dir_all(paths.runtimes.join("pi")).unwrap();
+        assert!(super::uninstall_runtime_files(&paths, "node").is_err());
+        assert!(paths.runtimes.join("node").exists());
+        super::uninstall_runtime_files(&paths, "pi").unwrap();
+        super::uninstall_runtime_files(&paths, "node").unwrap();
+        assert!(!paths.runtimes.join("node").exists());
+        assert!(paths.dsh_home.exists());
+    }
+
+    #[test]
+    fn uninstall_node_rejects_orphaned_market_package() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_roots(
+            root.path().join("roaming"),
+            root.path().join("local"),
+            root.path().to_path_buf(),
+        )
+        .unwrap();
+        std::fs::create_dir_all(paths.runtimes.join("node")).unwrap();
+        std::fs::create_dir_all(paths.dshmarket_package()).unwrap();
+        assert!(super::uninstall_runtime_files(&paths, "node").is_err());
+        assert!(paths.runtimes.join("node").exists());
+        super::uninstall_runtime_files(&paths, "dshmarket").unwrap();
+        super::uninstall_runtime_files(&paths, "node").unwrap();
+    }
+
+    #[test]
+    fn uninstall_market_keeps_other_profile_plugins() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_roots(
+            root.path().join("roaming"),
+            root.path().join("local"),
+            root.path().to_path_buf(),
+        )
+        .unwrap();
+        let profile = paths.dsh_profile();
+        std::fs::create_dir_all(paths.dshmarket_package()).unwrap();
+        std::fs::create_dir_all(profile.join("node_modules/another-plugin")).unwrap();
+        std::fs::write(profile.join("package.json"), r#"{"dependencies":{"dshmarket":"1.0.0","another-plugin":"1.0.0"},"dsh":{"profile":{"bundles":["dshmarket","another-plugin"]}}}"#).unwrap();
+        std::fs::write(profile.join("sessions.db"), "history").unwrap();
+        super::uninstall_runtime_files(&paths, "dshmarket").unwrap();
+        assert!(!paths.dshmarket_package().exists());
+        assert!(profile.join("node_modules/another-plugin").exists());
+        assert_eq!(
+            std::fs::read_to_string(profile.join("sessions.db")).unwrap(),
+            "history"
+        );
+        let manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(profile.join("package.json")).unwrap())
+                .unwrap();
+        assert!(manifest["dependencies"].get("dshmarket").is_none());
+        assert_eq!(
+            manifest["dsh"]["profile"]["bundles"],
+            serde_json::json!(["another-plugin"])
+        );
+    }
+
+    #[test]
+    fn uninstall_orphaned_market_keeps_profile_and_other_plugins() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_roots(
+            root.path().join("roaming"),
+            root.path().join("local"),
+            root.path().to_path_buf(),
+        )
+        .unwrap();
+        let profile = paths.dsh_profile();
+        std::fs::create_dir_all(paths.dshmarket_package()).unwrap();
+        std::fs::create_dir_all(profile.join("node_modules/another-plugin")).unwrap();
+        let manifest = profile.join("package.json");
+        let content = r#"{"dependencies":{"another-plugin":"1.0.0"},"dsh":{"profile":{"bundles":["another-plugin"]}}}"#;
+        std::fs::write(&manifest, content).unwrap();
+        super::uninstall_runtime_files(&paths, "dshmarket").unwrap();
+        assert!(!paths.dshmarket_package().exists());
+        assert!(profile.join("node_modules/another-plugin").exists());
+        assert_eq!(std::fs::read_to_string(&manifest).unwrap(), content);
+
+        std::fs::create_dir_all(paths.dshmarket_package()).unwrap();
+        std::fs::remove_file(&manifest).unwrap();
+        super::uninstall_runtime_files(&paths, "dshmarket").unwrap();
+        assert!(!paths.dshmarket_package().exists());
+        assert!(!manifest.exists());
+        assert!(profile.join("node_modules/another-plugin").exists());
+    }
+
+    #[test]
+    fn uninstall_market_with_invalid_manifest_preserves_package() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_roots(
+            root.path().join("roaming"),
+            root.path().join("local"),
+            root.path().to_path_buf(),
+        )
+        .unwrap();
+        let profile = paths.dsh_profile();
+        let market = paths.dshmarket_package();
+        std::fs::create_dir_all(&market).unwrap();
+        let manifest = profile.join("package.json");
+        std::fs::write(&manifest, "invalid json").unwrap();
+        assert!(super::uninstall_runtime_files(&paths, "dshmarket").is_err());
+        assert!(market.is_dir());
+        assert_eq!(std::fs::read_to_string(&manifest).unwrap(), "invalid json");
+    }
+
+    #[test]
+    fn reset_removes_only_dsh_program_plugin_and_config_targets() {
+        let root = std::env::temp_dir().join(format!("deeppi-reset-test-{}", uuid::Uuid::new_v4()));
+        let paths =
+            AppPaths::from_roots(root.join("roaming"), root.join("local"), root.clone()).unwrap();
+        let profile = paths.dsh_profile();
+        let other_profile = paths.dsh_home.join("profiles").join("extra");
+        std::fs::create_dir_all(other_profile.join("node_modules/plugin")).unwrap();
+        std::fs::write(other_profile.join("package-lock.json"), "plugins").unwrap();
+        std::fs::write(other_profile.join("pnpm-lock.yaml"), "plugins").unwrap();
+        std::fs::write(other_profile.join("session-history.json"), "keep").unwrap();
+        std::fs::create_dir_all(profile.join("node_modules/dshmarket")).unwrap();
+        std::fs::create_dir_all(paths.runtimes.join("dsh/current")).unwrap();
+        std::fs::create_dir_all(paths.runtimes.join("pi/current")).unwrap();
+        std::fs::write(profile.join("package.json"), "plugins").unwrap();
+        std::fs::write(profile.join("cordis.patch.yml"), "settings").unwrap();
+        std::fs::write(profile.join("sessions.db"), "history").unwrap();
+        std::fs::write(paths.dsh_home.join("auth.json"), "credentials").unwrap();
+        std::fs::create_dir_all(paths.runtimes.join("dshmarket/backups")).unwrap();
+        std::fs::write(paths.runtimes.join("pi/current/version"), "pi").unwrap();
+        reset_dsh_files(&paths).unwrap();
+        assert!(!profile.join("package.json").exists());
+        assert!(!profile.join("node_modules").exists());
+        assert!(!profile.join("cordis.patch.yml").exists());
+        assert!(!other_profile.join("package-lock.json").exists());
+        assert!(!other_profile.join("pnpm-lock.yaml").exists());
+        assert!(!other_profile.join("node_modules").exists());
+        assert_eq!(
+            std::fs::read_to_string(other_profile.join("session-history.json")).unwrap(),
+            "keep"
+        );
+        assert!(!paths.runtimes.join("dsh").exists());
+        assert!(!paths.runtimes.join("dshmarket").exists());
+        assert_eq!(
+            std::fs::read_to_string(profile.join("sessions.db")).unwrap(),
+            "history"
+        );
+        assert_eq!(
+            std::fs::read_to_string(paths.dsh_home.join("auth.json")).unwrap(),
+            "credentials"
+        );
+        assert_eq!(
+            std::fs::read_to_string(paths.runtimes.join("pi/current/version")).unwrap(),
+            "pi"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        extract_version, package_version_from_json, parse_sha256, runtime_cli_path,
-        runtime_installable, valid_package_version, version_is_newer,
+        component_installable, extract_version, merge_offline_updates, package_version_from_json,
+        parse_sha256, require_latest_version, runtime_cli_path, runtime_installable,
+        update_available, valid_package_version, version_is_newer, RuntimeUpdate,
     };
 
     #[test]
@@ -1777,6 +2181,21 @@ mod tests {
         assert_eq!(parse_sha256(contents, "missing.zip"), None);
         assert_eq!(parse_sha256("not-a-hash  file.zip\n", "file.zip"), None);
         assert_eq!(parse_sha256("short  file.zip\n", "file.zip"), None);
+    }
+
+    #[test]
+    fn packages_wait_for_managed_node_before_offering_install() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = crate::app_paths::AppPaths::from_roots(
+            root.path().join("roaming"),
+            root.path().join("local"),
+            root.path().join("project"),
+        )
+        .unwrap();
+        assert!(component_installable(&paths, "node"));
+        assert!(!component_installable(&paths, "pi"));
+        assert!(!component_installable(&paths, "dsh"));
+        assert!(!component_installable(&paths, "dshmarket"));
     }
 
     #[test]
@@ -1882,6 +2301,47 @@ mod tests {
         assert!(version_is_newer("1.2.3-rc.1", "1.2.3-rc.2"));
         assert!(version_is_newer("1.2.3-rc.2", "1.2.3"));
         assert!(!version_is_newer("1.2.3", "1.2.3-rc.2"));
+    }
+
+    #[test]
+    fn upstream_latest_is_installable_only_when_newer_or_missing() {
+        assert!(update_available(None, "0.1.6"));
+        assert!(update_available(Some("0.1.5-rc.2"), "0.1.6"));
+        assert!(!update_available(Some("0.1.6"), "0.1.6"));
+        assert!(!update_available(Some("0.2.0"), "0.1.6"));
+        assert!(require_latest_version("0.1.6", "0.1.6").is_ok());
+        assert!(require_latest_version("0.1.5-rc.2", "0.1.6").is_err());
+        assert!(require_latest_version("0.2.0", "0.1.6").is_err());
+    }
+
+    #[test]
+    fn offline_component_does_not_hide_fresh_dsh_update() {
+        let record = |id: &str, latest: Option<&str>, error: Option<&str>| RuntimeUpdate {
+            id: id.to_owned(),
+            name: id.to_owned(),
+            current_version: Some("0.1.5".into()),
+            latest_version: latest.map(str::to_owned),
+            update_available: error.is_none(),
+            installable: error.is_none(),
+            can_rollback: false,
+            stale: error.is_some(),
+            error: error.map(str::to_owned),
+            note: None,
+        };
+        let fresh = vec![
+            record("dsh", Some("0.1.6"), None),
+            record("pi", None, Some("offline")),
+        ];
+        let cached = vec![
+            record("dsh", Some("0.1.5"), None),
+            record("pi", Some("0.85.1"), Some("offline")),
+        ];
+        let merged = merge_offline_updates(fresh, &cached);
+        assert_eq!(merged[0].latest_version.as_deref(), Some("0.1.6"));
+        assert!(merged[0].installable);
+        assert!(merged[1].stale);
+        assert_eq!(merged[1].error.as_deref(), Some("offline"));
+        assert!(!merged[1].installable);
     }
 
     #[test]

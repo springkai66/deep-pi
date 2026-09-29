@@ -1,76 +1,30 @@
 # DeepPi 发布流程
 
-v1.0 采用「未签名安装包 + 更新签名」策略发布：Tauri updater（minisign）密钥是 tagged 发布的必需项；Authenticode 代码签名在拿到证书前跳过，配置 Secrets 后自动启用。
+当前正式发布面向 Windows x64。GitHub Actions 的 `Windows Release` 工作流在推送 `v*` 标签时构建 NSIS 与 MSI 安装包，发布版本 Release，并同步 `stable` 更新通道。安装包暂未进行 Authenticode 代码签名；应用更新包使用 Tauri updater 签名。
 
-## 必需的仓库 Secrets
+## 发布前
 
-在 GitHub 仓库 `Settings → Secrets and variables → Actions` 中配置：
+在仓库的 Actions Secrets 中配置：
 
-| Secret | 必需 | 说明 |
-| --- | --- | --- |
-| `TAURI_SIGNING_PRIVATE_KEY` | 是 | updater minisign 私钥内容 |
-| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | 是 | 生成密钥时设置的密码 |
-| `DEEPPI_UPDATER_PUBLIC_KEY` | 是 | minisign 公钥内容，用于 tagged 构建内嵌更新公钥 |
-| `DEEPPI_WINDOWS_CERTIFICATE_BASE64` | 否 | Authenticode PFX 的 Base64；配置后自动签名与验签 |
-| `DEEPPI_WINDOWS_CERTIFICATE_PASSWORD` | 否 | PFX 密码，与上一个 Secret 同时配置 |
+- `TAURI_SIGNING_PRIVATE_KEY`：Tauri updater 私钥；
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`：私钥密码；
+- `DEEPPI_UPDATER_PUBLIC_KEY`：对应公钥。
 
-### 密钥只生成一次，之后所有版本复用
+私钥及密码只保存在安全的本地位置和仓库 Secrets，不提交进 Git。后续版本继续使用同一密钥对，确保已安装应用能够验证更新。Windows Authenticode 证书可选：提供 `DEEPPI_WINDOWS_CERTIFICATE_BASE64` 与 `DEEPPI_WINDOWS_CERTIFICATE_PASSWORD` 后，工作流才会对安装包执行代码签名。
 
-这三个值**不是每次发版都要重新生成的**：公钥会被编译进每个安装包，用于校验后续更新包的签名；私钥则长期用于签名。因此**绝不要为发布新版本重新生成密钥对**——只要换了密钥，用户机器上已安装的旧版本仍持旧公钥，将无法验证新包，**自动更新会永久失效，老用户只能手动重新下载安装**。
+版本号必须在 `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` 和 `src-tauri/Cargo.lock` 中一致；同步更新 `RELEASE_NOTES.md`。
 
-只有这两种情况才需要重新生成（都属于灾难恢复）：
-
-- 私钥泄露（例如误提交进了仓库）；
-- 私钥或其密码丢失（丢失后无法再为已发布版本签名）。
-
-两种情况都要接受「更新链路断裂、用户需手动重装」的代价。因此请把 `$HOME\.deeppi-updater.key`、`.key.password` 与 `.key.pub` 备份到安全位置（密码管理器 + 离线备份），不要只依赖 GitHub Secrets。
-
-### 生成 updater 密钥
+## 验证与发布
 
 ```powershell
-pnpm tauri signer generate -w "$HOME\.deeppi-updater.key" -p "<强密码>" --ci
+pnpm install --frozen-lockfile
+pnpm check
+pnpm test:web
+cargo test --manifest-path src-tauri/Cargo.toml
+pnpm build
+pnpm release:check
 ```
 
-- `TAURI_SIGNING_PRIVATE_KEY` 填 `$HOME\.deeppi-updater.key` 文件的完整内容。
-- `DEEPPI_UPDATER_PUBLIC_KEY` 填命令输出的公钥（同时写入 `$HOME\.deeppi-updater.key.pub`）。
-- 私钥只保存在本地与仓库 Secrets，不提交到仓库；泄露后需要重新生成并发布新版本。
+确认 CI 通过后推送主分支，再创建并推送 `v0.1.0` 标签以触发首发构建。工作流会在全部检查通过后上传 `.exe`、`.msi`、更新签名和 `latest.json`。核验版本 Release 中的安装包，以及 `stable` 通道中的 `latest.json`。后续发布只需按目标版本替换标签号并同步版本文件。
 
-### 启用 Authenticode（拿到证书后）
-
-```powershell
-[Convert]::ToBase64String([IO.File]::ReadAllBytes("certificate.pfx")) | Set-Clipboard
-```
-
-把 Base64 写入 `DEEPPI_WINDOWS_CERTIFICATE_BASE64`，PFX 密码写入
-`DEEPPI_WINDOWS_CERTIFICATE_PASSWORD`。下次 tagged 发布将自动执行 signtool
-签名与验签；未配置时 workflow 会打印未签名提示并继续发布。
-
-### tagged 路径已本地 dry-run 验证
-
-用一次性密钥把 tagged 路径整条跑通过（签名配置生成 → 签名构建 → updater 清单 → 清单校验，全部 PASS），因此配置完 Secrets 后打 tag 不应再出现流程性失败。注意 `scripts/prepare-updater-config.mjs` 与 `scripts/prepare-updater-manifest.mjs` 都依赖 `GITHUB_REPOSITORY`（CI 自动注入）来推导 `stable` 更新源；本地手动复现时需显式设置该环境变量，否则会以「DEEPPI_UPDATER_ENDPOINT is required」失败。
-
-## 发布步骤
-
-1. 更新版本号（三处保持一致）：`package.json`、`src-tauri/tauri.conf.json`、
-   `src-tauri/Cargo.toml`。
-2. 本地验证：`pnpm check && pnpm test:web && cargo test --manifest-path src-tauri/Cargo.toml`，
-   以及 `node scripts/release-check.mjs`。
-3. 提交并推送 `main`，确认 CI 通过。
-4. 打 tag 并推送：`git tag v1.0.0 && git push origin v1.0.0`。
-5. 观察 `Windows Release` workflow：构建 NSIS/MSI、签名 updater 产物、发布
-   Release、同步 `stable` 通道。
-6. 从 Release 下载安装包复核，并确认 `stable` 通道的 `latest.json` 可访问。
-
-## 回滚
-
-`.github/workflows/rollback.yml` 用于回滚 `stable` 更新通道（详见 workflow 输入参数）。应用内回滚由运行时组件级回滚机制处理。
-
-## 申请代码签名证书（非发布门槛）
-
-v1.0 先发未签名安装包；拿到证书后按下面的方式接入，下次 tagged 发布会自动签名。可直接复制的申请表单在 [SIGNING_APPLICATION.md](./SIGNING_APPLICATION.md)。
-
-1. **SignPath.io（开源项目免费）**：DeepPi 是 MIT 许可证的公开仓库，符合 SignPath Foundation 申请条件。流程：注册 → 提交开源申请（项目、仓库、许可证、用途）→ 审核通过后安装 SignPath GitHub App 并配置签名策略；审批通常数天到 2 周。
-2. **Azure Trusted Signing**：约 $9.99/月，需要 Azure 订阅与身份验证，审核 1–2 周，适合无法走开源通道的小团队。
-3. **商业 CA 的 OV/EV 证书**（DigiCert、Sectigo、SSL.com 等）：OV 约 $200–600/年，需要组织实体与电话回拨，签发 1–5 个工作日；EV 审核更严。个人身份通常只能走前两者。
-
-拿到证书后：使用 PFX 时按“启用 Authenticode”配置两个 Secrets 即可；使用 SignPath 时由 SignPath 的 GitHub Action 完成签名，可替换 workflow 中的 signtool 步骤。
+回滚 `stable` 更新通道使用 `.github/workflows/rollback.yml`；它不改变已发布版本的安装包。

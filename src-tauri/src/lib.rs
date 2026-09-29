@@ -34,12 +34,18 @@ mod operation;
 mod package;
 mod pet;
 mod pi_auth;
+mod pi_model_selection;
+mod pi_model_settings;
+mod pi_slash;
+mod pi_transport;
 mod process_runner;
 mod project_edit;
+mod project_file_actions;
 mod project_files;
 mod project_watch;
 mod prompt_enhance;
 mod provider;
+mod provider_quota;
 pub mod proxy;
 pub mod proxy_relay;
 mod pty;
@@ -58,6 +64,7 @@ mod snapshot;
 mod startup;
 mod system_proxy;
 mod task;
+mod task_title;
 mod theme;
 mod tray;
 
@@ -250,6 +257,10 @@ pub fn run() {
                 rpc::subscribe_rpc,
                 rpc::rpc_run_open,
                 rpc::rpc_command,
+                pi_slash::pi_slash_config,
+                pi_slash::pi_slash_changelog,
+                pi_slash::pi_slash_import,
+                pi_slash::pi_slash_share,
                 rpc::rpc_history_open,
                 rpc::rpc_history_page,
                 rpc::rpc_history_close,
@@ -258,6 +269,10 @@ pub fn run() {
                 rpc::save_last_model_choice,
                 rpc::get_last_model_choice,
                 project_files::list_project_files,
+                project_file_actions::create_project_entry,
+                project_file_actions::rename_project_entry,
+                project_file_actions::delete_project_entry,
+                project_file_actions::project_entry_absolute_path,
                 project_watch::start_project_watch,
                 project_watch::stop_project_watch,
                 project_watch::ping_project_watch,
@@ -285,6 +300,7 @@ pub fn run() {
                 dsh::start_dsh,
                 dsh::stop_dsh,
                 dsh::dsh_diagnose,
+                dsh::dsh_plugins,
                 dsh::dsh_repair,
                 package::list_pi_packages,
                 package::package_operation,
@@ -299,6 +315,8 @@ pub fn run() {
                 provider::list_pi_providers,
                 provider::list_provider_models,
                 provider::save_pi_provider,
+                provider::save_pi_provider_model_selection,
+                provider_quota::provider_quota,
                 credentials::delete_provider_credential,
                 credentials::provider_credential_status,
                 credentials::save_provider_credential,
@@ -311,6 +329,12 @@ pub fn run() {
                 pi_auth::pi_auth_cancel,
                 pi_auth::pi_auth_logout,
                 pi_auth::pi_auth_provider_models,
+                pi_auth::pi_auth_test_model_connection,
+                pi_auth::pi_auth_model_settings,
+                pi_auth::pi_auth_set_model_defaults,
+                pi_model_settings::pi_auth_save_model_limits,
+                pi_model_selection::pi_auth_model_selection,
+                pi_model_selection::pi_auth_save_model_selection,
                 agenticskills::agentic_mcp_detail,
                 agenticskills::agentic_skill_detail,
                 agenticskills::agentic_workflow_detail,
@@ -344,6 +368,8 @@ pub fn run() {
                 runtime::check_runtime_updates,
                 runtime::clear_runtime_update_cache,
                 runtime::install_runtime,
+                runtime::reset_dsh_installation,
+                runtime::uninstall_runtime,
                 runtime::rollback_runtime,
                 fonts::list_system_fonts,
                 prompt_enhance::enhance_prompt,
@@ -360,6 +386,7 @@ pub fn run() {
                 task::list_tasks,
                 task::remove_project,
                 task::rename_task,
+                task_title::auto_name_task,
                 task::restore_task,
                 task::touch_project
             ];

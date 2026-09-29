@@ -1,8 +1,9 @@
 <script lang="ts">
   import { messageParts, messageSource } from "./message-parts";
-  import { readableRpcError, type RpcMessage } from "./rpc-state";
+  import type { RpcMessage } from "./rpc-state";
+  import AiError from "./AiError.svelte";
   import type { ChatDetailLevel } from "./settings";
-  import { t, tm } from "$lib/i18n.svelte";
+  import { t } from "$lib/i18n.svelte";
 
   let { message, detail }: { message: RpcMessage; detail: ChatDetailLevel } = $props();
   const parts = $derived(messageParts(message.content).filter((part) => part.kind === "text" || part.kind === "image"));
@@ -23,7 +24,7 @@
     {/each}
   {/if}
   {#if message.role === "assistant" && message.errorMessage}
-    <p role="alert">{tm(readableRpcError(message.errorMessage))}</p>
+    <div role="alert"><AiError raw={message.errorMessage} /></div>
   {/if}
 </div>
 

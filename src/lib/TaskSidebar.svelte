@@ -20,6 +20,7 @@
   import { statusLabels, type Task } from "$lib/task";
   import { matchesSearch } from "$lib/navigation";
   import { shortcutAria } from "$lib/shortcuts";
+  import ProviderQuota from "$lib/ProviderQuota.svelte";
   import { t } from "$lib/i18n.svelte";
 
   interface Props {
@@ -39,6 +40,9 @@
     onAddSession: (project: Project) => void;
     onRemoveProject: (project: Project) => void;
     searchFocusToken?: number;
+    quotaModelKey?: string;
+    quotaSessionKey?: string;
+    quotaVisible?: boolean;
   }
 
   let {
@@ -58,6 +62,9 @@
     onAddSession,
     onRemoveProject,
     searchFocusToken = 0,
+    quotaModelKey = "",
+    quotaSessionKey = "",
+    quotaVisible = false,
   }: Props = $props();
 
   const activeStatuses = ["queued", "running", "waiting"];
@@ -334,6 +341,11 @@
   </section>
 
   {/if}
+  {#if quotaVisible && quotaModelKey}
+    <section class="quota-section" aria-label={t("账户额度")}>
+      <ProviderQuota modelKey={quotaModelKey} sessionKey={quotaSessionKey} visible={quotaVisible} />
+    </section>
+  {/if}
 
   {#if projectMenu}
     <div
@@ -401,4 +413,5 @@
   .search-result { display: flex; flex-direction: column; gap: 5px; width: 100%; padding: 10px 8px; border: 0; border-radius: 4px; text-align: left; background: transparent; color: var(--text); cursor: pointer; overflow-wrap: anywhere; }
   .search-result:hover, .search-result:focus-visible { background: var(--surface-hover); }
   .search-result small { color: var(--text-muted); }
+  .quota-section { margin: 6px 8px; padding: 10px 6px; border-top: 1px solid var(--border); }
 </style>

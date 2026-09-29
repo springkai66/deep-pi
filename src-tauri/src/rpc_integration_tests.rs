@@ -379,3 +379,177 @@ fn real_pi_executes_a_tool_and_restores_the_same_session() {
     resumed.shutdown(Duration::from_secs(5)).unwrap();
     assert_eq!(served.unwrap(), 2);
 }
+
+#[test]
+#[ignore = "requires explicit local subscription credentials and live network"]
+fn live_codex_recovery_does_not_replay_prompts() {
+    let cli = PathBuf::from(std::env::var_os("PI_RPC_LIVE_CLI").expect("live CLI path required"));
+    let home = PathBuf::from(std::env::var_os("PI_RPC_LIVE_HOME").expect("live Pi home required"));
+    let scratch =
+        PathBuf::from(std::env::var_os("PI_RPC_LIVE_SCRATCH").expect("scratch directory required"));
+    assert!(cli.is_file() && home.join("auth.json").is_file());
+    assert!(scratch.starts_with(std::env::var_os("PI_SCRATCH_DIR").expect("scratch root required")));
+    let project = scratch.join("project");
+    let sessions = scratch.join("sessions");
+    fs::create_dir_all(&project).unwrap();
+    fs::create_dir_all(&sessions).unwrap();
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let mut command = Command::new("node.exe");
+    command
+        .arg(cli)
+        .args([
+            "--mode",
+            "rpc",
+            "--no-extensions",
+            "--no-skills",
+            "--no-prompt-templates",
+            "--no-context-files",
+            "--no-themes",
+            "--session-id",
+            &session_id,
+            "--session-dir",
+        ])
+        .arg(&sessions)
+        .args([
+            "--provider",
+            "openai-codex",
+            "--model",
+            "gpt-6-sol",
+            "--thinking",
+            "high",
+        ])
+        .current_dir(&project)
+        .env("PI_CODING_AGENT_DIR", &home)
+        .env_remove("PI_CODING_AGENT_SESSION_DIR")
+        .env("PI_TELEMETRY", "0");
+    let proxy = std::env::var("PI_RPC_LIVE_PROXY").expect("system proxy required");
+    assert!(proxy.starts_with("http://127.0.0.1:") && !proxy.contains('@'));
+    command
+        .env("HTTP_PROXY", &proxy)
+        .env("HTTPS_PROXY", &proxy)
+        .env("NODE_USE_ENV_PROXY", "1")
+        .env("NO_PROXY", "localhost,127.0.0.1,::1,[::1]")
+        .env_remove("ALL_PROXY");
+    let transport = RpcTransport::spawn(&mut command, |_| {}).expect("Pi RPC startup failed");
+    let state = transport
+        .request(json!({"type":"get_state"}), Duration::from_secs(20))
+        .unwrap();
+    assert_eq!(state["model"]["provider"], "openai-codex");
+    assert_eq!(state["model"]["id"], "gpt-6-sol");
+    assert_eq!(state["thinkingLevel"], "high");
+    assert_eq!(state["sessionId"], session_id);
+    println!("LIVE_MODEL=openai-codex/gpt-6-sol THINKING=high");
+    let (events_sender, events) = mpsc::channel::<String>();
+    transport
+        .subscribe(Box::new(move |event| {
+            events_sender
+                .send(event.payload["type"].as_str().unwrap_or("").to_owned())
+                .map_err(|_| "subscriber dropped".to_owned())
+        }))
+        .unwrap();
+    let first = "LIVE_RECOVERY_ONCE";
+    transport
+        .request(
+            json!({"type":"prompt","message":format!("Reply with exactly {first}. No tools.")}),
+            Duration::from_secs(30),
+        )
+        .expect("first prompt acknowledgement missing");
+    let deadline = Instant::now() + Duration::from_secs(180);
+    loop {
+        let next = events
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .expect("first prompt did not settle");
+        assert_ne!(next, "rpc_exit", "Pi exited during first prompt");
+        if next == "agent_settled" {
+            break;
+        }
+    }
+    let messages = transport
+        .request(json!({"type":"get_messages"}), Duration::from_secs(20))
+        .unwrap();
+    let first_user_count = messages["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|message| message["role"] == "user" && message.to_string().contains(first))
+        .count();
+    assert_eq!(first_user_count, 1, "first prompt was replayed");
+    let first_ok = messages["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|message| {
+            message["role"] == "assistant"
+                && message.to_string().contains(first)
+                && message["stopReason"] == "stop"
+        });
+    assert!(
+        first_ok,
+        "first live subscription response did not finish successfully"
+    );
+    println!("LIVE_FIRST=completed USER_MESSAGES=1");
+
+    // Simulate a vanished Webview channel; the process remains open while events are journaled.
+    drop(events);
+    let second = "LIVE_UNKNOWN_ONCE";
+    let ambiguous = transport.request(
+        json!({"type":"prompt","message":format!("Reply with exactly {second}. No tools.")}),
+        Duration::ZERO,
+    );
+    assert!(
+        ambiguous.is_err(),
+        "zero-wait prompt should have an unknown outcome"
+    );
+    assert!(transport.is_open(), "the old RPC run should still be live");
+    let (recovered_sender, recovered) = mpsc::channel::<String>();
+    let dropped = transport
+        .subscribe(Box::new(move |event| {
+            recovered_sender
+                .send(event.payload["type"].as_str().unwrap_or("").to_owned())
+                .map_err(|_| "reconnected subscriber dropped".to_owned())
+        }))
+        .unwrap();
+    assert_eq!(dropped, 0, "journal replay lost events");
+    println!("LIVE_PROBE=open RESUBSCRIBED=true UNKNOWN_ACK=true");
+    let deadline = Instant::now() + Duration::from_secs(180);
+    loop {
+        let next = recovered
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .expect("ambiguous prompt did not settle");
+        assert_ne!(next, "rpc_exit", "Pi exited during ambiguous prompt");
+        if next == "agent_settled" {
+            break;
+        }
+    }
+    let before = transport
+        .request(json!({"type":"get_messages"}), Duration::from_secs(20))
+        .unwrap();
+    let count = |data: &Value, marker: &str| {
+        data["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| message["role"] == "user" && message.to_string().contains(marker))
+            .count()
+    };
+    assert_eq!(
+        count(&before, second),
+        1,
+        "uncertain prompt was not accepted exactly once"
+    );
+    println!("LIVE_UNKNOWN=completed USER_MESSAGES=1 NO_RESEND=true");
+    transport.shutdown(Duration::from_secs(5)).unwrap();
+    assert!(!transport.is_open(), "stopped run must fail liveness probe");
+    let resumed = RpcTransport::spawn(&mut command, |_| {}).expect("session restart failed");
+    let resumed_state = resumed
+        .request(json!({"type":"get_state"}), Duration::from_secs(20))
+        .unwrap();
+    assert_eq!(resumed_state["sessionId"], session_id);
+    let after = resumed
+        .request(json!({"type":"get_messages"}), Duration::from_secs(20))
+        .unwrap();
+    assert_eq!(count(&after, first), 1);
+    assert_eq!(count(&after, second), 1);
+    resumed.shutdown(Duration::from_secs(5)).unwrap();
+    println!("LIVE_RESTART=same_session USER_MESSAGES=1+1");
+}

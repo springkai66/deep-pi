@@ -47,9 +47,9 @@ export const APP_MESSAGES_PROVIDERS: Record<string, import("./app-messages").App
     en: "The official sign-in bridge returned unexpected output.",
   },
   "pi.auth.runtime_missing": {
-    "zh-CN": "托管 Pi 运行时缺少 SDK 入口，请在“运行时与更新”里安装或更新 Pi",
-    "zh-TW": "託管 Pi 執行環境缺少 SDK 入口，請在「執行環境與更新」安裝或更新 Pi",
-    en: "The managed Pi runtime has no SDK entry. Install or update Pi under “Runtime & Updates”.",
+    "zh-CN": "托管 Pi 运行时缺少 SDK 入口，请在“Pi 服务”里安装或更新 Pi",
+    "zh-TW": "託管 Pi 執行環境缺少 SDK 入口，請在「Pi 服務」安裝或更新 Pi",
+    en: "The managed Pi runtime has no SDK entry. Install or update Pi under Pi Service.",
   },
   "pi.auth.bridge_install_failed": {
     "zh-CN": "官方登录桥接安装失败：{error}",

@@ -8,6 +8,7 @@
   import MessageCodeBlock from "./MessageCodeBlock.svelte";
   import MessageDisclosure from "./MessageDisclosure.svelte";
   import FileChangeDiff from "./FileChangeDiff.svelte";
+  import AiError from "./AiError.svelte";
   import { computeLineDiff, extractFileChange, type FileChange, type LineDiff } from "./file-change-diff";
   import { t, tm } from "$lib/i18n.svelte";
   let { message, onOpenLink, detail = "concise", resolvedToolIds }: { message: RpcMessage; onOpenLink: (url: string) => void; detail?: ChatDetailLevel; resolvedToolIds?: Set<string> } = $props();
@@ -82,7 +83,9 @@
       {/if}
     {/each}
   {/if}
-  {#if (message.role === "assistant" || message.role === "toolResult") && message.errorMessage}
+  {#if message.role === "assistant" && message.errorMessage}
+    <div role="alert"><AiError raw={message.errorMessage} /></div>
+  {:else if message.role === "toolResult" && message.errorMessage}
     <p role="alert">{tm(readableRpcError(message.errorMessage))}</p>
   {/if}
   {#if error}<p role="alert">{error}</p>{/if}

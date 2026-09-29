@@ -1,6 +1,6 @@
 <script lang="ts">
   import { invoke as nativeInvoke } from "@tauri-apps/api/core";
-  import { Boxes, LogOut, RefreshCw } from "@lucide/svelte";
+  import { Boxes, LogOut, RefreshCw, Settings2 } from "@lucide/svelte";
   import { notifyModelsChanged } from "./model-config-sync";
   import { t } from "$lib/i18n.svelte";
   import {
@@ -16,7 +16,7 @@
     onError: (error: unknown) => void;
     /** 父组件在登录/退出后递增该值，用于刷新列表。 */
     refreshToken?: number;
-    /** 查看该官方供应商的模型目录（只读）。 */
+    /** 打开已连接供应商的模型目录；OpenAI 订阅同时提供传输设置。 */
     onViewModels?: (providerId: string, providerName: string) => void;
   }
 
@@ -37,9 +37,12 @@
     void refresh();
   });
 
-  /// 只列出已登录的官方供应商：默认空，创建（=完成登录）后才出现在这里。
+  /// 只展示已配置的官方供应商（OAuth 或 Pi 托管的 API Key）。
   const signedInProviders = $derived(
-    providers.filter((provider) => credentials[provider.id]?.authType === "oauth"),
+    providers.filter((provider) => {
+      const type = credentials[provider.id]?.authType;
+      return (type === "oauth" && provider.oauth) || (type === "api_key" && provider.apiKey);
+    }),
   );
 
   function stateLabel(providerId: string): string {
@@ -47,7 +50,7 @@
     if (credential?.authType === "oauth") {
       return formatValidityText(validityParts(credential.expires), t);
     }
-    return t("未登录");
+    return credential?.authType === "api_key" ? t("API Key 已配置") : t("未登录");
   }
 
   async function refresh() {
@@ -57,7 +60,7 @@
         invoke<PiAuthProviderInfo[]>("pi_auth_providers"),
         invoke<PiAuthStatusResponse>("pi_auth_status"),
       ]);
-      providers = providerList.filter((provider) => provider.oauth);
+      providers = providerList;
       credentials = Object.fromEntries(
         status.credentials.map((credential) => [credential.provider, credential]),
       );
@@ -74,7 +77,7 @@
     notice = "";
     try {
       await invoke("pi_auth_logout", { request: { providerId } });
-      notice = t("{provider} 已退出官方登录", { provider: providerId });
+      notice = t("{provider} 已移除官方凭据", { provider: providerId });
       await refresh();
       notifyModelsChanged();
     } catch (error) {
@@ -97,7 +100,7 @@
     </button>
   </div>
   <p class="auth-hint">
-    {t("用官方账号订阅（Claude Pro/Max、ChatGPT Plus/Pro 等）登录，登录后 pi 任务无需 API Key 即可使用对应模型。")}
+    {t("官方供应商可通过账号授权或 API Key 连接；凭据由 DeepPi 托管的 pi 运行时保存。")}
   </p>
   {#if signedInProviders.length === 0}
     <p class="auth-empty">{t("还没有官方供应商，点击右上角「新建 Provider」添加")}</p>
@@ -106,18 +109,22 @@
       {#each signedInProviders as provider (provider.id)}
         <div class="auth-row">
           <div class="auth-name">
-            <strong>{provider.name}</strong>
-            <small>{provider.oauthName ?? provider.id}{provider.isSubscription ? t(" · 订阅") : ""}</small>
+            {#if provider.id === "openai-codex" && onViewModels}
+              <button class="auth-provider-link" type="button" disabled={busy}
+                aria-label={t("打开 {name} 订阅设置", { name: provider.name })}
+                onclick={() => onViewModels?.(provider.id, provider.name)}>{provider.name}</button>
+            {:else}<strong>{provider.name}</strong>{/if}
+            <small>{credentials[provider.id]?.authType === "oauth" ? provider.oauthName ?? provider.id : "API Key"}{provider.isSubscription && credentials[provider.id]?.authType === "oauth" ? t(" · 订阅") : ""}</small>
           </div>
           <span class="auth-state signed">{stateLabel(provider.id)}</span>
           {#if onViewModels}
             <button class="auth-button" type="button" disabled={busy}
               onclick={() => onViewModels?.(provider.id, provider.name)}>
-              <Boxes size={13} />{t("模型")}
+              {#if provider.id === "openai-codex"}<Settings2 size={13} />{t("设置")}{:else}<Boxes size={13} />{t("模型")}{/if}
             </button>
           {/if}
           <button class="auth-button" type="button" disabled={busy} onclick={() => void logout(provider.id)}>
-            <LogOut size={13} />{t("退出登录")}
+            <LogOut size={13} />{t("移除凭据")}
           </button>
         </div>
       {/each}
@@ -141,6 +148,9 @@
   .auth-row:hover { border-color: var(--border-strong); background: var(--surface-hover); }
   .auth-name { flex: 1; min-width: 0; display: grid; gap: 2px; text-align: left; }
   .auth-name strong { overflow: hidden; color: var(--text-strong); font-size: 12px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+  .auth-provider-link { min-width: 0; padding: 0; border: 0; background: transparent; color: var(--text-strong); font: inherit; font-size: 12px; font-weight: 650; text-align: left; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .auth-provider-link:hover:not(:disabled) { text-decoration: underline; }
+  .auth-provider-link:disabled { cursor: default; opacity: .45; }
   .auth-name small { overflow: hidden; color: var(--text-muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
   .auth-state { flex-shrink: 0; color: var(--text-muted); font-size: 10px; }
   .auth-state.signed { color: var(--accent); }

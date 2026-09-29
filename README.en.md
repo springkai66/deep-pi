@@ -1,62 +1,31 @@
 # DeepPi
 
-A Windows desktop host that brings Pi Coding Agent and DeepSeek Harness (DSH) into one application: run several Pi tasks in parallel (native terminal or structured chat), use the native DSH UI, browse and edit project files, review Git changes and commit/push, install Pi extensions, manage model credentials, and upgrade the runtimes in-app.
-
-No need to install Node, Pi, or DSH beforehand — DeepPi manages its own runtimes and does not interfere with anything already installed on the machine.
-
-## Download and install
-
-Download the latest `DeepPi_<version>_x64-setup.exe` (NSIS) from [GitHub Releases](https://github.com/springkai66/deep-pi/releases) and run it.
-
-- Requires Windows 10/11 x64. WebView2 is installed by the setup bootstrapper.
-- The installer is not Authenticode-signed yet. Windows SmartScreen may warn on first launch: choose "More info" → "Run anyway", after verifying the download source.
-- Uninstall from "Settings → Apps", or run the uninstaller in the install directory.
-
-## Getting started
-
-1. **Add model credentials or sign in with an official account** — open "Settings → Models & credentials" and either enter a provider API key (keys are kept in Windows Credential Manager, never written to a config file) or use "Official account login" to authorize subscription accounts such as Claude Pro/Max or ChatGPT Plus/Pro directly in DeepPi; the OAuth tokens are written to DeepPi's managed Pi directory only.
-2. **Open a project** — click "Add project directory" in the left rail and pick a code directory.
-3. **Start a task** — click "New Pi task" to create a terminal or chat task and start working with Pi.
-
-The managed runtimes (Node, Pi, DSH) are installed on demand from official distributions the first time a feature needs them; the confirmation dialog states which version will be downloaded.
+DeepPi is a desktop workspace for development with [Pi Coding Agent](https://github.com/badlogic/pi-mono) and DeepSeek Harness (DSH). It organizes agent sessions around projects and tasks, with integrated file, Git, model, and runtime management.
 
 ## Features
 
-- **Pi tasks** — several tasks in parallel; terminal and chat modes can be switched at any time and share the same session, so context is never lost.
-- **DSH workspace** — the native DSH Web UI loaded in the same window, with sessions, settings, and the plugin marketplace.
-- **Files** — file tree, file-name and content search, read-only preview, built-in editor, diff comparison, and recovery copies.
-- **Git** — change classification, diff view, explicit stage/unstage, commit, push, and remote verification; never force-pushes by default.
-- **Pi extensions** — search, install, update, and uninstall Pi packages, confirming the source and version first.
-- **Model credentials** — protocol, base URL, headers, proxy, and connection test; also supports official-account OAuth sign-in (Claude Pro/Max, ChatGPT Plus/Pro, OpenRouter, GitHub Copilot, Kimi, xAI) with visible status and expiry, sharing the same `auth.json` as pi's native `/login`.
-- **Runtimes & updates** — upgrade Node / Pi / DSH / dshmarket in-app, keeping the previous version for rollback.
+- **Parallel tasks:** Run multiple Pi sessions and switch between structured chat and the native terminal; use DSH in a separate workspace.
+- **Project workflow:** Browse, search, and edit files; inspect diffs; stage, commit, and push Git changes.
+- **Models and extensions:** Configure model providers and credentials; manage Pi extensions, Skills, and MCP services.
+- **Managed runtimes:** Install and manage Node.js, Pi, and DSH on demand without configuring a global environment.
+- **Supporting tools:** Task board, priority checklist, themes, and multilingual UI.
 
-## Known limitations (v1.0)
+## Install and get started
 
-- The installer is not Authenticode-signed yet; an open-source signing application is in progress.
-- Local Pi/DSH/Node/npm installations are not read; DeepPi only uses its own managed runtimes and configuration directory (Node is installed by the app from the official distribution and verified against SHA-256).
-- DSH runs the verified `0.1.5-rc.2`: the host adapts its launch-token auth and the `/api/<ns>/<method>` RPC envelope; upstream updates are still gated behind compatibility verification.
-- Host shortcuts do not work while the DSH child view has focus (see [KEYBOARD_SHORTCUTS.md](./KEYBOARD_SHORTCUTS.md)).
-- **Content** search in the file sidebar depends on `rg.exe` (ripgrep) being available on the system `PATH`: DeepPi neither bundles nor auto-installs it, and shows a "ripgrep not found" message in that mode when it is missing (file-name search is unaffected; see [TROUBLESHOOTING.md](./TROUBLESHOOTING.md)).
-- The DeepPi self-update pipeline is configured, but the pipeline currently ships v1.0.3; real cross-version self-update and rollback are being validated with the 1.0.3 release.
-- The 8-hour soak, very large repositories and parts of the native interaction acceptance are still open (see [NATIVE_ACCEPTANCE.md](./NATIVE_ACCEPTANCE.md)).
+The current release targets **Windows 10/11 x64**. Download `DeepPi_0.1.0_x64-setup.exe` or the MSI installer from [Releases](https://github.com/springkai66/deep-pi/releases). The installer downloads WebView2 when needed. The installer is not yet Windows code-signed; download it from this repository's Release page and verify the source.
 
-## Next steps
+On first launch, configure a model provider or sign in with an official account, add a project directory, and create a Pi task. Managed runtimes are installed when needed and remain separate from existing local Node.js / Pi / DSH installations.
 
-- Add macOS support: adapt desktop windows, managed runtimes, credential storage, and terminals; generate DMG installers for Apple Silicon and Intel Macs, integrate GitHub Actions builds and Release publishing, and complete code signing, notarization, and installation validation.
+## Roadmap
+
+- **macOS support:** Adapt desktop capabilities and distribution.
+- **WeChat interaction:** Explore task notifications and interactive requests through WeChat.
+- **Remote access:** Explore secure access to workspace capabilities from other devices.
+
+These are planned directions, **not features of the current release**.
 
 ## Development
 
-Build, test, and release procedures are documented in [DEVELOPMENT.md](./DEVELOPMENT.md) and [RELEASING.md](./RELEASING.md).
+DeepPi uses Tauri v2, Rust, and SvelteKit. After installing dependencies, start the desktop development environment with `pnpm dev:desktop`. See [DEVELOPMENT.md](./DEVELOPMENT.md) and [RELEASING.md](./RELEASING.md) for build and release instructions.
 
-## Documentation
-
-- [Keyboard shortcuts](./KEYBOARD_SHORTCUTS.md)
-- [Troubleshooting](./TROUBLESHOOTING.md)
-- [Pi RPC compatibility baseline](./RPC_COMPATIBILITY.md)
-- [Security](./SECURITY.md)
-- [Release process](./RELEASING.md)
-- [中文 README](./README.md)
-
-## License
-
-MIT
+中文：[README.md](./README.md) · License: [MIT](./LICENSE)

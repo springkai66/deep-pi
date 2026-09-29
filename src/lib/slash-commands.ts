@@ -13,14 +13,11 @@ export interface SlashCommand {
   description: string;
   argumentHint?: string;
   source: "builtin" | "extension" | "prompt" | "skill";
-  /** DeepPi 能直接执行；false 表示仅 pi 终端兼容模式可用。 */
+  /** 是否有 DeepPi 图形界面处理入口。 */
   available: boolean;
 }
 
-/**
- * pi 内置命令（对齐 pi 的 BUILTIN_SLASH_COMMANDS）：
- * available 的命令由 DeepPi 映射到 RPC/界面动作；其余标注仅终端模式可用。
- */
+/** Pi 0.85.1 内置命令（对齐托管包的 core/slash-commands.js）。 */
 export const BUILTIN_SLASH_COMMANDS: SlashCommand[] = [
   { name: "compact", description: "手动压缩会话上下文", source: "builtin", available: true },
   { name: "model", description: "选择本会话使用的模型", argumentHint: "[provider/model]", source: "builtin", available: true },
@@ -30,22 +27,58 @@ export const BUILTIN_SLASH_COMMANDS: SlashCommand[] = [
   { name: "session", description: "显示会话信息与用量", source: "builtin", available: true },
   { name: "export", description: "导出会话为 HTML", source: "builtin", available: true },
   { name: "tree", description: "打开对话历史跳转", source: "builtin", available: true },
-  { name: "new", description: "开始新会话（DeepPi 请用「新建任务」按钮）", source: "builtin", available: false },
-  { name: "settings", description: "打开设置（DeepPi 请用左侧设置按钮）", source: "builtin", available: false },
-  { name: "resume", description: "恢复其他会话（仅终端兼容模式可用）", source: "builtin", available: false },
-  { name: "scoped-models", description: "启用/禁用轮换模型（仅终端兼容模式可用）", source: "builtin", available: false },
-  { name: "import", description: "从 JSONL 导入并恢复会话（仅终端兼容模式可用）", source: "builtin", available: false },
-  { name: "share", description: "将会话分享为私密 GitHub Gist（仅终端兼容模式可用）", source: "builtin", available: false },
-  { name: "changelog", description: "查看更新日志（仅终端兼容模式可用）", source: "builtin", available: false },
-  { name: "hotkeys", description: "查看快捷键（仅终端兼容模式可用）", source: "builtin", available: false },
-  { name: "fork", description: "从历史消息创建会话分支（仅终端兼容模式可用）", source: "builtin", available: false },
-  { name: "clone", description: "复制当前会话（仅终端兼容模式可用）", source: "builtin", available: false },
-  { name: "trust", description: "保存项目信任决定（仅终端兼容模式可用）", source: "builtin", available: false },
-  { name: "login", description: "配置 Provider 登录（仅终端兼容模式可用）", source: "builtin", available: false },
-  { name: "logout", description: "移除 Provider 登录（仅终端兼容模式可用）", source: "builtin", available: false },
-  { name: "reload", description: "重新加载扩展/技能/提示词（仅终端兼容模式可用）", source: "builtin", available: false },
-  { name: "quit", description: "退出应用（仅终端兼容模式可用）", source: "builtin", available: false },
+  { name: "new", description: "开始新会话", source: "builtin", available: true },
+  { name: "settings", description: "打开设置", source: "builtin", available: true },
+  { name: "resume", description: "恢复其他会话", source: "builtin", available: true },
+  { name: "scoped-models", description: "启用/禁用轮换模型", source: "builtin", available: true },
+  { name: "import", description: "从 JSONL 导入并恢复会话", source: "builtin", available: true },
+  { name: "share", description: "将会话分享为私密 GitHub Gist", source: "builtin", available: true },
+  { name: "changelog", description: "查看更新日志", source: "builtin", available: true },
+  { name: "hotkeys", description: "查看快捷键", source: "builtin", available: true },
+  { name: "fork", description: "从历史消息创建会话分支", source: "builtin", available: true },
+  { name: "clone", description: "复制当前会话", source: "builtin", available: true },
+  { name: "trust", description: "保存项目信任决定", source: "builtin", available: true },
+  { name: "login", description: "配置 Provider 登录", source: "builtin", available: true },
+  { name: "logout", description: "移除 Provider 登录", source: "builtin", available: true },
+  { name: "reload", description: "重新加载扩展/技能/提示词", source: "builtin", available: true },
+  { name: "quit", description: "退出应用", source: "builtin", available: true },
 ];
+export const HOST_SLASH_COMMANDS = new Set([
+  "new", "settings", "login", "logout", "reload", "quit", "resume", "scoped-models",
+  "changelog", "hotkeys", "import", "share", "trust",
+]);
+
+export function slashCommandRoute(name: string, piCommands: PiCommand[]): "host" | "rpc" | "prompt" | "unknown" {
+  if (BUILTIN_SLASH_COMMANDS.some((command) => command.name === name)) {
+    return HOST_SLASH_COMMANDS.has(name) ? "host" : "rpc";
+  }
+  return piCommands.some((command) => command.name === name) ? "prompt" : "unknown";
+}
+
+export async function runHostSlash(action: () => Promise<boolean>, onError: (error: unknown) => void): Promise<"handled" | "blocked"> {
+  try {
+    return await action() ? "handled" : "blocked";
+  } catch (error) {
+    onError(error);
+    return "blocked";
+  }
+}
+
+export function supportsProviderLogin(providerId: string, providers: { id: string; oauth: boolean; apiKey?: boolean }[]): boolean {
+  return providers.some((provider) => (provider.oauth || provider.apiKey) && provider.id === providerId);
+}
+
+export async function syncSessionRebound(rebound: () => Promise<void>, reconnect: () => void, onError: (error: unknown) => void): Promise<boolean> {
+  try {
+    await rebound();
+    return true;
+  } catch (error) {
+    onError(error);
+    return false;
+  } finally {
+    reconnect();
+  }
+}
 
 /** 解析整条草稿是否为 `/name args` 形式；纯文本或空返回 null。 */
 export function parseSlashCommand(text: string): { name: string; args: string } | null {

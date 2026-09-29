@@ -9,6 +9,8 @@
   import { DEFAULT_APP_SETTINGS, cssAppFontFamily, cssSessionFontFamily, type AppSettings } from "../../src/lib/settings";
   import type { SettingsCategory } from "../../src/lib/settings-navigation";
   import type { ProviderRecord } from "../../src/lib/provider";
+  import { onModelsChanged } from "../../src/lib/model-config-sync";
+  import type { PiOfficialModel, PiModelDefaults } from "../../src/lib/pi-auth";
 
   /** 与 +page.svelte 的 showError 一致：记录到导航栏并弹一条浮字提示。 */
   function reportError(cause: unknown) {
@@ -21,12 +23,101 @@
   let error = $state("");
   let saves = $state(0);
   let changes = $state(0);
+  let modelChangeReason = $state("");
+  $effect(() => onModelsChanged((reason) => { modelChangeReason = reason; }));
   let action = $state("");
-  let provider = $state<ProviderRecord | null>(null);
+  let listedScope = $state("");
+  let provider = $state<ProviderRecord | null>(new URLSearchParams(location.search).has("custom") ? {
+    id: "fixture-provider", name: "Fixture Provider", api: "openai-completions", baseUrl: "https://example.invalid/v1",
+    headers: {}, proxy: null, models: [{
+      id: "fixture-a", name: "Fixture A", reasoning: false, input: ["text"], contextWindow: 128000,
+      maxTokens: 8192, thinkingLevels: [], cost: null, api: null,
+    }],
+  } : null);
+  let selectionWrites = $state(0);
+  let modelProbes = $state(0);
+  let lastSelection = $state("");
+  let customSaveFailures = new URLSearchParams(location.search).has("custom-save-fails") ? 1 : 0;
+  const fixtureProjectPath = new URLSearchParams(location.search).has("project") ? "F:/fixture-project" : null;
+  let installedPackages = $state([{ source: "npm:pi-demo@1.0.0", autoload: true, environment: "managed" as const }]);
+  let installedServers = $state<Array<{ name: string; config: Record<string, unknown> }>>([{ name: "local-mcp", config: { url: "https://example.com/mcp" } }]);
+  let installedSkills = $state([{ name: "local-skill", description: "Project helper", path: "skills/local-skill/SKILL.md" }]);
+  const catalogModels: PiOfficialModel[] = [
+    { id: "fixture-reasoning", name: "Reasoning model", contextWindow: 128000, maxTokens: 8192, reasoning: true, thinkingLevels: ["off", "low", "high"], input: ["text"], inputCost: null, outputCost: null },
+    { id: "fixture-fast", name: "Fast model", contextWindow: 64000, maxTokens: 4096, reasoning: false, thinkingLevels: ["off"], input: ["text"], inputCost: null, outputCost: null },
+  ];
+  let subscriptionModels = $state<PiOfficialModel[]>(catalogModels.map((model) => ({ ...model })));
+  let subscriptionDefaults = $state<PiModelDefaults>({ defaultProvider: null, defaultModel: null, modelThinkingLevels: {} });
+  let chosenModelIds = $state<string[] | null>(null);
+  let selectionReadFailures = new URLSearchParams(location.search).has("selection-read-fails") ? 1 : 0;
+  let selectionSaveFailures = new URLSearchParams(location.search).has("selection-save-fails") ? 1 : 0;
   const command: typeof invoke = async <T,>(name: string, args?: Parameters<typeof invoke>[1]): Promise<T> => {
+    if (["list_pi_packages", "list_mcp_servers", "list_skills", "list_installed_workflows"].includes(name)) {
+      listedScope = (args as { scope: string }).scope;
+    }
     if (name === "list_pi_providers") return (provider ? [provider] : []) as T;
-    if (name === "search_pi_models" || name === "search_pi_packages" || name === "list_pi_packages") return [] as T;
-    if (name === "list_mcp_servers" || name === "list_skills" || name === "list_installed_workflows") return [] as T;
+    if (name === "search_pi_models") return [] as T;
+    if (name === "list_provider_models") return [
+      { providerId: "fixture-provider", id: "fixture-a", name: "Fixture A", contextWindow: 128000, maxTokens: 8192, reasoning: false, input: ["text"] },
+      { providerId: "fixture-provider", id: "fixture-b", name: "Fixture B", contextWindow: 64000, maxTokens: 4096, reasoning: true, input: ["text"] },
+    ] as T;
+    if (name === "save_pi_provider_model_selection") {
+      const { models } = (args as { request: { providerId: string; models: ProviderRecord["models"] } }).request;
+      selectionWrites++;
+      lastSelection = models.map((model) => model.id).join(",");
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      if (customSaveFailures-- > 0) throw new Error("Fixture member save failed");
+      if (!provider) throw new Error("Fixture provider missing");
+      provider = { ...provider, models: models.map((model) => provider!.models.find((saved) => saved.id === model.id) ?? model) };
+      return provider as T;
+    }
+    if (name === "test_model_connection" || name === "pi_auth_test_model_connection") {
+      modelProbes++;
+      return { ok: true, status: name === "pi_auth_test_model_connection" ? null : 200, latencyMs: 1, error: null } as T;
+    }
+    if (name === "search_pi_packages") return [{ name: "pi-demo", description: "Example extension for settings layout checks", types: ["extension"], downloads: 1200, publishedAt: 1789400000000, path: "pi-demo" }, { name: "pi-other", description: "Another extension", types: ["extension"], downloads: 200, publishedAt: 1789300000000, path: "pi-other" }] as T;
+    if (name === "list_pi_packages") return installedPackages as T;
+    if (name === "pi_package_metadata") return { version: "1.0.0", license: "MIT" } as T;
+    if (name === "package_operation") {
+      const request = (args as { request: { operation: string; spec: string } }).request;
+      if (request.operation === "remove") installedPackages = installedPackages.filter((pkg) => pkg.source !== request.spec);
+      if (request.operation === "install") installedPackages = [...installedPackages, { source: request.spec, autoload: true, environment: "managed" }];
+      action = request.operation;
+      return undefined as T;
+    }
+    if (name === "list_mcp_servers") return installedServers as T;
+    if (name === "list_skills") return installedSkills as T;
+    if (name === "list_installed_workflows") return [{ slug: "fullstack-saas", name: "Full-Stack SaaS", category: "Developer Tools", skillCount: 5, mcpCount: 4, installedAt: "2026-09-29" }] as T;
+    if (name === "save_mcp_server") {
+      const request = (args as { request: { name: string; config: Record<string, unknown> } }).request;
+      installedServers = [...installedServers, request];
+      action = "save_mcp_server";
+      return undefined as T;
+    }
+    if (name === "delete_mcp_server") {
+      const request = (args as { request: { name: string } }).request;
+      installedServers = installedServers.filter((server) => server.name !== request.name);
+      action = "delete_mcp_server";
+      return undefined as T;
+    }
+    if (name === "delete_skill") {
+      const request = (args as { request: { name: string } }).request;
+      installedSkills = installedSkills.filter((skill) => skill.name !== request.name);
+      action = "delete_skill";
+      return undefined as T;
+    }
+    if (name === "save_skill") {
+      const request = (args as { request: { name: string; description: string } }).request;
+      installedSkills = [...installedSkills, { name: request.name, description: request.description, path: `skills/${request.name}/SKILL.md` }];
+      action = "save_skill";
+      return undefined as T;
+    }
+    if (name === "install_agentic_mcp" || name === "install_agentic_skill") { action = name; return "installed" as T; }
+    if (name === "install_agentic_workflow") {
+      action = name;
+      return { skills: [], mcp: [], skipped: [], failures: [] } as T;
+    }
+    if (name === "agentic_workflow_detail") return { slug: "fullstack-saas", name: "Full-Stack SaaS", description: "Ship a SaaS from scratch.", category: "Developer Tools", level: "Intermediate", components: [{ kind: "skill", slug: "design", name: "Design", url: "" }, { kind: "mcp", slug: "database", name: "Database", url: "" }], steps: [{ name: "Plan", text: "Plan the project" }], kickoffPrompt: "Build a SaaS", sourceUrl: "https://agenticskills.io/workflows/fullstack-saas" } as T;
     if (name === "prefetch_agentic_details") return 0 as T;
     if (name === "translate_agentic_texts") return ((args as { request: { texts: string[] } }).request.texts) as T;
     if (name === "search_agentic_mcp") {
@@ -62,8 +153,35 @@
         { id: "github-copilot", name: "GitHub Copilot", oauth: true, oauthName: "GitHub Copilot", isSubscription: true },
       ] as T;
     }
-    if (name === "pi_auth_status") return { credentials: [], activeLogin: null, activeLoginProvider: null } as T;
-    if (name === "pi_auth_provider_models") return [] as T;
+    if (name === "pi_auth_status") return { credentials: new URLSearchParams(location.search).has("subscription")
+      ? ["openai-codex", "anthropic"].map((provider) => ({ provider, authType: "oauth", expires: Date.now() + 86400000 })) : [], activeLogin: null, activeLoginProvider: null } as T;
+    if (name === "pi_auth_provider_models") return ((args as { request: { providerId: string } }).request.providerId === "openai-codex" ? subscriptionModels : []) as T;
+    if (name === "pi_auth_model_settings") return subscriptionDefaults as T;
+    if (name === "pi_auth_model_selection") {
+      if (selectionReadFailures-- > 0) throw new Error("Fixture selection read failed");
+      return { modelIds: chosenModelIds } as T;
+    }
+    if (name === "pi_auth_save_model_selection") {
+      if (selectionSaveFailures-- > 0) throw new Error("Fixture selection save failed");
+      const request = (args as { request: { modelIds: string[] | null } }).request;
+      chosenModelIds = request.modelIds;
+      action = "save_model_selection";
+      return { modelIds: chosenModelIds } as T;
+    }
+    if (name === "pi_auth_set_model_defaults") {
+      const request = (args as { request: { modelId: string; thinkingLevel: string | null } }).request;
+      subscriptionDefaults = { defaultProvider: "openai-codex", defaultModel: request.modelId, modelThinkingLevels: request.thinkingLevel ? { [request.modelId]: request.thinkingLevel } : {} };
+      action = "save_model_defaults";
+      return subscriptionDefaults as T;
+    }
+    if (name === "pi_auth_save_model_limits") {
+      const request = (args as { request: { modelId: string; contextWindow: number | null; maxTokens: number | null } }).request;
+      const original = catalogModels.find((model) => model.id === request.modelId)!;
+      subscriptionModels = subscriptionModels.map((model) => model.id === request.modelId
+        ? { ...model, contextWindow: request.contextWindow ?? original.contextWindow, maxTokens: request.maxTokens ?? original.maxTokens } : model);
+      action = "save_model_limits";
+      return subscriptionModels as T;
+    }
     throw new Error(`Fixture: unsupported command ${name}`);
   };
   $effect(() => {
@@ -75,8 +193,15 @@
 
 <nav aria-label="测试状态">
   <output aria-label="设置修改次数">{changes}</output>
+  <output aria-label="模型变更类型">{modelChangeReason}</output>
   <output aria-label="Provider 保存次数">{saves}</output>
+  <output aria-label="持久化模型名称">{provider?.models.find((model) => model.id === "fixture-a")?.name ?? ""}</output>
+  <output aria-label="成员保存次数">{selectionWrites}</output>
+  <output aria-label="最近成员快照">{lastSelection}</output>
+  <output aria-label="模型探测次数">{modelProbes}</output>
+  <output aria-label="订阅筛选快照">{chosenModelIds === null ? "all" : chosenModelIds.join(",")}</output>
   <output aria-label="操作结果">{action}</output>
+  <output aria-label="读取范围">{listedScope}</output>
   {#if error}<span role="alert">{error}</span>{/if}
 </nav>
 <main class="workspace settings-view">
@@ -84,7 +209,7 @@
     onDiagnosticsBusy={() => {}} confirmDiagnosticsClear={async () => false}
     onChangeSettings={(next) => { settings = next; changes++; }}
     onEditorSaved={() => {}} onClose={() => { action = "返回工作区"; }}
-    runtimes={[{ id: "pi", name: "Pi", currentVersion: "1.0.0", source: "managed", available: true }, { id: "dsh", name: "DSH", currentVersion: null, source: "managed", available: false }]}
+    runtimes={[{ id: "pi", name: "Pi", currentVersion: "1.0.0", source: "managed", available: true, installed: true }, { id: "dsh", name: "DSH", currentVersion: null, source: "managed", available: false, installed: false }]}
     updates={[{ id: "pi", name: "Pi", currentVersion: "1.0.0", latestVersion: "1.1.0", updateAvailable: true, installable: true, canRollback: true, stale: false, error: null, note: null }]}
     busyRuntime={null} runtimeOperation={null} runtimeProgress={null} isCheckingUpdates={false}
     appUpdate={{ status: "available", version: "2.0.0", notes: "Fixture release notes", error: null }}
@@ -92,20 +217,20 @@
     onCheckUpdates={() => { action = "检查组件更新"; }}
     onCheckAppUpdate={() => { action = "检查应用更新"; }}
     onInstallAppUpdate={() => { action = "安装应用更新"; }}
-    onUpdateRuntime={() => { action = "更新组件"; }}
-    onRollbackRuntime={() => { action = "回滚组件"; }}
-    onSnoozeRuntime={() => { action = "稍后"; }}
-    onSkipRuntime={() => { action = "跳过"; }}
+    onUpdateRuntime={() => { action = "安装组件"; }}
+    onUninstallRuntime={() => { action = "卸载组件"; }}
     onRestartPi={() => { action = "重启 Pi 任务"; }}
     onRestartDsh={() => { action = "重启 DSH"; }}
     restartBusy={null}
     runningPiCount={1}
     dshRunning={true}
   >
-    {#snippet models()}<PiProviderSettings embedded invokeCommand={command} confirm={async () => true} onClose={() => {}} onError={reportError} />{/snippet}
-    {#snippet extensions()}<PiMarketplace embedded projectPath={null} invokeCommand={command} confirm={async () => true} onClose={() => {}} onError={(cause) => { error = String(cause); }} />{/snippet}
-    {#snippet mcp()}<PiMcpSkillsSettings mode="mcp" invokeCommand={command} onError={(cause) => { error = String(cause); }} onBusyChange={() => {}} />{/snippet}
-    {#snippet skills()}<PiMcpSkillsSettings mode="skills" invokeCommand={command} onError={(cause) => { error = String(cause); }} onBusyChange={() => {}} />{/snippet}
+    {#snippet models()}<PiProviderSettings embedded invokeCommand={command} confirm={async () => true} onClose={() => {}} onError={reportError}
+      codexTransport={settings.codexTransport} onCodexTransportChange={(codexTransport) => { settings = { ...settings, codexTransport }; changes++; }} />{/snippet}
+    {#snippet extensions()}<PiMarketplace embedded projectPath={fixtureProjectPath} invokeCommand={command} confirm={async () => true} onClose={() => {}} onError={(cause) => { error = String(cause); }} />{/snippet}
+    {#snippet mcp()}<PiMcpSkillsSettings mode="mcp" projectPath={fixtureProjectPath} invokeCommand={command} onError={(cause) => { error = String(cause); }} onBusyChange={() => {}} />{/snippet}
+    {#snippet skills()}<PiMcpSkillsSettings mode="skills" projectPath={fixtureProjectPath} invokeCommand={command} onError={(cause) => { error = String(cause); }} onBusyChange={() => {}} />{/snippet}
+    {#snippet workflows()}<PiMcpSkillsSettings mode="workflows" projectPath={fixtureProjectPath} invokeCommand={command} onError={(cause) => { error = String(cause); }} onBusyChange={() => {}} />{/snippet}
     {#snippet dsh()}<p>DSH</p>{/snippet}
   </PiSettings>
 </main>

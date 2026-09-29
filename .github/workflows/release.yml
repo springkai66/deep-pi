@@ -73,7 +73,7 @@ jobs:
 
       - name: Build unsigned installer bundles
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
-        run: pnpm tauri build --bundles nsis,msi
+        run: pnpm tauri build --bundles nsis msi
 
       - name: Build signed updater installer bundles
         if: startsWith(github.ref, 'refs/tags/')
@@ -82,7 +82,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: >-
             ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: >-
-          pnpm tauri build --bundles nsis,msi --config
+          pnpm tauri build --bundles nsis msi --config
           src-tauri/tauri.release.generated.conf.json
 
       - name: Drop language suffix from MSI filenames

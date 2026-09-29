@@ -49,14 +49,6 @@ export const EN_SHELL: Record<string, string> = {
   "DSH 启动失败：{error}": "DSH failed to start: {error}",
   "重启 DSH": "Restart DSH",
   "修复": "Repair",
-  "提示：某个 DSH 插件与当前 DSH 版本不兼容。可以到 设置 → DSH 服务 点“修复”处理。":
-    "Hint: a DSH plugin is incompatible with the current DSH version. Go to Settings → DSH Service and click “Repair”.",
-  "打开 设置 → DSH 服务，查看失败原因并修复":
-    "Open Settings → DSH Service to inspect the failure and repair it",
-  "DSH 检测/修复操作正在处理，请先完成或取消操作":
-    "A DSH check/repair operation is in progress. Finish or cancel it first.",
-  "没有可安装的 DSH 运行时版本，请在“运行时与更新”里检查更新。":
-    "No installable DSH runtime version. Check for updates in “Runtime & Updates”.",
 
   /* ---------- 对话框、确认与错误提示 ---------- */
   "操作失败": "Operation failed",
@@ -109,6 +101,18 @@ export const EN_SHELL: Record<string, string> = {
   "扩展操作正在处理，请先完成或取消操作":
     "An extension operation is in progress. Finish or cancel it first.",
 
+  "文件操作": "File actions",
+  "打开并编辑": "Open and edit",
+  "在外部编辑器中打开": "Open in external editor",
+  "新建文件": "New file",
+  "新建文件夹": "New folder",
+  "输入名称": "Enter a name",
+  "输入新名称": "Enter a new name",
+  "新建": "Create",
+  "复制完整路径": "Copy full path",
+  "移到回收站": "Move to Recycle Bin",
+  "将“{name}”移到回收站吗？可以从回收站恢复。":
+    "Move “{name}” to the Recycle Bin? You can restore it from there.",
   /* ---------- 项目与任务操作 ---------- */
   "添加项目目录": "Add project folder",
   "移除项目": "Remove project",

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { visibleFiles, type FileEntry } from "./files";
+import { retainEmptyDirectories, visibleFiles, type FileEntry } from "./files";
 
 const entries: FileEntry[] = [
   { path: "src", name: "src", isDirectory: true, size: 0 },
@@ -26,5 +26,26 @@ describe("file tree filtering", () => {
     expect(visibleFiles(entries, "SL模", new Set()).length).toBe(3);
     expect(visibleFiles(entries, "zzz", new Set())).toEqual([]);
     expect(visibleFiles(entries, "README", new Set()).map((entry) => entry.path)).toEqual(["README.md"]);
+  });
+});
+
+describe("file tree refresh", () => {
+  it("keeps expanded folders and filename search when entries change", () => {
+    const expanded = new Set(["src"]);
+    const query = "main";
+    const updated = [...entries, { path: "src/main.test.ts", name: "main.test.ts", isDirectory: false, size: 5 }];
+    expect(visibleFiles(updated, query, expanded).map((entry) => entry.path))
+      .toEqual(["src", "src/main.test.ts", "src/main.ts"]);
+    expect(expanded.has("src")).toBe(true);
+    expect(query).toBe("main");
+  });
+
+  it("keeps empty-folder markers until the refreshed index has children or removes the folder", () => {
+    const old: FileEntry[] = [{ path: "empty", name: "empty", isDirectory: true, size: 0 }];
+    expect(retainEmptyDirectories(["empty"], old)).toEqual(["empty"]);
+    expect(retainEmptyDirectories(["empty"], [
+      ...old, { path: "empty/new.txt", name: "new.txt", isDirectory: false, size: 1 },
+    ])).toEqual([]);
+    expect(retainEmptyDirectories(["empty"], [])).toEqual([]);
   });
 });

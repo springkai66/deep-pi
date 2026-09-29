@@ -240,6 +240,8 @@
   let workflowQuery = $state("");
   let workflowEntries = $state<AgenticWorkflowEntry[]>([]);
   let workflowLoading = $state(false);
+  let workflowCategory = $state<string | null>(null);
+  let workflowSort = $state<"default" | "name">("default");
   let workflowSearched = $state(false);
   let busyWorkflowEntry = $state<string | null>(null);
   let workflowDetailSlug = $state<string | null>(null);
@@ -340,20 +342,23 @@
     ),
   );
 
-  /** 工作流目录同样按关键词本地过滤；难度等展示名也纳入匹配范围。 */
-  const filteredWorkflowEntries = $derived(
-    workflowEntries.filter((entry) =>
+  /** 工作流目录使用同一套关键词、分类与排序区域；默认保持目录顺序。 */
+  const filteredWorkflowEntries = $derived.by(() => {
+    const matches = workflowEntries.filter((entry) =>
+      (workflowCategory === null || entry.category === workflowCategory) &&
       matchesMarketKeyword(
         workflowQuery,
         [entry.name, entry.slug, entry.description, entry.category],
         [agenticCategoryLabel(entry.category, getLocale()), agenticLevelLabel(entry.level, getLocale())],
       ),
-    ),
-  );
+    );
+    return workflowSort === "name" ? [...matches].sort((a, b) => a.name.localeCompare(b.name)) : matches;
+  });
 
-  /** 分类筛选选项：当前已加载条目里出现过的分类，按条目数从多到少、同数量按名称排序。 */
+  /** 分类筛选选项：当前已加载条目里出现过的分类。 */
   const mcpCategoryOptions = $derived(categoryOptions(mcpEntries));
   const skillCategoryOptions = $derived(categoryOptions(skillEntries));
+  const workflowCategoryOptions = $derived(categoryOptions(workflowEntries));
 
   /** 当前 scope 下已安装工作流的 slug 集合，用来给市场条目打「已安装」徽标。 */
   const installedWorkflowSlugs = $derived(new Set(installedWorkflows.map((entry) => entry.slug)));
@@ -1134,7 +1139,7 @@
     {#if mode === "mcp"}
       <section class="settings-group">
         <div class="group-header">
-          <h3>{t("MCP 服务")}</h3>
+          <h3>{t("已安装")} · {t("MCP 服务")}</h3>
           <button type="button" class="icon-action" aria-label={t("刷新 MCP 服务列表")} title={t("刷新")} disabled={loading} onclick={() => void refresh()}>
             <RefreshCw size={14} />
           </button>
@@ -1169,7 +1174,7 @@
     {:else if mode === "skills"}
       <section class="settings-group">
         <div class="group-header">
-          <h3>{t("Skills 技能")}</h3>
+          <h3>{t("已安装")} · {t("Skills 技能")}</h3>
           <button type="button" class="icon-action" aria-label={t("刷新 Skills 列表")} title={t("刷新")} disabled={loading} onclick={() => void refresh()}>
             <RefreshCw size={14} />
           </button>
@@ -1205,7 +1210,7 @@
     {:else}
       <section class="settings-group">
         <div class="group-header">
-          <h3>{t("已安装工作流")}</h3>
+          <h3>{t("已安装")} · {t("工作流")}</h3>
           <button type="button" class="icon-action" aria-label={t("刷新已安装工作流")} title={t("刷新")} disabled={loading} onclick={() => void refresh()}>
             <RefreshCw size={14} />
           </button>
@@ -1454,14 +1459,31 @@
         <h3>{t("工作流市场")}</h3>
         <span class="muted">{t("市场来源：agenticskills.io")}</span>
       </div>
-      <form class="market-search" onsubmit={(event) => { event.preventDefault(); void loadWorkflowMarket(true); }}>
-        <Search size={14} />
-        <input bind:value={workflowQuery} placeholder={t("按名称、描述或分类筛选工作流…")} aria-label={t("筛选工作流")} autocomplete="off" />
-        <button type="submit" class="primary-action compact" disabled={workflowLoading || busyWorkflowEntry !== null} aria-label={t("刷新市场")} title={t("刷新市场")}>
-          {#if workflowLoading}<span class="spin"><RefreshCw size={13} /></span>{:else}<RefreshCw size={13} />{/if}
-          {t("刷新市场")}
-        </button>
-      </form>
+      <div class="market-toolbar">
+        <form class="market-search" onsubmit={(event) => { event.preventDefault(); void loadWorkflowMarket(true); }}>
+          <Search size={14} />
+          <input bind:value={workflowQuery} placeholder={t("按名称、描述或分类筛选工作流…")} aria-label={t("筛选工作流")} autocomplete="off" />
+          <button type="submit" class="primary-action compact" disabled={workflowLoading || busyWorkflowEntry !== null} aria-label={t("刷新市场")} title={t("刷新市场")}>
+            {#if workflowLoading}<span class="spin"><RefreshCw size={13} /></span>{:else}<RefreshCw size={13} />{/if}
+            {t("刷新市场")}
+          </button>
+        </form>
+        <select class="market-sort" bind:value={workflowSort} aria-label={t("排序")}>
+          <option value="default">{t("默认排序")}</option>
+          <option value="name">{t("名称（A–Z）")}</option>
+        </select>
+      </div>
+      {#if workflowEntries.length > 0}
+        <div class="category-filter" role="group" aria-label={t("分类筛选")}>
+          <button type="button" class="category-chip" aria-pressed={workflowCategory === null} onclick={() => (workflowCategory = null)}>{t("全部分类")}</button>
+          {#each workflowCategoryOptions as option (option.category)}
+            <button type="button" class="category-chip" aria-pressed={workflowCategory === option.category}
+              onclick={() => (workflowCategory = workflowCategory === option.category ? null : option.category)}>
+              {agenticCategoryLabel(option.category, getLocale())}
+            </button>
+          {/each}
+        </div>
+      {/if}
       {#if workflowLoading && workflowEntries.length === 0}
         <p class="muted" role="status">{t("正在加载工作流目录…")}</p>
       {:else if filteredWorkflowEntries.length === 0}
@@ -1470,25 +1492,28 @@
         <ul class="entry-list market-list">
           {#each filteredWorkflowEntries as entry (entry.slug)}
             {@const installed = installedWorkflowSlugs.has(entry.slug)}
-            <li>
-              <div class="entry-main">
-                <strong>{entry.name}</strong>
-                <small>{entry.description || entry.slug}</small>
-                <span class="market-meta">
-                  {#if entry.category}<span class="category-chip" title={t("分类：{category}", { category: agenticCategoryLabel(entry.category, getLocale()) })}>{agenticCategoryLabel(entry.category, getLocale())}</span>{/if}
-                  {#if entry.level}<span>{t("难度：{level}", { level: agenticLevelLabel(entry.level, getLocale()) })}</span>{/if}
-                  <span>{t("{skills} 个技能 · {mcp} 个 MCP", { skills: entry.skillCount, mcp: entry.mcpCount })}</span>
-                  {#if installed}<span class="market-flag">{t("已安装")}</span>{/if}
-                </span>
+            <li class:expanded={workflowDetailSlug === entry.slug}>
+              <div class="market-row">
+                <div class="entry-main">
+                  <strong>{entry.name}</strong>
+                  <small>{entry.description || entry.slug}</small>
+                  <span class="market-meta">
+                    {#if entry.category}<span class="category-chip" title={t("分类：{category}", { category: agenticCategoryLabel(entry.category, getLocale()) })}>{agenticCategoryLabel(entry.category, getLocale())}</span>{/if}
+                    {#if entry.level}<span>{t("难度：{level}", { level: agenticLevelLabel(entry.level, getLocale()) })}</span>{/if}
+                    <span>{t("{skills} 个技能 · {mcp} 个 MCP", { skills: entry.skillCount, mcp: entry.mcpCount })}</span>
+                    {#if installed}<span class="market-flag">{t("已安装")}</span>{/if}
+                  </span>
+                </div>
+                <span class="market-source">agenticskills.io</span>
+                <button type="button" class="secondary-action" aria-expanded={workflowDetailSlug === entry.slug}
+                  disabled={workflowDetailLoading !== null} onclick={() => void toggleWorkflowDetail(entry)}>
+                  {workflowDetailLoading === entry.slug ? t("加载中…") : workflowDetailSlug === entry.slug ? t("收起") : t("详情")}
+                </button>
+                <button type="button" class="primary-action compact" disabled={busyWorkflowEntry !== null} onclick={() => void installAgenticWorkflow(entry)}>
+                  {#if busyWorkflowEntry === entry.slug}<span class="spin"><RefreshCw size={12} /></span>{:else}<Download size={12} />{/if}
+                  {t("安装")}
+                </button>
               </div>
-              <span class="market-source">agenticskills.io</span>
-              <button type="button" class="secondary-action" disabled={workflowDetailLoading !== null} onclick={() => void toggleWorkflowDetail(entry)}>
-                {workflowDetailLoading === entry.slug ? t("加载中…") : workflowDetailSlug === entry.slug ? t("收起") : t("详情")}
-              </button>
-              <button type="button" class="primary-action compact" disabled={busyWorkflowEntry !== null} onclick={() => void installAgenticWorkflow(entry)}>
-                {#if busyWorkflowEntry === entry.slug}<span class="spin"><RefreshCw size={12} /></span>{:else}<Download size={12} />{/if}
-                {t("安装")}
-              </button>
               {#if workflowDetailSlug === entry.slug}
                 <div class="market-detail">
                   {#if workflowDetailLoading === entry.slug}
@@ -1618,6 +1643,18 @@
   .market-sort { flex-shrink: 0; height: 32px; max-width: 180px; padding: 0 6px; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--surface); color: var(--text); font: inherit; font-size: 12px; cursor: pointer; }
   .market-sort:hover { border-color: var(--accent); color: var(--text-strong); }
   .status { margin: 0; font-size: 13px; color: var(--accent); }
+  @container (max-width: 720px) {
+    .market-toolbar { flex-wrap: wrap; }
+    .market-toolbar .market-search { flex-basis: 100%; }
+    .market-row { flex-wrap: wrap; }
+    .market-row .entry-main { flex-basis: 100%; }
+    .market-source { margin-right: auto; }
+  }
+  @container (max-width: 480px) {
+    .page-controls { align-items: flex-start; }
+    .scope-switch button { min-width: 56px; padding-inline: 8px; }
+    .market-search .primary-action.compact { padding-inline: 8px; }
+  }
   .spin { display: inline-grid; animation: mcp-spin 0.8s linear infinite; }
   @keyframes mcp-spin { to { transform: rotate(360deg); } }
   button:disabled { opacity: .45; cursor: default; }

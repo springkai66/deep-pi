@@ -12,6 +12,13 @@ export type TerminalShell = "powershell" | "pwsh" | "bash" | "cmd";
 export type ChatDetailLevel = "concise" | "verbose";
 /** 全局网络代理模式：跟随 Windows 系统代理（关闭时按操作系统路由）/ 手动指定代理地址。 */
 export type ProxyMode = "system" | "manual";
+export type CodexTransport = "sse" | "auto" | "websocket" | "websocket-cached";
+export const CODEX_TRANSPORT_OPTIONS: Array<{ value: CodexTransport; label: string; description: string }> = [
+  { value: "sse", label: "SSE（推荐，稳定优先）", description: "直接使用 HTTP 流式响应，避免 WebSocket 握手或连接中断影响请求。" },
+  { value: "auto", label: "自动（WebSocket 优先）", description: "优先尝试 WebSocket，失败时由 Pi 按传输阶段回退或重试为 SSE。" },
+  { value: "websocket", label: "WebSocket", description: "优先使用 WebSocket 连接，不启用缓存续传；失败时仍由 Pi 处理回退与重试。" },
+  { value: "websocket-cached", label: "WebSocket（缓存续传）", description: "使用 WebSocket 连接复用与增量续传；代理链路不稳定时建议选择 SSE。" },
+];
 
 export const CHAT_DETAIL_LEVELS: Array<{ value: ChatDetailLevel; label: string }> = [
   { value: "concise", label: "简洁模式" },
@@ -54,6 +61,10 @@ export interface AppSettings {
   proxyUrl: string;
   /** 不走代理的地址列表（NO_PROXY，逗号分隔）。 */
   proxyNoProxy: string;
+  /** Codex 聊天传输策略；只影响之后启动的 RPC 会话。 */
+  codexTransport: CodexTransport;
+  /** 由订阅模型选择接口保存；null 表示全部。 */
+  codexSelectedModels: string[] | null;
   /** 任务完成/失败时发送系统通知（应用在后台也会提示）。 */
   notifyOnTaskComplete: boolean;
   /** 启动时自动显示桌宠浮窗。 */
@@ -87,6 +98,8 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   proxyMode: "system",
   proxyUrl: "",
   proxyNoProxy: "",
+  codexTransport: "sse",
+  codexSelectedModels: null,
   notifyOnTaskComplete: true,
   petEnabled: true,
   petAlwaysOnTop: true,

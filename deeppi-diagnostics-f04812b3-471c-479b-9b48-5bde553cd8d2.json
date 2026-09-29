@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "snapshotId": "c0157914-dd63-4a47-a9af-6c420c3aa67e",
+  "appVersion": "0.1.0",
+  "os": "windows",
+  "arch": "x86_64",
+  "elapsedMs": 840546,
+  "droppedEvents": 0,
+  "events": [
+    {
+      "sequence": 1,
+      "elapsedMs": 12127,
+      "run": 1,
+      "code": "process_starting",
+      "count": 1,
+      "exitCode": null
+    }
+  ]
+}

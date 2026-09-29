@@ -71,6 +71,7 @@ pub struct TaskRecord {
     pub id: String,
     pub run_id: Option<String>,
     pub title: String,
+    pub title_origin: String,
     pub agent: String,
     pub status: TaskStatus,
     pub project_id: Option<String>,
@@ -227,6 +228,23 @@ impl TaskStore {
             connection
                 .execute("ALTER TABLE tasks ADD COLUMN pi_agent_dir TEXT", [])
                 .map_err(|error| error.to_string())?;
+        }
+        let has_title_origin = connection
+            .prepare("PRAGMA table_info(tasks)")
+            .map_err(|error| error.to_string())?
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?
+            .iter()
+            .any(|name| name == "title_origin");
+        if !has_title_origin {
+            connection
+                .execute(
+                    "ALTER TABLE tasks ADD COLUMN title_origin TEXT NOT NULL DEFAULT 'manual'",
+                    [],
+                )
+                .map_err(|error| format!("failed to add title origin: {error}"))?;
         }
         connection.execute_batch(
             "CREATE TABLE IF NOT EXISTS ignored_pi_sessions (session_id TEXT PRIMARY KEY NOT NULL);
@@ -516,10 +534,12 @@ impl TaskStore {
         title: &str,
         project_path: &str,
     ) -> Result<TaskRecord, String> {
-        // 标题留空时用 session id 前 8 位作为默认名；用户发送首轮问题后由 AI 自动命名。
-        let title = match title.trim() {
-            "" => "",
-            trimmed => validate_title(trimmed)?,
+        let trimmed = title.trim();
+        let origin = if trimmed.is_empty() { "auto" } else { "manual" };
+        let title = if trimmed.is_empty() {
+            ""
+        } else {
+            validate_title(trimmed)?
         };
         let id = format!("task-{}", Uuid::new_v4());
         let session_id = Uuid::new_v4().to_string();
@@ -535,9 +555,17 @@ impl TaskStore {
             .execute(
                 "INSERT INTO tasks (
                     id, title, agent, status, project_id, project_path, session_id,
-                    execution_target, created_at, started_at
-                 ) VALUES (?1, ?2, 'pi', 'running', ?3, ?4, ?5, 'local', ?6, ?6)",
-                params![id, title, project_id, project_path, session_id, timestamp],
+                    execution_target, created_at, started_at, title_origin
+                 ) VALUES (?1, ?2, 'pi', 'running', ?3, ?4, ?5, 'local', ?6, ?6, ?7)",
+                params![
+                    id,
+                    title,
+                    project_id,
+                    project_path,
+                    session_id,
+                    timestamp,
+                    origin
+                ],
             )
             .map_err(|error| format!("failed to create task: {error}"))?;
         self.get(&id)?
@@ -644,7 +672,7 @@ impl TaskStore {
             .prepare(
                 "SELECT id, title, agent, status, project_id, project_path, session_id,
                         session_file, execution_target, created_at, started_at,
-                        completed_at, archived_at, interaction_mode, pi_environment, pi_agent_dir
+                        completed_at, archived_at, interaction_mode, pi_environment, pi_agent_dir, title_origin
                  FROM tasks
                  ORDER BY archived_at IS NOT NULL, created_at DESC",
             )
@@ -662,11 +690,20 @@ impl TaskStore {
             .lock()
             .map_err(|_| "task database lock is poisoned".to_string())?
             .execute(
-                "UPDATE tasks SET title = ?1 WHERE id = ?2",
+                "UPDATE tasks SET title = ?1, title_origin = 'manual' WHERE id = ?2",
                 params![validate_title(title)?, id],
             )
             .map_err(|error| format!("failed to rename task: {error}"))?;
         ensure_updated(affected)
+    }
+
+    pub fn auto_rename(&self, id: &str, expected: &str, title: &str) -> Result<bool, String> {
+        let title = validate_title(title)?;
+        let affected = self.connection.lock().map_err(|_| "task database lock is poisoned")?
+            .execute("UPDATE tasks SET title = ?1 WHERE id = ?2 AND agent = 'pi' AND title_origin = 'auto' AND title = ?3 AND title <> ?1",
+                params![title, id, expected])
+            .map_err(|error| format!("failed to auto-rename task: {error}"))?;
+        Ok(affected > 0)
     }
 
     pub fn set_interaction_mode(&self, id: &str, mode: &str) -> Result<(), String> {
@@ -826,6 +863,21 @@ impl TaskStore {
                 params![path, id, session_id],
             )
             .map_err(|error| error.to_string())?;
+        ensure_updated(affected)
+    }
+    pub fn rebind_session(
+        &self,
+        id: &str,
+        previous_id: &str,
+        session_id: &str,
+        path: &str,
+    ) -> Result<(), String> {
+        let affected = self.connection.lock().map_err(|_| "task database lock is poisoned")?
+            .execute(
+                "UPDATE tasks SET session_id = ?1, session_file = ?2 WHERE id = ?3 AND session_id = ?4
+                 AND NOT EXISTS (SELECT 1 FROM tasks WHERE id != ?3 AND agent = 'pi' AND session_id = ?1)",
+                params![session_id, path, id, previous_id],
+            ).map_err(|error| error.to_string())?;
         ensure_updated(affected)
     }
 
@@ -1014,7 +1066,7 @@ impl TaskStore {
             .query_row(
                 "SELECT id, title, agent, status, project_id, project_path, session_id,
                         session_file, execution_target, created_at, started_at,
-                        completed_at, archived_at, interaction_mode, pi_environment, pi_agent_dir
+                        completed_at, archived_at, interaction_mode, pi_environment, pi_agent_dir, title_origin
                  FROM tasks WHERE id = ?1",
                 [id],
                 task_from_row,
@@ -1074,6 +1126,7 @@ fn task_from_row(row: &Row<'_>) -> rusqlite::Result<TaskRecord> {
         id: row.get(0)?,
         run_id: None,
         title: row.get(1)?,
+        title_origin: row.get(16)?,
         agent: row.get(2)?,
         status: TaskStatus::from_str(&status).map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, error.into())
@@ -1459,6 +1512,38 @@ mod tests {
         assert_eq!(
             store.list().expect("tasks should list")[0].status,
             TaskStatus::Completed
+        );
+    }
+
+    #[test]
+    fn rebind_session_updates_restart_target_without_colliding_with_other_tasks() {
+        let store = TaskStore::in_memory().unwrap();
+        let original = store.create_pi_task("Original", "F:/project").unwrap();
+        let other = store.create_pi_task("Other", "F:/project").unwrap();
+        assert!(store
+            .rebind_session(&original.id, "wrong", "new-id", "F:/new.jsonl")
+            .is_err());
+        assert!(store
+            .rebind_session(
+                &original.id,
+                &original.session_id,
+                &other.session_id,
+                "F:/other.jsonl"
+            )
+            .is_err());
+        assert_eq!(
+            store.get(&original.id).unwrap().unwrap().session_id,
+            original.session_id
+        );
+        store
+            .rebind_session(&original.id, &original.session_id, "new-id", "F:/new.jsonl")
+            .unwrap();
+        let updated = store.get(&original.id).unwrap().unwrap();
+        assert_eq!(updated.session_id, "new-id");
+        assert_eq!(updated.session_file.as_deref(), Some("F:/new.jsonl"));
+        assert_eq!(
+            store.get(&other.id).unwrap().unwrap().session_id,
+            other.session_id
         );
     }
 

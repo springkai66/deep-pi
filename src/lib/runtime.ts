@@ -4,6 +4,7 @@ export interface RuntimeComponent {
   currentVersion: string | null;
   source: "managed" | "development" | "profile";
   available: boolean;
+  installed: boolean;
 }
 
 export interface RuntimeUpdate {
@@ -48,7 +49,7 @@ export function updateSuppressed(input: SuppressionInput): { skipped: boolean; s
 }
 
 /**
- * 该组件是否应展示「更新 / 安装 / 修复」入口（被跳过或稍后提醒时隐藏）。
+ * 该组件是否应展示安装入口（被跳过或稍后提醒时隐藏）。
  *
  * 用类型谓词保住 `update` 的非空收窄，使调用方在不做额外判断的情况下仍能
  * 直接使用 `update`（否则模板里每次访问都要再判一次 undefined）。

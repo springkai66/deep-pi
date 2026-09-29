@@ -27,7 +27,6 @@
     Plus,
     RotateCcw,
     Wrench,
-    History,
     Settings2,
     Globe,
     GitBranch,
@@ -35,7 +34,7 @@
   import { onMount, tick } from "svelte";
   import FileSidebar from "$lib/FileSidebar.svelte";
   import { createFileWorkspace, type FileDocument, type FileSaveResult } from "$lib/file-workspace";
-  import type { FilePreview } from "$lib/files";
+  import { pathContainsEntry, type FileEntry, type FilePreview, type FileTreeAction } from "$lib/files";
   import GitSidebar from "$lib/GitSidebar.svelte";
   import GitDiffView from "$lib/GitDiffView.svelte";
   import type { GitDiffSelection } from "$lib/git-diff";
@@ -54,14 +53,16 @@
   import PiMarketplace from "$lib/PiMarketplace.svelte";
   import PiMcpSkillsSettings from "$lib/PiMcpSkillsSettings.svelte";
   import PiProviderSettings from "$lib/PiProviderSettings.svelte";
+  import { runSensitiveHostSlash, type SensitiveHostSlash } from "$lib/pi-host-slash";
+  import { notifyModelsChanged } from "$lib/model-config-sync";
   import PiSettings from "$lib/PiSettings.svelte";
   import DshSettings from "$lib/DshSettings.svelte";
+  import DshFailure from "$lib/DshFailure.svelte";
   import type { SettingsCategory } from "$lib/settings-navigation";
   import { createSettingsSaver } from "$lib/settings-save";
   import TaskSidebar from "$lib/TaskSidebar.svelte";
   import TaskTabs from "$lib/TaskTabs.svelte";
   import type { RuntimeComponent, RuntimeUpdate } from "$lib/runtime";
-  import { SNOOZE_DURATION_MS } from "$lib/runtime";
   import {
     DEFAULT_APP_SETTINGS,
     type AppSettings,
@@ -138,6 +139,7 @@
   let terminalTaskIds = $state<string[]>([]);
   let paneTaskIds = $state<string[]>([]);
   let activeTaskId = $state<string | null>(null);
+  let quotaSelection = $state<{ taskId: string; modelKey: string } | null>(null);
   let selectedProjectId = $state<string | null>(null);
   let isStarting = $state(false);
   let startupPending = $state(true);
@@ -150,6 +152,7 @@
   let shellOpen = $state(false);
   let settingsDialog = $state<HTMLElement>();
   let settingsCategory = $state<SettingsCategory>("general");
+  let loginRequest = $state<{ provider: string; serial: number } | null>(null);
   let diagnosticsBusy = $state(false);
   let dshBusy = $state(false);
   let settingsPackageBusy = $state(false);
@@ -268,6 +271,7 @@
   let editorModule = $state.raw<Promise<typeof import("$lib/FileEditor.svelte")> | null>(null);
   let fileEditor = $state<{ save(asNew?: boolean): Promise<void> }>();
   let closingWindow = $state(false);
+  let quitFromSlash: (() => Promise<boolean>) | null = null;
   let recoveryBusy = $state(false);
   let recoveryProject = $state<{ id: string; name: string } | null>(null);
   let recoveryModule = $state.raw<Promise<typeof import("$lib/FileRecoveryPanel.svelte")> | null>(null);
@@ -354,6 +358,62 @@
     }
   }
 
+  async function fileTreeAction(action: FileTreeAction, entry: FileEntry | null) {
+    const projectId = selectedProjectId;
+    if (!projectId) return;
+    if (action === "open" && entry && !entry.isDirectory) { openFile(entry.path); return; }
+    try {
+      if (action === "external" && entry && !entry.isDirectory) {
+        if (!settings.externalEditor) { openSettingsCategory("advanced"); return; }
+        await invoke("open_project_in_editor", { projectId, relativePath: entry.path, line: null, column: null });
+        if (fileDocuments.some((doc) => doc.projectId === projectId && doc.path === entry.path))
+          notices.push(t("已发送到外部编辑器；内置草稿未自动写入磁盘。"), "info");
+        return;
+      }
+      if (action === "copyPath" && entry) {
+        const path = await invoke<string>("project_entry_absolute_path", {
+          projectId, relativePath: entry.path, isDirectory: entry.isDirectory,
+        });
+        await navigator.clipboard.writeText(path);
+        return;
+      }
+      if (action === "newFile" || action === "newFolder") {
+        const directory = action === "newFolder";
+        const name = await dialogs.request({ kind: "input", title: t(directory ? "新建文件夹" : "新建文件"),
+          message: t("输入名称"), initialValue: "", confirmLabel: t("新建") });
+        if (typeof name !== "string" || !name.trim()) return;
+        const relativePath = entry ? `${entry.path}/${name.trim()}` : name.trim();
+        await invoke("create_project_entry", { projectId, relativePath, isDirectory: directory });
+        if (!directory && selectedProjectId === projectId) openFile(relativePath);
+        if (selectedProjectId === projectId) filesRefreshToken++;
+        return;
+      }
+      if (!entry) return;
+      const affected = (path: string) => pathContainsEntry(entry.path, path, entry.isDirectory);
+      if (action === "rename") {
+        const name = await dialogs.request({ kind: "input", title: t("重命名"), message: t("输入新名称"),
+          initialValue: entry.name, confirmLabel: t("重命名") });
+        if (typeof name !== "string" || !name.trim() || name.trim() === entry.name) return;
+        const renamed = await fileWorkspace.mutatePaths(projectId, affected, () => invoke("rename_project_entry", {
+          projectId, relativePath: entry.path, newName: name.trim(),
+        }));
+        if (!renamed) return;
+      } else if (action === "delete") {
+        if (!await confirmDialog(t("移到回收站"),
+          t("将“{name}”移到回收站吗？可以从回收站恢复。", { name: entry.name }), t("移到回收站"))) return;
+        const deleted = await fileWorkspace.mutatePaths(projectId, affected, () => invoke("delete_project_entry", {
+          projectId, relativePath: entry.path, recursive: entry.isDirectory,
+        }));
+        if (!deleted) return;
+      } else return;
+      if (openedFile?.projectId === projectId && affected(openedFile.path)) openedFile = null;
+      if (openedDiff?.projectId === projectId && affected(openedDiff.path)) openedDiff = null;
+      if (selectedProjectId === projectId) filesRefreshToken++;
+    } catch (error) {
+      if (action === "delete" && selectedProjectId === projectId) filesRefreshToken++;
+      showError(error);
+    }
+  }
   function openGitDiff(path: string, area: GitDiffArea) {
     if (!selectedProjectId) return;
     openedFile = null;
@@ -546,41 +606,21 @@
     }
   }
 
-  function snoozeRuntime(update: RuntimeUpdate) {
-    if (!update.latestVersion) return;
-    updateSettings({
-      ...settings,
-      snoozedUpdates: {
-        ...settings.snoozedUpdates,
-        [update.id]: Date.now() + SNOOZE_DURATION_MS,
-      },
-    });
-  }
-
-  function skipRuntime(update: RuntimeUpdate) {
-    if (!update.latestVersion) return;
-    updateSettings({
-      ...settings,
-      skippedUpdates: {
-        ...settings.skippedUpdates,
-        [update.id]: update.latestVersion,
-      },
-    });
-  }
 
   async function installRuntime(update: RuntimeUpdate) {
     if (!update.latestVersion || !update.installable) return;
-    await changeRuntime(update, false);
+    await changeRuntime(update);
   }
 
-  /// “未激活”型 DSH 启动失败：把 DSH 运行时对齐到 DeepPi 验证过的版本。
+
+  /// “未激活”型 DSH 启动失败：重新获取上游最新运行时后交由用户确认安装。
   async function alignDshRuntime() {
     if (busyRuntime) return;
     try {
       await checkUpdates(true);
       const update = updates.find((candidate) => candidate.id === "dsh");
       if (!update?.latestVersion || !update.installable) {
-        showError(t("没有可安装的 DSH 运行时版本，请在“运行时与更新”里检查更新。"));
+        showError(t("没有可安装的 DSH 运行时版本，请在“DSH 服务”里检查更新。"));
         return;
       }
       await installRuntime(update);
@@ -589,9 +629,23 @@
     }
   }
 
-  async function rollbackRuntime(update: RuntimeUpdate) {
-    if (!update.canRollback) return;
-    await changeRuntime(update, true);
+  async function uninstallRuntime(runtime: RuntimeComponent) {
+    if (busyRuntime || runtime.id === "deeppi" || runtime.source === "development") return;
+    busyRuntime = runtime.id;
+    try {
+      const warning = runtime.id === "dsh"
+        ? t("将卸载托管 DSH 程序、插件和配置；会话历史与凭据保留。确定卸载吗？")
+        : t("卸载 {name} 吗？保留会话历史和凭据；卸载后需要重新安装才能使用。", { name: runtime.name });
+      if (!(await confirmDialog(t("卸载组件"), warning, t("卸载")))) return;
+      await invoke("uninstall_runtime", { componentId: runtime.id });
+      runtimes = await invoke<RuntimeComponent[]>("runtime_status");
+      await checkUpdates(true);
+    } catch (error) {
+      showError(error);
+      try { runtimes = await invoke<RuntimeComponent[]>("runtime_status"); } catch { /* retain original failure */ }
+    } finally {
+      busyRuntime = null;
+    }
   }
 
   async function cancelRuntime() {
@@ -602,26 +656,22 @@
     }
   }
 
-  async function changeRuntime(update: RuntimeUpdate, rollback: boolean) {
+  async function changeRuntime(update: RuntimeUpdate) {
     if (busyRuntime) return;
     busyRuntime = update.id;
     let stoppedDsh = false;
+    const wasDshRunning = dshRunning;
     try {
-      const confirmed = rollback
-        ? await confirmDialog(t("回滚组件"), t("恢复 {name} 的上一版本吗？", { name: update.name }), t("回滚"))
-        : await confirmDialog(t("更新组件"), t("下载并激活 {name} {version} 吗？当前运行时会保留。", { name: update.name, version: String(update.latestVersion) }), t("更新"));
+      const confirmed = await confirmDialog(t("安装组件"), `${t("下载并激活 {name} {version} 吗？当前运行时会保留。", { name: update.name, version: String(update.latestVersion) })}${update.id === "dsh" && update.note ? ` ${tm(update.note)}` : ""}`, t("安装"));
       if (!confirmed) return;
       const affectsDsh = update.id === "dsh" || update.id === "dshmarket";
-      if (affectsDsh) {
+      if (affectsDsh && wasDshRunning) {
         await dshWebview?.close();
         dshWebview = null;
         await invoke("stop_dsh");
         stoppedDsh = true;
       }
-      await runtimeRunner.run(rollback ? "rollback_runtime" : "install_runtime", {
-        componentId: update.id,
-        ...(rollback ? {} : { version: update.latestVersion }),
-      });
+      await runtimeRunner.run("install_runtime", { componentId: update.id, version: update.latestVersion });
       runtimes = await invoke<RuntimeComponent[]>("runtime_status");
       await checkUpdates(true);
     } catch (error) {
@@ -647,7 +697,6 @@
     let disposed = false;
     pageDisposed = false;
     let nativeReady = false;
-    let updateTimer: ReturnType<typeof setTimeout> | undefined;
     const initialization = invoke<void>("await_startup").then(() => { nativeReady = true; });
     const startup = loadAppStartup({
       settings: async () => { await initialization; return invoke<AppSettings>("get_settings"); },
@@ -685,10 +734,8 @@
       startupPending = false;
       if (ready) {
         // Network update checks are optional background work, not a startup dependency.
-        updateTimer = setTimeout(() => {
-          void checkUpdates();
-          void checkDeepPiUpdate();
-        }, 30_000);
+        void checkUpdates();
+        void checkDeepPiUpdate();
       }
     });
 
@@ -721,7 +768,8 @@
       destroy: () => appWindow.destroy(),
       error: showError,
     });
-    const closeListener = appWindow.onCloseRequested(requestWindowClose);
+    quitFromSlash = () => requestWindowClose({ preventDefault() {} }, "tray");
+    const closeListener = appWindow.onCloseRequested(async (event) => { await requestWindowClose(event); });
     // 托盘菜单的「退出」：复用既有关闭流程（活动任务确认、设置落盘、任务清理）。
     // 需要弹确认框或提示时，先把可能隐藏着的主窗口亮出来，否则用户看不到对话框。
     const trayQuitListener = listen("tray-quit", async () => {
@@ -789,8 +837,8 @@
     return () => {
       disposed = true;
       pageDisposed = true;
+      quitFromSlash = null;
       startup.dispose();
-      clearTimeout(updateTimer);
       window.removeEventListener("keydown", handleShortcut, true);
       observer.disconnect();
       systemTheme.removeEventListener("change", handleSystemThemeChange);
@@ -1131,6 +1179,84 @@
     openSettings();
   }
 
+  async function hostSlash(task: Task, command: "new" | "settings" | "login" | "logout" | "reload" | "quit" | "resume" | "scoped-models" | "changelog" | "hotkeys" | "import" | "share" | "trust", args: string): Promise<boolean> {
+    switch (command) {
+      case "resume": {
+        const available = tasks.filter((candidate) => candidate.agent === "pi" && candidate.id !== task.id && candidate.projectId === task.projectId && candidate.interactionMode === "rpc" && !candidate.archivedAt);
+        if (!available.length) { showError(t("此项目没有其他可恢复的会话")); return false; }
+        const selected = args || await dialogs.request({ kind: "choice", title: t("恢复会话"),
+          message: t("选择此项目的会话"), choices: available.map((candidate) => ({ value: candidate.id, label: candidate.title })) });
+        const target = available.find((candidate) => candidate.id === selected);
+        if (!target) { if (selected) showError(t("找不到指定的会话")); return false; }
+        openTask(target);
+        return activeTaskId === target.id;
+      }
+      case "hotkeys": {
+        await dialogs.request({ kind: "confirm", title: t("快捷键"),
+          message: ["tasks", "files", "settings", "workspacePi", "workspaceDsh", "sidebar", "composer", "save", "saveAs", "nextDiff", "previousDiff"].map((id) => `${id}: ${shortcutLabel(id as Parameters<typeof shortcutLabel>[0])}`).join("\n") });
+        return true;
+      }
+      case "changelog": {
+        const text = await invoke<string>("pi_slash_changelog");
+        await dialogs.request({ kind: "alert", title: t("Pi 更新日志"), message: text });
+        return true;
+      }
+      case "scoped-models": {
+        if (!task.runId) { showError(t("请先启动会话后再使用命令")); return false; }
+        const result = await invoke<{ models: { provider: string; id: string; name: string }[] }>("rpc_command", {
+          taskId: task.id, runId: task.runId, command: { type: "get_available_models" },
+        });
+        const models = result.models ?? [];
+        if (!models.length) { showError(t("当前会话没有可用模型")); return false; }
+        const saved = await invoke<string[] | null>("pi_slash_config", { taskId: task.id, action: "get_scoped", payload: null });
+        const enabled = new Set(saved ?? models.map((model) => `${model.provider}/${model.id}`));
+        while (true) {
+          const choice = await dialogs.request({ kind: "choice", title: t("轮换模型"),
+            message: t("选择模型切换状态，完成后保存；重新加载会话后生效。"),
+            choices: [{ value: "save", label: t("保存选择") }, { value: "all", label: t("启用全部模型") },
+              ...models.map((model) => ({ value: `${model.provider}/${model.id}`, label: `${enabled.has(`${model.provider}/${model.id}`) ? "[x]" : "[ ]"} ${model.name} (${model.provider})` }))],
+          });
+          if (choice === "all") { enabled.clear(); for (const model of models) enabled.add(`${model.provider}/${model.id}`); continue; }
+          if (choice === "save") {
+            const chosen = [...enabled];
+            await invoke("pi_slash_config", { taskId: task.id, action: "set_scoped", payload: chosen.length === models.length ? null : chosen });
+            await dialogs.request({ kind: "alert", title: t("轮换模型"), message: t("模型选择已保存。重新加载会话后生效。") });
+            return true;
+          }
+          if (typeof choice !== "string" || !models.some((model) => `${model.provider}/${model.id}` === choice)) return false;
+          if (enabled.has(choice)) enabled.delete(choice); else enabled.add(choice);
+        }
+      }
+      case "import":
+      case "share":
+      case "trust":
+      case "login":
+      case "logout":
+      case "reload":
+      case "quit":
+        return runSensitiveHostSlash(task, command as SensitiveHostSlash, args, {
+          invoke,
+          confirm: confirmDialog,
+          dialog: (request) => dialogs.request(request),
+          chooseImport: () => open({ filters: [{ name: "Pi JSONL", extensions: ["jsonl"] }], multiple: false, title: t("导入 Pi 会话") }),
+          reportError: showError,
+          openLogin: (provider) => {
+            loginRequest = provider ? { provider, serial: (loginRequest?.serial ?? 0) + 1 } : null;
+            openSettingsCategory("models");
+          },
+          notifyModelsChanged,
+          restart: async (current) => { await restartTask(current, "rpc"); },
+          quit: quitFromSlash,
+        });
+      case "new": {
+        const before = tasks.length;
+        await startTask(task.projectId);
+        return tasks.length > before;
+      }
+      case "settings": openSettings(); return true;
+    }
+  }
+
   async function startTask(projectId: string | null = selectedProjectId, mode: "rpc" | "tui" = "rpc") {
     const project = projects.find((candidate) => candidate.id === projectId);
     if (!project) {
@@ -1273,23 +1399,26 @@
 
   async function renameTask(task: Task) {
     const title = await inputDialog(t("重命名任务"), t("修改任务在项目列表中的显示名称。"), task.title);
-    if (!title || title === task.title) return;
+    if (!title?.trim()) return;
     try {
       await invoke("rename_task", { taskId: task.id, title });
-      task.title = title;
+      task.title = title.trim();
+      task.titleOrigin = "manual";
     } catch (error) {
       showError(error);
     }
   }
 
-  async function autoRenameTask(task: Task, title: string) {
-    if (!title || title === task.title) return;
-    try {
-      await invoke("rename_task", { taskId: task.id, title });
-      task.title = title;
-    } catch (error) {
-      showError(error);
-    }
+  async function manualRenameTask(task: Task, title: string) {
+    await invoke("rename_task", { taskId: task.id, title });
+    task.title = title.trim();
+    task.titleOrigin = "manual";
+  }
+
+  function autoRenameTask(task: Task, title: string, expected: string): boolean {
+    if (task.titleOrigin !== "auto" || task.title !== expected) return false;
+    task.title = title;
+    return true;
   }
 
   async function closeTask(task: Task) {
@@ -1501,6 +1630,9 @@
       tasks={piTasks}
       selectedProjectId={selectedProjectId}
       activeTaskId={activeTaskId}
+      quotaModelKey={quotaSelection?.taskId === activeTaskId ? quotaSelection.modelKey : ""}
+      quotaSessionKey={`${activeTaskId ?? ""}:${activeTask?.runId ?? ""}`}
+      quotaVisible={inlineSessionTabs}
       onAddProject={addProject}
       onOpenProject={selectProject}
       onOpen={openTask}
@@ -1554,17 +1686,12 @@
           <p class="dsh-error" role="alert">
             <strong>{t("DSH 启动失败")}</strong>
             <span>{tm(dshHostError)}</span>
-            {#if /plugin tree failed to load|does not provide an export/.test(dshHostError)}
-              <small>{t("提示：某个 DSH 插件与当前 DSH 版本不兼容。可以到 设置 → DSH 服务 点“修复”处理。")}</small>
-            {/if}
           </p>
+          <DshFailure {dshRunning} {busyRuntime} confirm={confirmDialog} onError={showError}
+            onUpdateDshRuntime={() => void alignDshRuntime()} onBusyChange={(busy) => { dshBusy = busy; }} />
           <div class="dsh-error-actions">
-            <button type="button" class="start-button" onclick={showDsh} disabled={isDshStarting}>
+            <button type="button" class="start-button" onclick={showDsh} disabled={isDshStarting || dshBusy}>
               <RotateCcw size={16} />{t("重启 DSH")}
-            </button>
-            <button type="button" class="start-button" title={t("打开 设置 → DSH 服务，查看失败原因并修复")}
-              onclick={() => openSettingsCategory("dsh")}>
-              <Wrench size={16} />{t("修复")}
             </button>
           </div>
         {/if}
@@ -1597,13 +1724,19 @@
           {#each allTerminalTasks as task (task.id)}
             {#if task.interactionMode === "rpc"}
               <ChatPane
-                taskId={task.id} runId={task.runId} title={task.title}
+                taskId={task.id} runId={task.runId} stopped={!(["running", "waiting"].includes(task.status))} title={task.title}
                 tabs={inlineSessionTabs && task.id === activeTaskId ? sessionTabs : undefined}
-                autoName={/^(Pi Task \d+|Session [0-9a-f]{8})$/.test(task.title)}
-                onAutoRename={(title) => void autoRenameTask(task, title)}
+                autoName={task.titleOrigin === "auto"}
+                onAutoRename={(title, expected) => autoRenameTask(task, title, expected)}
+                onManualRename={(title) => manualRenameTask(task, title)}
                 switching={switchingTasks.has(task.id)}
                 visible={activeAgent === "pi" && view === "workspace" && !inspectingFile && task.projectId === selectedProjectId && paneTaskIds.includes(task.id)}
                 active={task.id === activeTaskId}
+                onModelChange={(modelKey) => {
+                  if (task.id === activeTaskId && (quotaSelection?.taskId !== task.id || quotaSelection.modelKey !== modelKey)) {
+                    quotaSelection = { taskId: task.id, modelKey };
+                  }
+                }}
                 focusToken={composerFocusToken}
                 onUseTerminal={() => void switchTaskMode(task, "tui")}
                 onDialog={(request) => dialogs.request(request)}
@@ -1614,10 +1747,18 @@
                 }}
               onOpenModelSettings={() => openSettingsCategory("models")}
               onReloadSession={() => void restartTask(task, "rpc")}
+              onStartSession={() => restartTask(task, "rpc")}
               onRecoverSession={async (expectedRunId) => {
                 if (task.runId !== expectedRunId) throw new Error(t("运行中的会话已变化，请重新检查任务状态"));
                 const restarted = await restartTask(task, "rpc", expectedRunId);
                 return restarted ? task.runId : null;
+              }}
+              onHostSlash={(command, args) => hostSlash(task, command, args)}
+              onSessionRebound={async () => {
+                const updated = (await invoke<Task[]>("list_tasks")).find((candidate) => candidate.id === task.id);
+                if (!updated || updated.sessionId === task.sessionId) throw new Error(t("会话映射未更新"));
+                task.sessionId = updated.sessionId;
+                task.sessionFile = updated.sessionFile;
               }}
               chatDetailLevel={settings.chatDetailLevel}
               />
@@ -1710,18 +1851,8 @@
     <div class="panel-resize-handle resize-left" role="separator" aria-orientation="vertical" aria-label={t("拖拽调整文件栏宽度")} title={t("拖拽调整宽度")} onpointerdown={(event) => startPanelResize("files", event)}></div>
     <button type="button" class="panel-toggle" aria-label={t("隐藏文件栏")} title={t("隐藏文件栏")}
       onclick={() => { filesVisible = false; }}><PanelRightClose size={15} /></button>
-    <div class="file-project-selector">
-      <select aria-label={t("文件所属项目")} value={selectedProjectId ?? ""}
-        onchange={(event) => { const project = projects.find((item) => item.id === event.currentTarget.value); if (project) selectProject(project); }}>
-        {#if !projects.length}<option value="">{t("未选择项目")}</option>{/if}
-        {#each projects as project (project.id)}<option value={project.id}>{project.name}</option>{/each}
-      </select>
-      <button type="button" aria-label={t("添加项目目录")} title={t("添加项目目录")} onclick={addProject}><FolderPlus size={16} /></button>
-      <button type="button" aria-label={t("恢复副本")} title={t("恢复副本…")} disabled={!selectedProjectId || recoveryBusy}
-        onclick={() => { recoveryModule ??= import("$lib/FileRecoveryPanel.svelte"); recoveryProject = selectedProject ? { id: selectedProject.id, name: selectedProject.name } : null; }}><History size={16} /></button>
-    </div>
     {#if fileSidebarVisited}
-      <FileSidebar project={selectedProject} onOpen={openFile}
+      <FileSidebar project={selectedProject} onOpen={openFile} onAction={fileTreeAction}
         visible={showFiles} refreshToken={filesRefreshToken}
         {watchError} onRetryWatch={() => { watchRetry++; }}
         searchFocusToken={showFiles ? fileSearchFocusToken : 0} />
@@ -1767,9 +1898,7 @@
         onCheckAppUpdate={() => void checkDeepPiUpdate()}
         onInstallAppUpdate={() => void installDeepPiUpdate()}
         onUpdateRuntime={(update) => void installRuntime(update)}
-        onRollbackRuntime={(update) => void rollbackRuntime(update)}
-        onSnoozeRuntime={(update) => snoozeRuntime(update)}
-        onSkipRuntime={(update) => skipRuntime(update)}
+        onUninstallRuntime={(runtime) => void uninstallRuntime(runtime)}
         onRestartPi={() => void restartAllPiTasks()}
         onRestartDsh={() => void restartDsh()}
         {restartBusy}
@@ -1778,7 +1907,8 @@
         onClose={closeSettings}
       >
         {#snippet models()}
-          <PiProviderSettings embedded confirm={confirmDialog} onClose={closeSettings} onError={showError} />
+          <PiProviderSettings embedded confirm={confirmDialog} onClose={closeSettings} onError={showError} {loginRequest}
+            codexTransport={settings.codexTransport} onCodexTransportChange={(codexTransport) => updateSettings({ ...settings, codexTransport })} />
         {/snippet}
         {#snippet extensions()}
           <PiMarketplace embedded projectPath={selectedProject?.path ?? null} confirm={confirmDialog} onClose={closeSettings} onError={showError} onBusyChange={(busy) => { settingsPackageBusy = busy; }} />
@@ -1795,10 +1925,7 @@
             {restartBusy}
             {busyRuntime}
             onRestartDsh={() => void restartDsh()}
-            onUpdateDshRuntime={() => void alignDshRuntime()}
-            confirm={confirmDialog}
             onError={showError}
-            onBusyChange={(busy) => { dshBusy = busy; }}
           />
         {/snippet}
       </PiSettings>

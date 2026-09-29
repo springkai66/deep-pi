@@ -61,4 +61,19 @@ describe("provider model save state", () => {
     expect(source).toMatch(/const unchanged = draftSnapshot\(\) === submittedSnapshot;/);
     expect(source).toMatch(/if \(unchanged\) \{\s*\n\s*draft = cloneProvider\(saved\);/);
   });
+  it("keeps selection writes out of a concurrent full provider save", () => {
+    expect(source).toMatch(/disabled=\{isLoading\} saving=\{selectionSaving\}/);
+    expect(functionSource("toggleModel")).toMatch(/if \(isLoading\) return;/);
+    expect(functionSource("selectAllModels")).toMatch(/if \(isLoading\) return;/);
+    expect(functionSource("clearModelSelection")).toMatch(/if \(isLoading\) return;/);
+    expect(functionSource("addManualModel")).toMatch(/if \(isLoading\) return;/);
+    expect(functionSource("removeProvider")).toMatch(/await confirm[\s\S]*?if \(selectionSaving \|\| isLoading\) return;/);
+    expect(functionSource("openProviderEditor")).toMatch(/if \(selectionSaving\) return;/);
+  });
+  it("keeps removed models available for re-selection after the server snapshot changes", () => {
+    const clear = functionSource("clearModelSelection");
+    expect(clear.indexOf("selectionCandidates =")).toBeLessThan(clear.indexOf("draft.models = []"));
+    expect(functionSource("toggleModel")).toMatch(/if \(removed\) selectionCandidates =/);
+    expect(functionSource("modalModelRows")).toMatch(/Object\.values\(selectionCandidates\)/);
+  });
 });

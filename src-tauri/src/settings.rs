@@ -76,6 +76,10 @@ fn default_proxy_mode() -> String {
     "system".into()
 }
 
+fn default_codex_transport() -> String {
+    "sse".into()
+}
+
 fn default_notify_on_task_complete() -> bool {
     true
 }
@@ -240,6 +244,12 @@ pub struct AppSettings {
     /// 不走代理的地址列表（NO_PROXY，逗号分隔）。
     #[serde(default)]
     pub proxy_no_proxy: String,
+    /// Codex RPC 传输方式；仅影响之后启动的会话。
+    #[serde(default = "default_codex_transport")]
+    pub codex_transport: String,
+    /// 订阅模型选择器筛选：None 表示全部，空数组表示不显示 Codex 候选。
+    #[serde(default)]
+    pub codex_selected_models: Option<Vec<String>>,
     /// 任务完成/失败时发送系统通知（应用在后台也会提示）。
     #[serde(default = "default_notify_on_task_complete")]
     pub notify_on_task_complete: bool,
@@ -279,6 +289,8 @@ impl Default for AppSettings {
             proxy_mode: default_proxy_mode(),
             proxy_url: String::new(),
             proxy_no_proxy: String::new(),
+            codex_transport: default_codex_transport(),
+            codex_selected_models: None,
             notify_on_task_complete: default_notify_on_task_complete(),
             pet_enabled: default_pet_enabled(),
             pet_always_on_top: default_pet_always_on_top(),
@@ -385,6 +397,8 @@ impl SettingsStore {
             .write()
             .map_err(|_| "settings lock is poisoned")?;
         settings.external_editor = current.external_editor.clone();
+        // Managed by the subscription picker: unrelated settings forms may hold an older snapshot.
+        settings.codex_selected_models = current.codex_selected_models.clone();
         self.persist(&settings)?;
         *current = settings;
         Ok(())
@@ -400,6 +414,26 @@ impl SettingsStore {
             .map_err(|_| "settings lock is poisoned")?;
         let mut next = current.clone();
         next.external_editor = editor;
+        self.persist(&next)?;
+        *current = next;
+        Ok(())
+    }
+
+    pub(crate) fn set_codex_selected_models(
+        &self,
+        models: Option<Vec<String>>,
+    ) -> Result<(), String> {
+        crate::pi_model_selection::validate_ids(models.as_deref())?;
+        let models = crate::pi_model_selection::normalize_ids(models);
+        let mut current = self
+            .settings
+            .write()
+            .map_err(|_| "settings lock is poisoned")?;
+        if current.codex_selected_models == models {
+            return Ok(());
+        }
+        let mut next = current.clone();
+        next.codex_selected_models = models;
         self.persist(&next)?;
         *current = next;
         Ok(())
@@ -422,6 +456,10 @@ impl SettingsStore {
 }
 
 fn validate(settings: &AppSettings) -> Result<(), String> {
+    crate::pi_model_selection::validate_ids(settings.codex_selected_models.as_deref())?;
+    if !crate::pi_transport::CODEX_TRANSPORTS.contains(&settings.codex_transport.as_str()) {
+        return Err("codexTransport must be sse, auto, websocket, or websocket-cached".into());
+    }
     if settings.pi_environment != "managed" {
         return Err("piEnvironment must be managed".into());
     }
@@ -718,6 +756,82 @@ mod tests {
             ..AppSettings::default()
         };
         assert!(super::validate(&settings).is_err());
+    }
+
+    #[test]
+    fn codex_model_selection_persists_and_survives_unrelated_settings_saves() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("settings.json");
+        let backups = root.path().join("backups");
+        let mut legacy = serde_json::to_value(AppSettings::default()).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("codexSelectedModels");
+        std::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let store = SettingsStore::open(path.clone(), backups.clone()).unwrap();
+        let mut stale = store.get().unwrap();
+        assert!(stale.codex_selected_models.is_none());
+        store
+            .set_codex_selected_models(Some(vec!["two".into(), "one".into(), "two".into()]))
+            .unwrap();
+        stale.color_mode = "light".into();
+        store.save(stale).unwrap();
+        let reopened = SettingsStore::open(path.clone(), backups.clone()).unwrap();
+        assert_eq!(
+            reopened.get().unwrap().codex_selected_models,
+            Some(vec!["one".into(), "two".into()])
+        );
+        assert_eq!(reopened.get().unwrap().color_mode, "light");
+        let before = std::fs::read(&path).unwrap();
+        assert!(store
+            .set_codex_selected_models(Some(vec!["".into()]))
+            .is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        store.set_codex_selected_models(Some(vec![])).unwrap();
+        assert_eq!(
+            SettingsStore::open(path.clone(), backups.clone())
+                .unwrap()
+                .get()
+                .unwrap()
+                .codex_selected_models,
+            Some(vec![])
+        );
+        store.set_codex_selected_models(None).unwrap();
+        assert!(SettingsStore::open(path, backups)
+            .unwrap()
+            .get()
+            .unwrap()
+            .codex_selected_models
+            .is_none());
+    }
+
+    #[test]
+    fn codex_transport_defaults_persists_and_rejects_invalid_choices() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("settings.json");
+        let backups = root.path().join("backups");
+        let mut legacy = serde_json::to_value(AppSettings::default()).unwrap();
+        legacy.as_object_mut().unwrap().remove("codexTransport");
+        std::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let store = SettingsStore::open(path.clone(), backups.clone()).unwrap();
+        assert_eq!(store.get().unwrap().codex_transport, "sse");
+        for mode in crate::pi_transport::CODEX_TRANSPORTS {
+            let mut settings = store.get().unwrap();
+            settings.codex_transport = (*mode).into();
+            store.save(settings).unwrap();
+            let reopened = SettingsStore::open(path.clone(), backups.clone()).unwrap();
+            assert_eq!(reopened.get().unwrap().codex_transport, *mode);
+            let saved: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert_eq!(saved["codexTransport"], *mode);
+        }
+        let original = std::fs::read(&path).unwrap();
+        let mut invalid = store.get().unwrap();
+        invalid.codex_transport = "invalid".into();
+        assert!(store.save(invalid).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert_eq!(store.get().unwrap().codex_transport, "websocket-cached");
     }
 
     #[test]

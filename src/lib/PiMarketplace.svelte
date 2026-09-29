@@ -48,6 +48,8 @@
   let packages = $state<PiPackage[]>([]);
   let installed = $state<InstalledPackage[]>([]);
   let scope = $state<"global" | "project">("global");
+  let tab = $state<"installed" | "market">("installed");
+  let installedLoading = $state(false);
   let isLoading = $state(false);
   let busyPackage = $state<string | null>(null);
   $effect(() => onBusyChange(busyPackage !== null));
@@ -88,6 +90,7 @@
 
   async function refreshInstalled() {
     const generation = ++installedGeneration;
+    installedLoading = true;
     try {
       const result = await invoke<InstalledPackage[]>("list_pi_packages", {
         scope,
@@ -97,6 +100,8 @@
       if (generation === installedGeneration) installed = result;
     } catch (error) {
       if (generation === installedGeneration) onError(error);
+    } finally {
+      if (generation === installedGeneration) installedLoading = false;
     }
   }
 
@@ -219,496 +224,158 @@
 </script>
 
 <section class="market-page" class:embedded aria-label={t("Pi 扩展市场")}>
-  <header class="market-header">
-    {#if !embedded}<div class="market-title">
-      <button class="icon-button" type="button" aria-label={t("返回工作区")} title={t("返回")} disabled={busyPackage !== null} onclick={onClose}>
-        <X size={17} />
-      </button>
-      <PackageOpen size={18} />
+  {#if !embedded}
+    <header class="market-header">
+      <button class="icon-action" type="button" aria-label={t("返回工作区")} title={t("返回工作区")} disabled={busyPackage !== null} onclick={onClose}><X size={17} /></button>
       <h1>{t("Pi 扩展市场")}</h1>
-    </div>{/if}
-    <div class="scope-switch" aria-label={t("安装范围")}>
-      <button class:active={scope === "global"} type="button" disabled={busyPackage !== null} onclick={() => { scope = "global"; void refreshInstalled(); }}>{t("全局")}</button>
-      <button class:active={scope === "project"} type="button" disabled={!canUseProjectScope || busyPackage !== null} onclick={() => { scope = "project"; void refreshInstalled(); }}>{t("项目")}</button>
+    </header>
+  {/if}
+  <div class="page-controls">
+    <div class="scope-switch" role="group" aria-label={t("安装范围")}>
+      <button class:active={scope === "global"} aria-pressed={scope === "global"} type="button" disabled={busyPackage !== null}
+        onclick={() => { scope = "global"; void refreshInstalled(); }}>{t("全局")}</button>
+      <button class:active={scope === "project"} aria-pressed={scope === "project"} type="button" disabled={!canUseProjectScope || busyPackage !== null}
+        title={canUseProjectScope ? "" : t("请先选择一个项目")}
+        onclick={() => { scope = "project"; void refreshInstalled(); }}>{t("项目")}</button>
     </div>
-  </header>
-
-  <div class="search-row">
-    <form class="market-search" onsubmit={(event) => { event.preventDefault(); void search(); }}>
-      <Search size={16} />
-      <input bind:value={query} aria-label={t("搜索 Pi Package")} placeholder={t("搜索 Pi Package")} />
-      <button type="submit" aria-label={t("搜索")} title={t("搜索")}><Search size={15} /></button>
-    </form>
-    <select class="sort-select" bind:value={sortBy} aria-label={t("排序")}>
-      {#each SORT_MODES as mode (mode)}
-        <option value={mode}>{t(SORT_LABELS[mode])}</option>
-      {/each}
-    </select>
+    <div class="scope-switch tab-switch" role="group" aria-label={t("视图")}>
+      <button class:active={tab === "installed"} aria-pressed={tab === "installed"} type="button" onclick={() => { tab = "installed"; void refreshInstalled(); }}>{t("已安装")}</button>
+      <button class:active={tab === "market"} aria-pressed={tab === "market"} type="button" onclick={() => { tab = "market"; }}>{t("市场")}</button>
+    </div>
   </div>
 
-  {#if statusMessage}<p class="market-status" role="status">{statusMessage}</p>{/if}
-  {#if operationState}
-    <button class="quiet-button" type="button" disabled={operationState.cancelling} onclick={() => void cancelOperation()}><X size={14} />{operationState.cancelling ? t("正在取消并恢复") : t("取消操作")}</button>
-  {/if}
-
-  <div class="market-body">
-    <section class="package-list" aria-busy={isLoading}>
-      <header class="section-heading"><span>{t("官方目录")}</span><span>{packages.length}</span></header>
-      {#if isLoading}
-        <div class="market-empty">{t("正在加载目录…")}</div>
-      {:else if packages.length === 0}
-        <div class="market-empty">{t("没有匹配的 Package")}</div>
-      {:else}
-        <div class="package-grid">
-          {#each sortedPackages as pkg (pkg.name)}
-            {@const installedPackage = installedSource(pkg.name)}
-            <article class="package-card">
-              <div class="package-card-header">
-                <div>
-                  <h2>{pkg.name}</h2>
-                  <span class="package-types">{pkg.types.join(" · ") || "Pi Package"}</span>
-                </div>
-                {#if installedPackage}
-                  <span class="installed-badge">{t("已安装 · DeepPi 托管")}</span>
-                {/if}
-              </div>
-              <p>{pkg.description}</p>
-              <footer>
-                <span>{t("{count} / 月 · {date}", { count: formatDownloads(pkg.downloads), date: formatDate(pkg.publishedAt) })}</span>
-                {#if installedPackage}
-                  <button class="danger-button" type="button" disabled={busyPackage !== null} onclick={() => void remove(installedPackage)}>
-                    <Trash2 size={13} />{t("卸载")}
-                  </button>
-                {:else}
-                  <button class="primary-button" type="button" disabled={busyPackage !== null} onclick={() => void install(pkg)}>
-                    {#if busyPackage === pkg.name}<span class="spin"><RefreshCw size={13} /></span>{:else}<PackageOpen size={13} />{/if}
-                    {t("安装")}
-                  </button>
-                {/if}
-              </footer>
-            </article>
-          {/each}
+  {#if tab === "installed"}
+    <section class="settings-group">
+      <div class="group-header">
+        <h3>{t("已安装")} · {t("Pi 扩展")}</h3>
+        <div class="header-actions">
+          <button class="icon-action" type="button" aria-label={t("全部更新 Pi Package")} title={t("更新 DeepPi 托管扩展")}
+            disabled={busyPackage !== null || installed.length === 0} onclick={() => void updateAll()}><ArrowUpCircle size={14} /></button>
+          <button class="icon-action" type="button" aria-label={t("刷新已安装 Package")} title={t("刷新")}
+            disabled={installedLoading} onclick={() => void refreshInstalled()}><RefreshCw size={14} /></button>
         </div>
+      </div>
+      {#if installedLoading && installed.length === 0}
+        <p class="muted" role="status">{t("正在加载目录…")}</p>
+      {:else if installed.length === 0}
+        <p class="muted" role="status">{t("暂无已安装 Package")}</p>
+      {:else}
+        <ul class="entry-list">
+          {#each installed as pkg (pkg.source)}
+            <li>
+              <div class="entry-main">
+                <strong>{pkg.source}</strong>
+                <small>{t("DeepPi 托管")}</small>
+              </div>
+              <button class="icon-action" type="button" aria-label={t("更新 {name}", { name: pkg.source })} title={t("更新")}
+                disabled={busyPackage !== null} onclick={() => void update(pkg)}><RefreshCw size={14} /></button>
+              <button class="danger-action" type="button" aria-label={t("卸载 {name}", { name: pkg.source })} title={t("卸载")}
+                disabled={busyPackage !== null} onclick={() => void remove(pkg)}><Trash2 size={14} /></button>
+            </li>
+          {/each}
+        </ul>
       {/if}
     </section>
-
-    <aside class="installed-panel">
-      <header class="section-heading">
-        <span>{t("已安装")} <small class="environment-note">{scope === "global" ? t("DeepPi 托管") : t("当前项目")}</small></span>
-        <span class="section-heading-actions">
-          <button type="button" aria-label={t("全部更新 Pi Package")} title={t("更新 DeepPi 托管扩展")} disabled={busyPackage !== null || installed.length === 0} onclick={() => void updateAll()}><ArrowUpCircle size={14} /></button>
-          <button type="button" aria-label={t("刷新已安装 Package")} title={t("刷新")} onclick={() => void refreshInstalled()}><RefreshCw size={14} /></button>
-        </span>
-      </header>
-      {#if installed.length === 0}
-        <p class="market-empty">{t("暂无已安装 Package")}</p>
+  {:else}
+    <section class="settings-group">
+      <div class="group-header">
+        <h3>{t("Pi 扩展市场")}</h3>
+        <span class="muted">{t("官方目录")}</span>
+      </div>
+      <div class="market-toolbar">
+        <form class="market-search" onsubmit={(event) => { event.preventDefault(); void search(); }}>
+          <Search size={14} />
+          <input bind:value={query} aria-label={t("搜索 Pi Package")} placeholder={t("搜索 Pi Package")} autocomplete="off" />
+          <button class="primary-action compact" type="submit" disabled={isLoading} aria-label={t("搜索")} title={t("搜索")}><Search size={14} />{t("搜索")}</button>
+        </form>
+        <select class="market-sort" bind:value={sortBy} aria-label={t("排序")}>
+          {#each SORT_MODES as mode (mode)}<option value={mode}>{t(SORT_LABELS[mode])}</option>{/each}
+        </select>
+      </div>
+      {#if isLoading && packages.length === 0}
+        <p class="muted" role="status">{t("正在加载目录…")}</p>
+      {:else if packages.length === 0}
+        <p class="muted" role="status">{t("没有匹配的 Package")}</p>
       {:else}
-        {#each installed as pkg (`${pkg.source}`)}
-          <div class="installed-row">
-            <span class="installed-copy">
-              <strong>{pkg.source}</strong>
-              <small>{t("DeepPi 托管")}</small>
-            </span>
-            <button type="button" aria-label={t("更新 {name}", { name: pkg.source })} title={t("更新")} disabled={busyPackage !== null} onclick={() => void update(pkg)}><RefreshCw size={13} /></button>
-          </div>
-        {/each}
+        <ul class="entry-list market-list">
+          {#each sortedPackages as pkg (pkg.name)}
+            {@const installedPackage = installedSource(pkg.name)}
+            <li>
+              <div class="entry-main">
+                <strong>{pkg.name}</strong>
+                <small>{pkg.description}</small>
+                <span class="market-meta">
+                  <span>{pkg.types.join(" · ") || "Pi Package"}</span>
+                  <span>{t("{count} / 月 · {date}", { count: formatDownloads(pkg.downloads), date: formatDate(pkg.publishedAt) })}</span>
+                  {#if installedPackage}<span class="market-flag">{t("已安装 · DeepPi 托管")}</span>{/if}
+                </span>
+              </div>
+              {#if installedPackage}
+                <button class="danger-action" type="button" disabled={busyPackage !== null}
+                  aria-label={t("卸载 {name}", { name: pkg.name })} title={t("卸载")}
+                  onclick={() => void remove(installedPackage)}><Trash2 size={14} /></button>
+              {:else}
+                <button class="primary-action compact" type="button" disabled={busyPackage !== null} onclick={() => void install(pkg)}>
+                  {#if busyPackage === pkg.name}<span class="spin"><RefreshCw size={12} /></span>{:else}<PackageOpen size={12} />{/if}{t("安装")}
+                </button>
+              {/if}
+            </li>
+          {/each}
+        </ul>
       {/if}
-    </aside>
-  </div>
+    </section>
+  {/if}
+  {#if statusMessage}<p class="status" role="status">{statusMessage}</p>{/if}
+  {#if operationState}
+    <button class="secondary-action" type="button" disabled={operationState.cancelling} onclick={() => void cancelOperation()}>
+      <X size={14} />{operationState.cancelling ? t("正在取消并恢复") : t("取消操作")}
+    </button>
+  {/if}
 </section>
 
 <style>
-  .market-page.embedded { padding: 0; display: flex; flex-direction: column; }
-  .embedded .market-header { justify-content: flex-end; }
-  .embedded .market-header, .embedded .search-row { flex-shrink: 0; }
-  .embedded .market-body { flex: 1; }
-  .market-page {
-    display: grid;
-    grid-template-rows: 54px 42px auto minmax(0, 1fr);
-    gap: 12px;
-    height: 100%;
-    padding: 14px 18px 18px;
-    overflow: hidden;
-    color: var(--text);
-    font-family: var(--text-font);
+  .market-page { display: grid; align-content: start; gap: 16px; min-width: 0; color: var(--text); font-family: var(--text-font); }
+  .market-header, .page-controls, .group-header, .header-actions, .market-toolbar, .market-search, .entry-list li, .market-meta { display: flex; align-items: center; }
+  .market-header { gap: 10px; }
+  h1 { margin: 0; font-size: 16px; }
+  .page-controls, .group-header { justify-content: space-between; gap: 8px; }
+  .page-controls { flex-wrap: wrap; }
+  .scope-switch { display: inline-flex; gap: 2px; padding: 2px; border: 1px solid var(--border-strong); border-radius: 5px; background: var(--page-bg); }
+  .scope-switch button { min-width: 68px; padding: 6px 12px; border: 0; border-radius: 3px; color: var(--text-muted); background: transparent; font-size: 13px; cursor: pointer; }
+  .scope-switch button.active { color: var(--accent-ink); background: var(--accent); font-weight: 700; }
+  button:disabled { opacity: .45; cursor: default; }
+  h3 { margin: 0; font-size: 14px; font-weight: 650; color: var(--text-strong); }
+  .header-actions { gap: 4px; }
+  .icon-action, .danger-action { display: grid; place-items: center; flex-shrink: 0; width: 32px; height: 32px; border: 1px solid transparent; border-radius: 4px; background: transparent; color: var(--text-muted); cursor: pointer; }
+  .icon-action:hover:not(:disabled) { border-color: var(--border-strong); color: var(--text); background: var(--surface-hover); }
+  .danger-action { color: var(--status-failed); }
+  .danger-action:hover:not(:disabled) { border-color: var(--status-failed); background: var(--surface-hover); }
+  .muted { color: var(--text-muted); font-size: 12px; }
+  .entry-list { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 6px; }
+  .entry-list li { gap: 10px; min-width: 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); }
+  .entry-main { flex: 1; min-width: 0; display: grid; gap: 2px; }
+  .entry-main strong, .entry-main small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .entry-main strong { font-size: 13px; color: var(--text-strong); }
+  .entry-main small { font-size: 12px; color: var(--text-muted); }
+  .market-meta { flex-wrap: wrap; gap: 8px; font-size: 12px; color: var(--text-muted); }
+  .market-flag { padding: 3px 7px; border: 1px solid var(--border-strong); border-radius: 4px; color: var(--text); }
+  .market-toolbar { gap: 8px; margin-top: 10px; }
+  .market-search { flex: 1; min-width: 0; gap: 8px; padding: 2px 4px 2px 10px; border: 1px solid var(--border-strong); border-radius: 5px; background: var(--surface); color: var(--text-muted); }
+  .market-search input { flex: 1; min-width: 0; height: 34px; border: 0; outline: 0; background: transparent; color: var(--text); font: inherit; font-size: 13px; }
+  .market-sort { flex-shrink: 0; height: 32px; max-width: 180px; padding: 0 6px; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--surface); color: var(--text); font: inherit; font-size: 12px; cursor: pointer; }
+  .primary-action, .secondary-action { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 32px; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--surface-hover); color: var(--text); cursor: pointer; }
+  .primary-action.compact, .secondary-action { font-size: 12px; flex-shrink: 0; }
+  @container (max-width: 720px) {
+    .market-toolbar, .market-list li { flex-wrap: wrap; }
+    .market-toolbar .market-search, .market-list .entry-main { flex-basis: 100%; }
   }
-
-  .market-header,
-  .market-title,
-  .scope-switch,
-  .market-search,
-  .package-card-header,
-  .package-card footer,
-  .section-heading,
-  .installed-row {
-    display: flex;
-    align-items: center;
-  }
-
-  .market-header,
-  .package-card footer,
-  .section-heading {
-    justify-content: space-between;
-  }
-
-  .market-title {
-    gap: 8px;
-  }
-
-  h1,
-  h2,
-  p {
-    margin: 0;
-  }
-
-  h1 {
-    font-size: 16px;
-    font-weight: 650;
-  }
-
-  h2 {
-    overflow: hidden;
-    color: var(--text-strong);
-    font-size: 13px;
-    font-weight: 650;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .icon-button,
-  .market-search button,
-  .scope-switch button,
-  .installed-panel button,
-  .primary-button,
-  .danger-button {
-    border-radius: 4px;
-    cursor: pointer;
-  }
-
-  .icon-button {
-    display: inline-grid;
-    place-items: center;
-    width: 30px;
-    height: 30px;
-    padding: 0;
-    border: 1px solid transparent;
-    color: var(--text-muted);
-    background: transparent;
-  }
-
-  .icon-button:hover,
-  .installed-panel button:hover {
-    border-color: var(--border-strong);
-    color: var(--text-strong);
-    background: var(--surface-hover);
-  }
-
-  .scope-switch {
-    gap: 2px;
-    padding: 2px;
-    border: 1px solid var(--border-strong);
-    border-radius: 5px;
-  }
-
-  .scope-switch button {
-    height: 26px;
-    padding: 0 10px;
-    border: 0;
-    color: var(--text-muted);
-    background: transparent;
-  }
-
-  .scope-switch button.active {
-    color: var(--accent-ink);
-    background: var(--accent);
-    font-weight: 700;
-  }
-
-  .scope-switch button:disabled {
-    cursor: default;
-    opacity: 0.4;
-  }
-
-  .search-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    min-width: 0;
-  }
-
-  .search-row .market-search {
-    flex: 1;
-    min-width: 0;
-  }
-
-  .sort-select {
-    height: 38px;
-    padding: 0 8px;
-    border: 1px solid var(--border-strong);
-    border-radius: 5px;
-    color: var(--text);
-    background: var(--surface);
-    font-family: var(--text-font);
-    font-size: 12px;
-    cursor: pointer;
-  }
-
-  .sort-select:focus-visible {
-    outline: 1px solid var(--accent);
-    outline-offset: -1px;
-  }
-
-  .market-search {
-    gap: 8px;
-    padding: 0 10px;
-    border: 1px solid var(--border-strong);
-    border-radius: 5px;
-    color: var(--text-muted);
-    background: var(--surface);
-  }
-
-  .market-search input {
-    flex: 1;
-    min-width: 0;
-    height: 36px;
-    border: 0;
-    outline: 0;
-    color: var(--text);
-    background: transparent;
-  }
-
-  .market-search button {
-    display: inline-grid;
-    place-items: center;
-    width: 28px;
-    height: 28px;
-    padding: 0;
-    border: 0;
-    color: var(--text-muted);
-    background: transparent;
-  }
-
-  .market-search button:hover {
-    color: var(--text-strong);
-    background: var(--surface-hover);
-  }
-
-  .market-status {
-    color: var(--accent);
-    font-size: 12px;
-  }
-
-  .market-body {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) 230px;
-    gap: 14px;
-    min-height: 0;
-    overflow: hidden;
-  }
-
-  .package-list,
-  .installed-panel {
-    min-width: 0;
-    min-height: 0;
-    overflow: auto;
-  }
-
-  .section-heading {
-    min-height: 28px;
-    padding: 0 2px;
-    color: var(--text-muted);
-    font-size: 11px;
-    font-weight: 700;
-  }
-
-.section-heading-actions {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-  }
-
-  .section-heading button {
-    display: inline-grid;
-    place-items: center;
-    width: 25px;
-    height: 25px;
-    padding: 0;
-    border: 1px solid transparent;
-    color: var(--text-muted);
-    background: transparent;
-  }
-
-  .package-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
-    gap: 8px;
-  }
-
-  .package-card {
-    display: grid;
-    grid-template-rows: auto minmax(50px, 1fr) auto;
-    min-width: 0;
-    min-height: 158px;
-    padding: 12px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: var(--surface);
-  }
-
-  .package-card-header {
-    gap: 8px;
-    min-width: 0;
-  }
-
-  .package-types,
-  .package-card footer,
-  .installed-row {
-    color: var(--text-muted);
-    font-size: 10px;
-  }
-
-  .environment-note {
-    margin-left: 4px;
-    color: var(--text-muted);
-    font-size: 9px;
-    font-weight: 400;
-  }
-
-  .package-card p {
-    display: -webkit-box;
-    margin: 10px 0;
-    overflow: hidden;
-    color: var(--text-muted);
-    line-height: 1.45;
-    line-clamp: 3;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 3;
-  }
-
-  .installed-badge {
-    flex: 0 0 auto;
-    padding: 3px 6px;
-    border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
-    border-radius: 3px;
-    color: var(--accent);
-    font-size: 10px;
-  }
-
-  .primary-button,
-  .danger-button {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    height: 27px;
-    padding: 0 8px;
-    border: 1px solid transparent;
-    font-size: 11px;
-    font-weight: 650;
-  }
-
-  .primary-button {
-    color: var(--accent-ink);
-    background: var(--accent);
-  }
-
-  .danger-button {
-    border-color: color-mix(in srgb, var(--status-failed) 55%, transparent);
-    color: var(--status-failed);
-    background: transparent;
-  }
-
-  .primary-button:disabled,
-  .danger-button:disabled {
-    cursor: default;
-    opacity: 0.45;
-  }
-
-  .installed-panel {
-    padding-left: 12px;
-    border-left: 1px solid var(--border);
-  }
-
-  .installed-row {
-    justify-content: space-between;
-    gap: 8px;
-    min-height: 36px;
-    border-bottom: 1px solid var(--border);
-  }
-
-  .installed-row span {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .installed-copy {
-    display: grid;
-    min-width: 0;
-    gap: 3px;
-  }
-
-  .installed-copy strong {
-    overflow: hidden;
-    color: var(--text-muted);
-    font-size: 11px;
-    font-weight: 600;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .installed-copy small {
-    color: var(--text-muted);
-    font-size: 9px;
-  }
-
-  .installed-panel button {
-    display: inline-grid;
-    place-items: center;
-    flex: 0 0 auto;
-    width: 25px;
-    height: 25px;
-    padding: 0;
-    border: 1px solid transparent;
-    color: var(--text-muted);
-    background: transparent;
-  }
-
-  .installed-panel button:disabled {
-    cursor: default;
-    opacity: 0.45;
-  }
-
-  .market-empty {
-    padding: 24px 2px;
-    color: var(--text-muted);
-    font-size: 12px;
-  }
-
-  .spin {
-    animation: spin 0.8s linear infinite;
-  }
-
-  @keyframes spin {
-    to { transform: rotate(360deg); }
-  }
-
-  @media (max-width: 900px) {
-    .market-body {
-      grid-template-columns: minmax(0, 1fr);
-      overflow: auto;
-    }
-
-    .installed-panel {
-      padding: 8px 0 0;
-      border-top: 1px solid var(--border);
-      border-left: 0;
-    }
-  }
-  @container (max-width: 680px) {
-    .market-page.embedded { height: auto; overflow: visible; }
-    .embedded .market-body { grid-template-columns: minmax(0, 1fr); overflow: visible; }
-    .embedded .package-list, .embedded .installed-panel { overflow: visible; }
-    .embedded .installed-panel { padding: 12px 0 0; border-top: 1px solid var(--border); border-left: 0; }
-    .embedded .package-grid { grid-template-columns: repeat(auto-fill, minmax(min(250px, 100%), 1fr)); }
+  .primary-action:hover:not(:disabled), .secondary-action:hover:not(:disabled) { border-color: var(--accent); color: var(--text-strong); }
+  .secondary-action { justify-self: start; background: transparent; }
+  .status { margin: 0; font-size: 13px; color: var(--accent); }
+  .spin { display: inline-grid; animation: spin 0.8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (max-width: 480px) {
+    .scope-switch button { min-width: 56px; padding-inline: 8px; }
+    .market-search .primary-action { padding-inline: 8px; }
   }
 </style>

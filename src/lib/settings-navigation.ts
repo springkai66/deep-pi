@@ -1,6 +1,7 @@
 export const SETTINGS_CATEGORIES = [
   { id: "general", label: "通用", group: "应用" },
   { id: "appearance", label: "外观", group: "应用" },
+  { id: "pi", label: "Pi 服务", group: "Pi Coding Agent" },
   { id: "models", label: "模型设置", group: "Pi Coding Agent" },
   { id: "extensions", label: "Pi 扩展", group: "Pi Coding Agent" },
   { id: "mcp", label: "MCP 服务", group: "Pi Coding Agent" },

@@ -170,11 +170,13 @@ describe("failed prompt cleanup", () => {
     state = applyRpcEvent(state, { sequence: 3, payload: { type: "rpc_error", error: '429: {"message":"limit reached","type":"rate_limit_error"}' } });
     expect(state.messages).toHaveLength(1); // 空 assistant 轮次被清掉
     expect(state.error).toBe("limit reached（rate_limit_error · HTTP 429）");
+    expect(state.errorRaw).toBe('429: {"message":"limit reached","type":"rate_limit_error"}');
   });
 
   it("clears the stale error once a new turn starts", () => {
     let state = emptyConversation();
     state = applyRpcEvent(state, { sequence: 1, payload: { type: "rpc_error", error: "fetch failed" } });
+    expect(state.errorRaw).toBe("fetch failed");
     expect(state.error).toBe("fetch failed");
     state = applyRpcEvent(state, { sequence: 2, payload: { type: "agent_start" } });
     expect(state.error).toBe("");

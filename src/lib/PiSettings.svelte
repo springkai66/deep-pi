@@ -27,7 +27,8 @@
   import { LOCALES, LOCALE_LABELS } from "./locale";
   import "./settings-controls.css";
 
-  interface Props extends RuntimeSettingsProps {
+  interface Props extends Omit<RuntimeSettingsProps, "view"> {
+    onRestartDsh: () => void;
     category: SettingsCategory;
     onCategoryChange: (category: SettingsCategory) => void;
     onChangeSettings: (settings: AppSettings) => void;
@@ -46,7 +47,7 @@
     confirmDiagnosticsClear: () => Promise<boolean>;
   }
   let { category, onCategoryChange, onChangeSettings, onEditorSaved, onClose, models, extensions, mcp, skills, workflows, dsh, closeBlocked = false, saving = false, onDiagnosticsBusy, confirmDiagnosticsClear, ...runtime }: Props = $props();
-  const icons = { general: Monitor, appearance: Palette, models: Server, extensions: PackageOpen, mcp: Puzzle, skills: Sparkles, workflows: Workflow, dsh: Globe, runtime: Download, network: Network, advanced: Wrench };
+  const icons = { general: Monitor, appearance: Palette, pi: Server, models: Server, extensions: PackageOpen, mcp: Puzzle, skills: Sparkles, workflows: Workflow, dsh: Globe, runtime: Download, network: Network, advanced: Wrench };
   let modelsVisited = $state(false);
   let extensionsVisited = $state(false);
   let mcpVisited = $state(false);
@@ -463,11 +464,12 @@
         </section>
       </div>
       <div class="settings-panel embedded-panel" hidden={category !== "models"}>{#if modelsVisited}{@render models()}{/if}</div>
-      <div class="settings-panel" hidden={category !== "runtime"}><RuntimeSettings {...runtime} /></div>
+      <div class="settings-panel" hidden={category !== "pi"}><RuntimeSettings {...runtime} view="pi" /></div>
+      <div class="settings-panel" hidden={category !== "runtime"}><RuntimeSettings {...runtime} view="app" /></div>
       <div class="settings-panel embedded-panel" hidden={category !== "extensions"}>{#if extensionsVisited}{@render extensions()}{/if}</div>
       <div class="settings-panel embedded-panel" hidden={category !== "mcp"}>{#if mcpVisited}{@render mcp()}{/if}</div>
       <div class="settings-panel embedded-panel" hidden={category !== "skills"}>{#if skillsVisited}{@render skills()}{/if}</div>
-      <div class="settings-panel embedded-panel" hidden={category !== "dsh"}>{#if dshVisited}{@render dsh()}{/if}</div>
+      <div class="settings-panel embedded-panel" hidden={category !== "dsh"}>{#if dshVisited}<RuntimeSettings {...runtime} view="dsh" />{@render dsh()}{/if}</div>
       <div class="settings-panel embedded-panel" hidden={category !== "workflows"}>
         {#if workflowsVisited}
           {#if workflows}

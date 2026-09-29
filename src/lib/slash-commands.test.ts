@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { filterSlashCommands, parseSlashCommand, slashSourceLabel } from "./slash-commands";
+import { BUILTIN_SLASH_COMMANDS, filterSlashCommands, parseSlashCommand, runHostSlash, slashCommandRoute, slashSourceLabel, supportsProviderLogin, syncSessionRebound } from "./slash-commands";
 
 describe("slash command parsing", () => {
   it("parses name and args from a command-looking draft", () => {
@@ -41,13 +41,62 @@ describe("slash command filtering", () => {
     expect(filterSlashCommands("", pi, 3)).toHaveLength(3);
   });
 
-  it("marks terminal-only commands and reports source labels", () => {
-    const terminal = filterSlashCommands("quit", pi)[0];
-    expect(terminal?.available).toBe(false);
-    expect(slashSourceLabel(terminal!)).toBe("终端");
+  it("exposes managed Pi builtins in the GUI and reports source labels", () => {
+    const quit = filterSlashCommands("quit", pi)[0];
+    expect(quit?.available).toBe(true);
+    expect(slashSourceLabel(quit!)).toBe("内置");
     const skill = filterSlashCommands("skill:pdf", pi)[0];
     expect(slashSourceLabel(skill!)).toBe("技能");
     const builtin = filterSlashCommands("compact", pi)[0];
     expect(slashSourceLabel(builtin!)).toBe("内置");
+  });
+});
+
+describe("managed Pi slash dispatch", () => {
+  it("routes every 0.85.1 builtin to a GUI action rather than a model prompt", () => {
+    const host = "new settings resume scoped-models import share changelog hotkeys trust login logout reload quit".split(" ");
+    const rpc = "compact model thinking name copy session export tree fork clone".split(" ");
+    expect(BUILTIN_SLASH_COMMANDS.map((command) => command.name).sort()).toEqual([...host, ...rpc].sort());
+    for (const name of host) expect(slashCommandRoute(name, [])).toBe("host");
+    for (const name of rpc) expect(slashCommandRoute(name, [])).toBe("rpc");
+    expect(BUILTIN_SLASH_COMMANDS.every((command) => command.available)).toBe(true);
+  });
+
+  it("keeps extensions, skills and prompt templates on the Pi prompt path", () => {
+    const commands = [
+      { name: "deploy", source: "extension", description: "Deploy" },
+      { name: "skill:pdf", source: "skill", description: "PDF" },
+      { name: "review", source: "prompt", description: "Review" },
+    ];
+    for (const command of commands) expect(slashCommandRoute(command.name, commands)).toBe("prompt");
+    expect(slashCommandRoute("missing", commands)).toBe("unknown");
+    expect(slashCommandRoute("quit", commands)).toBe("host");
+  });
+
+  it("preserves a host draft on cancellation and failure, and handles success", async () => {
+    const errors: unknown[] = [];
+    expect(await runHostSlash(async () => true, (error) => errors.push(error))).toBe("handled");
+    expect(await runHostSlash(async () => false, (error) => errors.push(error))).toBe("blocked");
+    expect(await runHostSlash(async () => { throw new Error("offline"); }, (error) => errors.push(error))).toBe("blocked");
+    expect(errors).toHaveLength(1);
+    expect((errors[0] as Error).message).toBe("offline");
+  });
+  it("accepts OAuth or Pi API Key providers for /login, but rejects unsupported identifiers", () => {
+    const providers = [{ id: "openai-codex", oauth: true, apiKey: false }, { id: "api-only", oauth: false, apiKey: true }, { id: "unsupported", oauth: false, apiKey: false }];
+    expect(supportsProviderLogin("openai-codex", providers)).toBe(true);
+    expect(supportsProviderLogin("api-only", providers)).toBe(true);
+    expect(supportsProviderLogin("unsupported", providers)).toBe(false);
+    expect(supportsProviderLogin("unknown", providers)).toBe(false);
+  });
+
+  it("reconnects after a session switch even if task mapping refresh fails", async () => {
+    const events: string[] = [];
+    expect(await syncSessionRebound(async () => { events.push("mapped"); }, () => events.push("reconnected"), () => events.push("error"))).toBe(true);
+    expect(events).toEqual(["mapped", "reconnected"]);
+    const failure = new Error("mapping unavailable");
+    const errors: unknown[] = [];
+    expect(await syncSessionRebound(async () => { throw failure; }, () => events.push("reconnected"), (error) => errors.push(error))).toBe(false);
+    expect(errors).toEqual([failure]);
+    expect(events).toEqual(["mapped", "reconnected", "reconnected"]);
   });
 });

@@ -22,12 +22,14 @@ it("keeps chat initialization tied to task/run/reconnect rather than conversatio
     const harness = [
       "import { untrack } from 'svelte';",
       'export function create() {',
+      'globalThis.window = { localStorage: {} };',
       'const emptyConversation = () => ({ messages: [], closed: false, busy: false });',
-      'let taskId = $state("task-a"), runId = $state(null), reconnect = $state(0);',
+      'let taskId = $state("task-a"), runId = $state(null), stopped = $state(true), reconnect = $state(0);',
       'let conversation = $state(emptyConversation());',
       'let models = $state([]), connected = $state(false), initializing = $state(true);',
       'let dormant = $state(false), historySession = $state.raw(null);',
-      'let generation = 0, autoSendOnConnect = false, unknownPromptOutcome = $state(false), sent = 0;',
+      'let stopRecords = $state([]), pendingStopAnchor = $state(null);',
+      'let generation = 0, autoSendOnConnect = false, pendingModelOnStart = $state(null), unknownPromptOutcome = $state(false), sent = 0;',
       'let turnDurations, runningTurn, turnStartedAt, historyLimit, followScroll, pinnedMessageStart;',
       'let sending, stopping, changingModel, changingThinking, thinkingLevels, thinkingLevel;',
       'let autoNamed, sessionStats, modelsLoadFailed, modelsLoadError, modelsStale, piCommands;',
@@ -36,12 +38,14 @@ it("keeps chat initialization tied to task/run/reconnect rather than conversatio
     ];
     harness.push(
       'const record = value => value ?? {};',
+      'const readStopRecords = (_storage, id) => { calls.push("stop-records:" + id); return []; };',
       'const t = value => value, tm = value => value;',
       'const onActivity = () => {}, onCancelDialogs = () => {}, refreshStats = () => {};',
       'const handleExtension = () => {}, applyRpcEvent = state => state;',
       'const loadHistory = (state, messages) => ({ ...state, messages });',
       'const send = () => { sent++; };',
       'const applySavedModelChoice = () => { models = [{ id: "model", provider: "provider" }]; };',
+      'const loadStoppedModels = async () => { models = [{ id: "model", provider: "provider" }]; };',
       'class Channel {}',
       'const invoke = async (command) => { calls.push(command); return {}; };',
       'const history = { messages: [{ role: "user", content: "history" }], start: 0, eventSequence: 0 };',
@@ -52,10 +56,10 @@ it("keeps chat initialization tied to task/run/reconnect rather than conversatio
       'return { calls, get conversation() { return conversation; }, get connected() { return connected; },',
       'get models() { return models; }, get initializing() { return initializing; }, get sent() { return sent; },',
       'updateMessages() { conversation = { ...conversation, messages: [...conversation.messages, { role: "assistant", content: "reply" }] }; },',
-      'start() { autoSendOnConnect = true; runId = "run-a"; }, restart() { runId = "run-b"; },',
+      'start() { autoSendOnConnect = true; stopped = false; runId = "run-a"; }, restart() { runId = "run-b"; },',
       'markUnknown() { unknownPromptOutcome = true; autoSendOnConnect = true; },',
-      'switchTask() { taskId = "task-b"; }, reconnect() { reconnect++; } };',
-      '}'
+      'switchTask() { taskId = "task-b"; }, stop() { stopped = true; }, reconnect() { reconnect++; } };',
+      '}',
     );
     const js = ts.transpileModule(harness.join('\n'), { compilerOptions: { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.ESNext } }).outputText;
     const compiled = compileModule(js, { filename: 'chat-initialization.svelte.js', generate: 'client' }).js.code
@@ -69,9 +73,11 @@ it("keeps chat initialization tied to task/run/reconnect rather than conversatio
       await settle();
       assert.equal(count('dormant'), 1, 'opening a dormant task initializes once');
       assert.equal(chat.conversation.messages.length, 1, 'history survives initialization');
+      assert.equal(count('stop-records:task-a'), 1, 'stop records load once per task initialization');
       chat.updateMessages();
       await settle();
       assert.equal(count('dormant'), 1, 'history/message updates must not reopen the session');
+      assert.equal(count('stop-records:task-a'), 1, 'message updates must not reload stop records');
       chat.start();
       await settle();
       assert.equal(count('subscribe_rpc'), 1);
@@ -88,6 +94,12 @@ it("keeps chat initialization tied to task/run/reconnect rather than conversatio
         await settle();
         assert.equal(count('subscribe_rpc'), expected, action + ' must reconnect exactly once');
       }
+      assert.equal(count('stop-records:task-b'), 2, 'task switching and reconnect load the active task records');
+      chat.stop();
+      await settle();
+      assert.equal(chat.connected, false, 'stopped tasks with an old run id enter offline mode');
+      assert.equal(count('dormant'), 2, 'offline history opens for an exited process');
+      assert.equal(chat.conversation.messages.length, 1, 'history remains available after stop');
       chat.markUnknown();
       chat.reconnect();
       await settle();

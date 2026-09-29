@@ -258,6 +258,76 @@ impl GuardedPath {
         }
     }
 
+    #[cfg(windows)]
+    pub(crate) fn rename_no_replace(&self, destination: &Path) -> Result<(), String> {
+        use std::os::windows::{ffi::OsStrExt, io::AsRawHandle};
+        use windows_sys::Win32::Storage::FileSystem::{
+            FileRenameInfo, SetFileInformationByHandle, FILE_RENAME_INFO,
+        };
+
+        if self.path.parent() != destination.parent() || !destination.is_absolute() {
+            return Err("Rename must stay in the same directory".into());
+        }
+        let normalized: PathBuf = destination.components().collect();
+        let wide: Vec<u16> = normalized.as_os_str().encode_wide().collect();
+        let bytes = wide.len().checked_mul(2).ok_or("Rename path is too long")?;
+        let length = std::mem::size_of::<FILE_RENAME_INFO>()
+            .checked_add(bytes)
+            .ok_or("Rename path is too long")?;
+        let size = u32::try_from(length).map_err(|_| "Rename path is too long")?;
+        let _parent = self
+            ._ancestors
+            .last()
+            .ok_or("Missing parent directory handle")?;
+        // Vec<usize> gives the Windows structure its required pointer alignment.
+        let mut storage = vec![0usize; length.div_ceil(std::mem::size_of::<usize>())];
+        let info = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+        unsafe {
+            (*info).Anonymous.ReplaceIfExists = false;
+            (*info).RootDirectory = std::ptr::null_mut();
+            (*info).FileNameLength = bytes as u32;
+            std::ptr::copy_nonoverlapping(wide.as_ptr(), (*info).FileName.as_mut_ptr(), wide.len());
+            if SetFileInformationByHandle(
+                self.file.as_raw_handle(),
+                FileRenameInfo,
+                info.cast(),
+                size,
+            ) == 0
+            {
+                return Err(format!(
+                    "Cannot rename project entry: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    pub(crate) fn rename_no_replace(&self, _destination: &Path) -> Result<(), String> {
+        Err("Secure project renaming currently requires Windows".into())
+    }
+
+    pub(crate) fn open_for_rename(
+        root: &Path,
+        relative: &str,
+        directory: bool,
+    ) -> Result<Self, String> {
+        validate_relative(relative, false)?;
+        if !root.is_absolute() {
+            return Err("Project root must be absolute".into());
+        }
+        #[cfg(windows)]
+        {
+            Self::pin_with_delete_access(&root.join(relative), directory, true)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = directory;
+            Err("Secure project renaming currently requires Windows".into())
+        }
+    }
+
     pub(crate) fn delete(self) -> Result<(), String> {
         #[cfg(windows)]
         {
@@ -310,10 +380,14 @@ impl GuardedPath {
                 .read(true)
                 .share_mode(FILE_SHARE_READ)
                 .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS);
-            if !final_file {
+            if delete && parent == &path {
+                options.access_mode(if directory {
+                    FILE_READ_ATTRIBUTES | DELETE
+                } else {
+                    FILE_GENERIC_READ | DELETE
+                });
+            } else if !final_file {
                 options.access_mode(FILE_READ_ATTRIBUTES);
-            } else if delete {
-                options.access_mode(FILE_GENERIC_READ | DELETE);
             }
             let file = options.open(parent).map_err(|error| {
                 msg_with("files.access_failed", &[("detail", &error.to_string())])

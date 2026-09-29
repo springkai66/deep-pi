@@ -37,7 +37,7 @@ export function createWindowCloseHandler(ports: WindowClosePorts) {
   return async (event: { preventDefault(): void }, source: CloseRequestSource = "window") => {
     // Every OS close request must be intercepted, including repeated clicks.
     event.preventDefault();
-    if (pending) return;
+    if (pending) return false;
     pending = true;
     let releaseExit: (() => void) | undefined;
     try {
@@ -46,15 +46,15 @@ export function createWindowCloseHandler(ports: WindowClosePorts) {
       if (behavior === "ask") {
         // 等用户选择，不设上限：卡在这里的是人，不是锁。
         const choice = await ports.choose();
-        if (!choice || choice === "ask") return;
+        if (!choice || choice === "ask") return false;
         behavior = choice;
         ports.remember(choice);
       }
       if (behavior === "minimize") {
         await ports.minimize();
-        return;
+        return false;
       }
-      if (ports.hasActiveTasks() && !await ports.confirm()) return;
+      if (ports.hasActiveTasks() && !await ports.confirm()) return false;
 
       // 退出流程一旦开始，界面就进入 inert。从这里到流程结束，任何一步无限等待都
       // 会把应用永久钉死，因此每一步都必须有界，且任何出口都要释放界面。
@@ -64,7 +64,7 @@ export function createWindowCloseHandler(ports: WindowClosePorts) {
           throw prepared.error;
         }
         if (!prepared.value) {
-          return;
+          return false;
         }
         if (typeof prepared.value === "function") releaseExit = prepared.value;
       }
@@ -77,10 +77,12 @@ export function createWindowCloseHandler(ports: WindowClosePorts) {
         const result = await runBoundedStep(name, step, EXIT_STEP_TIMEOUT_MS);
         if (!result.ok) throw result.error;
       }
+      return true;
     } catch (error) {
       // 关键：超时也必须让用户回到可用状态，否则「界面还在、点什么都没反应」
       // 就是终局。恢复可用性优先于继续退出。
       ports.error(error);
+      return false;
     } finally {
       // 无论成功、失败还是超时，都要解除 inert 并允许后续重试，
       // 这样托盘退出/再次关闭不会因为一个卡住的步骤而永久失效。

@@ -21,6 +21,96 @@ function edit(f: ReturnType<typeof fixture>, id: string, value: string) {
   f.workspace.update(id, doc.state!.update({ changes: { from: 0, to: doc.state!.doc.length, insert: value } }).state);
 }
 
+describe("file tree mutations", () => {
+  it("keeps a dirty draft when confirmation is cancelled", async () => {
+    const f = fixture();
+    const id = await f.workspace.open("p", "src/a.txt");
+    edit(f, id, "draft");
+    f.chooseClose.mockResolvedValueOnce(null);
+    const mutate = vi.fn(async () => {});
+    expect(await f.workspace.mutatePaths("p", (path) => path.startsWith("src/"), mutate)).toBe(false);
+    expect(mutate).not.toHaveBeenCalled();
+    expect(f.workspace.get(id)?.state?.sliceDoc()).toBe("draft");
+  });
+
+  it("locks affected documents while mutating and closes them only on success", async () => {
+    const f = fixture();
+    const child = await f.workspace.open("p", "src/a.txt");
+    const sibling = await f.workspace.open("p", "src2/a.txt");
+    edit(f, child, "draft");
+    let finish!: () => void;
+    const pending = f.workspace.mutatePaths("p", (path) => path.startsWith("src/"), () => new Promise<void>((resolve) => { finish = resolve; }));
+    await vi.waitFor(() => expect(f.workspace.get(child)?.locked).toBe(true));
+    expect(f.workspace.busy()).toBe(true);
+    edit(f, child, "late typing");
+    await expect(f.workspace.open("p", "src/new.txt")).rejects.toThrow();
+    expect(f.workspace.get(child)?.state?.sliceDoc()).toBe("draft");
+    finish();
+    expect(await pending).toBe(true);
+    expect(f.workspace.get(child)).toBeUndefined();
+    expect(f.workspace.get(sibling)).toBeDefined();
+  });
+
+  it("unlocks and retains a draft when the disk operation fails", async () => {
+    const f = fixture();
+    const id = await f.workspace.open("p", "a.txt");
+    edit(f, id, "draft");
+    await expect(f.workspace.mutatePaths("p", (path) => path === "a.txt", async () => { throw new Error("disk failed"); }))
+      .rejects.toThrow("disk failed");
+    expect(f.workspace.get(id)?.locked).toBe(false);
+    expect(f.workspace.get(id)?.state?.sliceDoc()).toBe("draft");
+  });
+  it("blocks save-as, project removal, and exit while a path mutation is in flight", async () => {
+    const f = fixture();
+    const affected = await f.workspace.open("p", "src/a.txt");
+    const other = await f.workspace.open("p", "other.txt");
+    let finish!: () => void;
+    const pending = f.workspace.mutatePaths("p", (path) => path.startsWith("src/"),
+      () => new Promise<void>((resolve) => { finish = resolve; }));
+    await vi.waitFor(() => expect(f.workspace.get(affected)?.locked).toBe(true));
+    expect(await f.workspace.save(other, "src/new.txt")).toBeNull();
+    expect(f.save).not.toHaveBeenCalled();
+    const remove = vi.fn(async () => {});
+    await expect(f.workspace.removeProject("p", remove)).rejects.toThrow();
+    expect(remove).not.toHaveBeenCalled();
+    expect(await f.workspace.prepareExit()).toBe(false);
+    finish();
+    expect(await pending).toBe(true);
+    expect(await f.workspace.save(other, "src/new.txt")).not.toBeNull();
+  });
+
+  it("does not mutate after an exit starts while confirmation is pending", async () => {
+    const f = fixture();
+    const id = await f.workspace.open("p", "src/a.txt");
+    edit(f, id, "draft");
+    let answer!: (value: "discard") => void;
+    f.chooseClose.mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
+    const mutate = vi.fn(async () => {});
+    const pending = f.workspace.mutatePaths("p", (path) => path.startsWith("src/"), mutate);
+    const release = await f.workspace.prepareExit();
+    expect(release).not.toBe(false);
+    answer("discard");
+    expect(await pending).toBe(false);
+    expect(mutate).not.toHaveBeenCalled();
+    if (release) release();
+    expect(f.workspace.get(id)?.state?.sliceDoc()).toBe("draft");
+  });
+
+  it("waits for any save in the project before mutating paths", async () => {
+    const f = fixture();
+    await f.workspace.open("p", "src/a.txt");
+    const other = await f.workspace.open("p", "other.txt");
+    let finish!: (value: Awaited<ReturnType<typeof f.save>>) => void;
+    f.save.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const saving = f.workspace.save(other, "src/new.txt");
+    const mutate = vi.fn(async () => {});
+    expect(await f.workspace.mutatePaths("p", (path) => path.startsWith("src/"), mutate)).toBe(false);
+    expect(mutate).not.toHaveBeenCalled();
+    finish({ outcome: "saved", version: "v2", recoveryPath: null, pendingPath: null, detail: "saved" });
+    await saving;
+  });
+});
+
 describe("file workspace", () => {
   it("coalesces changes during reads and performs one follow-up without dropping the last update", async () => {
     const f = fixture();

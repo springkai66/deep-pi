@@ -58,6 +58,9 @@
           <li>
             <div class="event-heading"><strong>{t(DIAGNOSTIC_LABELS[event.code])}</strong><span>#{event.run} · +{(event.elapsedMs / 1000).toFixed(1)}s</span></div>
             <div class="event-detail"><code>{event.code}</code><span>{event.code === "stderr_observed" ? `${event.count} B` : `× ${event.count}`}{event.exitCode !== null ? ` · exit ${event.exitCode}` : ""}</span></div>
+            {#if event.transport}
+              <div class="event-detail"><code>{event.transport.protocol} · {event.transport.phase} · {event.transport.cause}</code><span>{event.transport.durationMs} ms{event.transport.idleMs !== null ? ` · idle ${event.transport.idleMs} ms` : ""}{event.transport.closeCode !== null ? ` · close ${event.transport.closeCode}` : ""}</span></div>
+            {/if}
           </li>
         {/each}
       </ol>

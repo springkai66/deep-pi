@@ -41,9 +41,10 @@ export interface Conversation {
   messages: RpcMessage[];
   tools: Record<string, RpcTool>;
   busy: boolean;
-  phase: "idle" | "thinking" | "generating" | "tool" | "waiting" | "failed";
+  phase: "idle" | "thinking" | "generating" | "tool" | "waiting" | "failed" | "retrying";
   closed: boolean;
   error: string;
+  errorRaw?: string;
   queue: string[];
   /// 待发送提示词按投递模式分开：steering = 优先引导，followUp = 排队跟进；供输入框上方的待发送列表使用。
   queueSteering: string[];
@@ -52,6 +53,7 @@ export interface Conversation {
   compacting: boolean;
   /// 最近一次收到任意 RPC 事件的本地时间戳：思考/生成阶段的事件流即心跳。
   lastEventAt?: number;
+  retry?: { attempt: number; maxAttempts: number; delayMs: number; error: string; rawError?: string; startedAt: number };
 }
 
 export function record(value: unknown): Record<string, unknown> {
@@ -169,14 +171,31 @@ export function applyRpcEvent(previous: Conversation, event: RpcEvent): Conversa
   const payload = event.payload;
   const type = payload.type;
   // 新回合开始 = 会话已从上一次失败中恢复，清掉遗留错误，避免错误卡片一直钉在会话流底部。
-  if (type === "agent_start") { state.busy = true; state.phase = "thinking"; state.error = ""; }
-  else if (type === "agent_end") { state.busy = true; state.phase = "generating"; }
-  else if (type === "agent_settled") { state.busy = false; state.phase = "waiting"; }
-  else if (type === "rpc_exit") {
+  if (type === "agent_start") { state.busy = true; state.phase = "thinking"; state.error = ""; state.errorRaw = undefined; state.retry = undefined; }
+  else if (type === "agent_end") { state.busy = true; state.phase = state.retry ? "retrying" : "generating"; }
+  else if (type === "agent_settled") { state.busy = false; state.phase = "waiting"; state.retry = undefined; }
+  else if (type === "auto_retry_start") {
+    const bounded = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
+    state.retry = {
+      attempt: bounded(payload.attempt), maxAttempts: bounded(payload.maxAttempts), delayMs: bounded(payload.delayMs),
+      error: typeof payload.errorMessage === "string" ? readableRpcError(payload.errorMessage) : state.error,
+      ...(typeof payload.errorMessage === "string" || state.errorRaw ? { rawError: typeof payload.errorMessage === "string" ? payload.errorMessage : state.errorRaw } : {}),
+      startedAt: state.lastEventAt,
+    };
+    state.error = ""; state.errorRaw = undefined; state.busy = true; state.phase = "retrying";
+  } else if (type === "auto_retry_end") {
+    state.retry = undefined;
+    state.error = payload.success === true ? "" : typeof payload.finalError === "string" ? readableRpcError(payload.finalError) : previous.retry?.error || state.error;
+    state.errorRaw = payload.success === true ? undefined : typeof payload.finalError === "string" ? payload.finalError : previous.retry?.rawError ?? state.errorRaw;
+    state.phase = payload.success === true ? "generating" : "failed";
+    // Only agent_settled releases the run; retry callbacks precede final cleanup.
+  } else if (type === "rpc_exit") {
     state.closed = true; state.busy = false; state.phase = "waiting"; state.queue = []; state.queueSteering = []; state.queueFollowUp = [];
+    state.retry = undefined;
     state.tools = Object.fromEntries(Object.entries(previous.tools).map(([id, tool]) => [id, { ...tool, running: false, isError: tool.isError || tool.running }]));
   } else if (type === "rpc_error" || type === "extension_error") {
     state.error = typeof payload.error === "string" ? readableRpcError(payload.error) : t("RPC 运行失败");
+    state.errorRaw = typeof payload.error === "string" ? payload.error : state.error;
     state.phase = "failed"; state.busy = false; state.messages = dropTrailingEmptyAssistant(state.messages);
   } else if (type === "compaction_start") {
     // pi 压缩开始（手动 compact RPC 或上下文超出阈值自动触发）。
@@ -200,6 +219,7 @@ export function applyRpcEvent(previous: Conversation, event: RpcEvent): Conversa
     const reason = payload.reason;
     if (reason !== "manual" && typeof payload.errorMessage === "string" && payload.errorMessage) {
       state.error = readableRpcError(payload.errorMessage);
+      state.errorRaw = payload.errorMessage;
     }
   } else if (type === "queue_update") {
     const steering = Array.isArray(payload.steering) ? payload.steering.filter((item): item is string => typeof item === "string") : [];
@@ -210,14 +230,17 @@ export function applyRpcEvent(previous: Conversation, event: RpcEvent): Conversa
   } else if (type === "message_update" && payload.assistantMessageEvent) {
     const update = asAssistantUpdate(payload.assistantMessageEvent);
     // 流式输出恢复同样说明会话已恢复，清掉上一轮遗留的错误。
-    if (update) { state.error = ""; state.phase = update.kind === "thinking" ? "thinking" : "generating"; state.messages = applyAssistantUpdate(previous.messages, update); }
+    if (update) { state.error = ""; state.errorRaw = undefined; state.phase = update.kind === "thinking" ? "thinking" : "generating"; state.messages = applyAssistantUpdate(previous.messages, update); }
   } else if (type === "message_start" || type === "message_update" || type === "message_end") {
     const message = asMessage(payload.message);
     if (!message) return state;
     const last = previous.messages.at(-1);
     const same = last && last.role === message.role && (message.timestamp !== undefined && last.timestamp === message.timestamp || message.toolCallId !== undefined && last.toolCallId === message.toolCallId);
     state.messages = same ? [...previous.messages.slice(0, -1), message] : [...previous.messages, message];
-    if (message.role === "assistant") state.phase = "generating";
+    if (message.role === "assistant") {
+      state.phase = "generating";
+      if (type === "message_start") { state.retry = undefined; state.error = ""; state.errorRaw = undefined; }
+    }
     if (type === "message_end" && message.role === "toolResult" && message.toolCallId) {
       state.tools = { ...previous.tools };
       // 把工具执行的起止时间附到结果消息上，供 UI 显示 Took；随后清理运行态记录。
@@ -228,7 +251,7 @@ export function applyRpcEvent(previous: Conversation, event: RpcEvent): Conversa
       }
       delete state.tools[message.toolCallId];
     }
-    if (message.errorMessage) { state.error = readableRpcError(message.errorMessage); state.phase = "failed"; }
+    if (message.errorMessage) { state.error = readableRpcError(message.errorMessage); state.errorRaw = message.errorMessage; state.phase = "failed"; }
   } else if (type === "tool_execution_start" || type === "tool_execution_update" || type === "tool_execution_end") {
     const id = typeof payload.toolCallId === "string" ? payload.toolCallId : "";
     if (!id) return state;

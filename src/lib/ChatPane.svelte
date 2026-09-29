@@ -3,8 +3,9 @@
   import { ArrowDown, ArrowDownUp, ArrowUp, Bot, ChevronDown, CircleAlert, History, Image as ImageIcon, Pencil, RefreshCw, Shrink, Sparkles, Square, Terminal, Undo2, UserRound, X } from "@lucide/svelte";
   import { onMount, tick, untrack, type Snippet } from "svelte";
   import type { DialogRequest, DialogValue } from "./dialog";
-  import { applyRpcEvent, canSubmitPrompt, contentText, emptyConversation, loadHistory, readableRpcError, record, type RpcEvent, type RpcMessage, type RpcTool } from "./rpc-state";
+  import { applyRpcEvent, canSubmitPrompt, contentText, emptyConversation, loadHistory, record, type RpcEvent, type RpcMessage, type RpcTool } from "./rpc-state";
   import FileChangeDiff from "./FileChangeDiff.svelte";
+  import AiError from "./AiError.svelte";
   import { computeLineDiff, extractFileChange, type FileChange, type LineDiff } from "./file-change-diff";
   import { onModelsChanged } from "./model-config-sync";
   import { findSavedModel, parseModelKey, shouldApplySavedChoice, validSavedThinkingLevel, type SavedModelChoice } from "./model-memory";
@@ -13,20 +14,29 @@
   import MessageDisclosure from "./MessageDisclosure.svelte";
   import { messageSource } from "./message-parts";
   import MessageFallback from "./MessageFallback.svelte";
+  import { lastUserAnchor, readStopRecords, saveStopRecord, suppressStoppedAbort, withStopRecords, type StopRecord } from "./chat-stop";
   import { showConversationMessage } from "./chat-presentation";
   import { clipboardImageFiles } from "./clipboard-images";
   import { hasQueuedImages, rekeyQueuedImages, takeQueuedImages, type QueuedImageEntry } from "./queued-images";
   import { formatDuration } from "./duration";
   import { createDormantHistorySession, createRpcHistorySession, prependRpcHistory } from "./rpc-history";
   import { isUnknownPromptOutcome, recoverRpcSession } from "./rpc-recovery";
-  import { deriveSessionTitle, isTruncatedTitleUpgrade } from "./session-title";
-  import { BUILTIN_SLASH_COMMANDS, filterSlashCommands, parseSlashCommand, slashSourceLabel, type PiCommand, type SlashCommand } from "./slash-commands";
+  import { stoppedModels } from "./stopped-models";
+  import { sessionTitleContext } from "./session-title";
+  import { BUILTIN_SLASH_COMMANDS, filterSlashCommands, parseSlashCommand, runHostSlash, slashCommandRoute, slashSourceLabel, syncSessionRebound, type PiCommand, type SlashCommand } from "./slash-commands";
   import { shortcutAria } from "./shortcuts";
   import { t, tm } from "$lib/i18n.svelte";
 
   const PROVIDER_LABELS: Record<string, string> = {
     deepseek: "DeepSeek",
     openai: "OpenAI",
+    "openai-codex": "Codex",
+    "z-ai": "Z.ai",
+    zai: "Z.ai",
+    qwen: "Qwen",
+    moonshot: "Kimi API",
+    moonshotai: "Kimi API",
+    "opencode-go": "OpenCode Go",
     anthropic: "Anthropic",
     google: "Gemini",
     "google-vertex": "Gemini (Vertex)",
@@ -44,6 +54,7 @@
   interface Props {
     taskId: string;
     runId: string | null | undefined;
+    stopped: boolean;
     title: string;
     tabs?: Snippet;
     visible: boolean;
@@ -55,14 +66,19 @@
     onDialog: (request: Omit<DialogRequest, "id" | "resolve">) => Promise<DialogValue>;
     onCancelDialogs: (scope: string) => void;
     onActivity: (busy: boolean) => void;
-    onAutoRename: (title: string) => void;
+    onAutoRename: (title: string, expected: string) => boolean;
+    onManualRename: (title: string) => Promise<void>;
     onOpenModelSettings?: () => void;
     onReloadSession?: () => void;
+    onStartSession?: () => Promise<boolean>;
     onRecoverSession?: (expectedRunId: string | null | undefined) => Promise<string | null | undefined>;
+    onModelChange?: (modelKey: string) => void;
+    onHostSlash?: (command: "new" | "settings" | "login" | "logout" | "reload" | "quit" | "resume" | "scoped-models" | "changelog" | "hotkeys" | "import" | "share" | "trust", args: string) => Promise<boolean>;
+    onSessionRebound?: () => Promise<void>;
     /** Pi 对话内容显示级别，来自全局设置。 */
     chatDetailLevel?: ChatDetailLevel;
   }
-  let { taskId, runId, title, tabs, visible, active, switching, focusToken, autoName, onUseTerminal, onDialog, onCancelDialogs, onActivity, onAutoRename, onOpenModelSettings, onReloadSession, onRecoverSession, chatDetailLevel = "concise" }: Props = $props();
+  let { taskId, runId, stopped, title, tabs, visible, active, switching, focusToken, autoName, onUseTerminal, onDialog, onCancelDialogs, onActivity, onAutoRename, onManualRename, onOpenModelSettings, onReloadSession, onStartSession, onRecoverSession, onModelChange, onHostSlash, onSessionRebound, chatDetailLevel = "concise" }: Props = $props();
   let conversation = $state(emptyConversation());
   let draft = $state("");
   let restoredDraft = $state("");
@@ -70,11 +86,17 @@
   let connected = $state(false);
   let sending = $state(false);
   let stopping = $state(false);
+  let stopRecords = $state<StopRecord[]>([]);
+  let pendingStopAnchor = $state<number | null>(null);
   let error = $state("");
   let recovering = $state(false);
-  // Keep the confirmation requirement across resubscriptions and process restarts of this task.
-  let unknownPromptTaskId = $state<string | null>(null);
-  const unknownPromptOutcome = $derived(unknownPromptTaskId === taskId);
+  // Each uncertain task requires its own explicit review, even after switching tasks.
+  let unknownPromptTasks = $state<Record<string, boolean>>({});
+  const unknownPromptOutcome = $derived(Boolean(unknownPromptTasks[taskId]));
+  // Reconnect resets `sending`, but each task must stay gated until its own prompt RPC settles.
+  let pendingPromptTasks = $state<Record<string, number>>({});
+  let promptSequence = 0;
+  const promptAwaitingAck = $derived(Boolean(pendingPromptTasks[taskId]));
   /// 扩展通过 ui.notify(…, "error") 上报的错误：展示在会话流内（与失败回合同处），
   /// 不再飘在输入框上方的提示条里。
   let extensionError = $state("");
@@ -100,13 +122,17 @@
   let modelsLoadError = $state("");
   let modelsStale = $state(false);
   let selectedModel = $state("");
+  $effect(() => {
+    const modelKey = selectedModel;
+    if (visible && active) untrack(() => onModelChange?.(modelKey));
+  });
   let changingModel = $state(false);
   let thinkingLevels = $state<string[]>([]);
   let thinkingLevel = $state("");
   let compacting = $state(false);
   let enhancing = $state(false);
   let changingThinking = $state(false);
-  let autoNamed = $state(false);
+  let titleQueue: Promise<void> = Promise.resolve();
   let sessionStats = $state<SessionStats | null>(null);
   let turnStartedAt = $state<number | null>(null);
   let elapsedNow = $state(Date.now());
@@ -284,13 +310,16 @@
   /// 休眠会话：应用重启后直接点开的未启动 RPC 会话——不连进程、不占额度，
   /// 输入提示词回车后才启动 pi；启动成功连接后自动发出草稿。
   let dormant = $state(false);
+  let starting = $state(false);
+  let pendingModelOnStart = $state<string | null>(null);
   let autoSendOnConnect = false;
   let generation = 0;
   let composing = false;
   /// 用户点过「重载会话」后，下一次模型列表加载成功时提示一次（非响应式标记）。
   let reloadRequested = false;
-  const messageStart = $derived(messageWindowStart(conversation.messages.length, historyLimit, pinnedMessageStart));
-  const visibleMessages = $derived(conversation.messages.slice(messageStart));
+  const displayMessages = $derived(withStopRecords(conversation.messages, stopRecords));
+  const messageStart = $derived(messageWindowStart(displayMessages.length, historyLimit, pinnedMessageStart));
+  const visibleMessages = $derived(displayMessages.slice(messageStart));
   /// 历史与实时消息共用可见性规则；保留下标以稳定翻页锚点。
   const visibleEntries = $derived(
     visibleMessages
@@ -459,7 +488,7 @@
   /// 用户轮次索引：遍历消息筛出 role === "user" 的消息并记录真实下标，派生而非手动同步。
   const turns = $derived.by(() => {
     const list: ChatTurn[] = [];
-    conversation.messages.forEach((message, index) => {
+    displayMessages.forEach((message, index) => {
       if (message.role !== "user") return;
       const text = contentText(message.content).trim();
       const timestamp = typeof message.timestamp === "number" ? message.timestamp : null;
@@ -484,7 +513,7 @@
   const turnNumberByMessageIndex = $derived.by(() => {
     const map = new Map<number, number>();
     let current = 0;
-    conversation.messages.forEach((message, index) => {
+    displayMessages.forEach((message, index) => {
       if (message.role === "user") current += 1;
       if (current > 0) map.set(index, current);
     });
@@ -544,7 +573,7 @@
 
   /// 目标消息必须真的在 DOM 里才能滚过去：必要时把渲染窗口向前扩大。
   function ensureTurnRendered(messageIndex: number) {
-    const total = conversation.messages.length;
+    const total = displayMessages.length;
     if (messageIndex < 0 || messageIndex >= total || messageIndex >= messageStart) return;
     // messageWindowStart 里 pinnedMessageStart 优先于 historyLimit，只调 historyLimit 不会真的扩大窗口，
     // 因此两者一起调整：把窗口下界压到目标消息、尾部保持全渲染（沿用既有 pinned 语义，仍受“显示更早的消息”兜底）。
@@ -771,8 +800,8 @@
       if (current === generation) workflowBusy = false;
     }
   }
-  const canSend = $derived(!switching && !unknownPromptOutcome && (connected || dormant) && !initializing && !stopping && !conversation.closed
-    && canSubmitPrompt(sending, draft, attachments.length, pendingImageReads));
+  const canSend = $derived(!switching && !unknownPromptOutcome && !promptAwaitingAck && (connected || dormant) && !initializing && !stopping
+    && !(dormant && starting) && canSubmitPrompt(sending, draft, attachments.length, pendingImageReads));
   /// 发送按钮提示：执行中说明本条消息将按所选方式引导/排队，而非开启新回复。
   const sendHint = $derived(
     dormant ? t("启动会话并发送")
@@ -811,6 +840,7 @@
   /// 只有“关闭”一档时说明该模型没有可调推理强度，此时不显示推理强度选择器。
   const reasoningLevels = $derived(thinkingLevels.filter((level) => level !== "off"));
   const phaseText = $derived(
+    conversation.phase === "retrying" ? t("自动重试中") :
     conversation.phase === "thinking" ? t("思考中")
       : conversation.phase === "generating" ? t("生成回答")
         : conversation.phase === "tool" ? t("正在执行工具")
@@ -828,6 +858,11 @@
     if (initializing) return t("连接中");
     if (!connected) return t("未连接");
     const turnPart = turnStartedAt !== null ? ` · ${t("本轮 {duration}", { duration: formatDuration(elapsedNow - turnStartedAt) })}` : "";
+    if (conversation.retry) {
+      const retry = conversation.retry;
+      const remaining = Math.max(0, retry.delayMs - (elapsedNow - retry.startedAt));
+      return `${t("自动重试 {attempt}/{max} · 等待 {duration}", { attempt: retry.attempt, max: retry.maxAttempts, duration: formatDuration(remaining) })}${turnPart}`;
+    }
     if (conversation.phase === "tool" && activeTool) {
       const summary = displayedToolName(activeTool);
       const toolPart = activeTool.startedAt !== undefined ? formatDuration(elapsedNow - activeTool.startedAt) : "";
@@ -956,8 +991,8 @@
   }
 
   /// 压缩上下文：调用 Pi 原生 `compact` RPC，把历史消息总结为摘要。
-  async function compactContext() {
-    if (!canCompact) return;
+  async function compactContext(): Promise<boolean> {
+    if (!canCompact) return false;
     const current = generation;
     const scope = `rpc:${taskId}:${runId ?? ""}`;
     try {
@@ -968,12 +1003,14 @@
           : t("压缩会把历史消息总结为摘要以释放上下文窗口。继续吗？"),
         confirmLabel: t("压缩"),
       });
-      if (!accepted || current !== generation) return;
+      if (!accepted || current !== generation) return false;
       compacting = true;
       await call({ type: "compact" });
       if (current === generation) { notice = t("上下文已压缩。"); refreshStats(); }
+      return true;
     } catch (cause) {
       if (current === generation) commandError(cause);
+      return false;
     } finally {
       if (current === generation) compacting = false;
     }
@@ -1007,11 +1044,15 @@
   });
 
   $effect(() => {
+    // A terminal task can still retain its old run id until the next app reload.
     const run = runId;
+    const offline = !run || stopped;
     const id = taskId;
     void reconnect;
     // 会话重建（切换任务/重连/重启）时清空每轮计时，避免旧会话的耗时挂到新一轮。
     turnDurations = {};
+    stopRecords = readStopRecords(window.localStorage, id);
+    pendingStopAnchor = null;
     runningTurn = null;
     turnStartedAt = null;
     const current = ++generation;
@@ -1031,7 +1072,6 @@
     changingThinking = false;
     thinkingLevels = [];
     thinkingLevel = "";
-    autoNamed = false;
     sessionStats = null;
     models = [];
     modelsLoadFailed = false;
@@ -1051,8 +1091,9 @@
     historyOffset = 0;
     error = "";
     extensionError = "";
-    if (!run) {
-      // 未启动的休眠会话：不连进程、不占额度，直接读 pi 会话文件展示历史；
+    if (offline) {
+      // A stopped task keeps its history visible without starting a Pi process.
+      // Submitting a new prompt starts the same session on demand.
       // 输入框保持可用，回车发送时才启动。文件不可读（从未启动或已删除）时保持空白。
       initializing = false;
       dormant = true;
@@ -1061,23 +1102,23 @@
       void (async () => {
         try {
           const history = await reader.open();
-          if (!alive || current !== generation || !history) return;
-          conversation = loadHistory(emptyConversation(), history.messages, 0);
-          historyOffset = history.start;
-          // 恢复历史会话的模型与推理强度显示：进程未启动时选择器只读，
-          // 回车启动 pi 后由 get_state / 模型列表覆盖为权威值。
-          if (history.model) {
-            models = [{ provider: history.model.provider, id: history.model.id, name: history.model.id }];
-            selectedModel = `${history.model.provider}/${history.model.id}`;
-            modelName = history.model.id;
-          }
-          if (history.thinkingLevel && history.thinkingLevel !== "off") {
-            thinkingLevel = history.thinkingLevel;
-            thinkingLevels = [history.thinkingLevel];
+          if (!alive || current !== generation) return;
+          if (history) {
+            conversation = loadHistory(emptyConversation(), history.messages, 0);
+            historyOffset = history.start;
+            if (history.model && !pendingModelOnStart) {
+              selectedModel = `${history.model.provider}/${history.model.id}`;
+              modelName = history.model.id;
+            }
+            if (history.thinkingLevel && history.thinkingLevel !== "off") {
+              thinkingLevel = history.thinkingLevel;
+              thinkingLevels = [history.thinkingLevel];
+            }
           }
         } catch {
-          // 保持空白会话：输入提示词并回车仍可启动。
+          // A missing session file should not prevent starting the task.
         }
+        if (alive && current === generation) await loadStoppedModels(() => alive && current === generation);
       })();
       return () => {
         alive = false;
@@ -1106,7 +1147,7 @@
         if (bufferedBytes > 8 * 1024 * 1024) { buffered = []; bufferedBytes = 0; overflow = true; }
         buffered.push(event);
       } else {
-        conversation = applyRpcEvent(conversation, event);
+        conversation = suppressStoppedAbort(applyRpcEvent(conversation, event), stopRecords, pendingStopAnchor);
         if (event.payload.type === "agent_start") extensionError = "";
         if (event.payload.type === "agent_start" || event.payload.type === "agent_settled") {
           onActivity(conversation.busy);
@@ -1114,6 +1155,7 @@
         }
       }
     };
+    let readyToSend = false;
     void (async () => {
       try {
         await invoke<number>("subscribe_rpc", { taskId: id, runId: run, channel });
@@ -1127,10 +1169,11 @@
         next.busy = state.isStreaming === true || state.isCompacting === true;
         next.compacting = state.isCompacting === true;
         next.phase = next.busy ? "generating" : "waiting";
-        for (const event of buffered) next = applyRpcEvent(next, event);
+        for (const event of buffered) next = suppressStoppedAbort(applyRpcEvent(next, event), stopRecords, pendingStopAnchor);
         buffered = [];
         ready = true;
         connected = !next.closed;
+        if (!connected) throw new Error(t("无法启动会话，请重试"));
         conversation = next;
         historyOffset = history.start;
         modelName = String(record(state.model).name ?? record(state.model).id ?? t("未选择模型"));
@@ -1154,9 +1197,29 @@
             }];
           });
         }).catch(() => {});
-        void applySavedModelChoice(history.messages.length, next.busy, () => alive);
+        if (pendingModelOnStart) {
+          const wanted = pendingModelOnStart;
+          const available = await refreshModels(() => alive);
+          if (!alive) return;
+          const chosen = available.find((model) => `${model.provider}/${model.id}` === wanted);
+          if (!chosen) throw new Error(t("所选模型已不可用，请重新选择"));
+          await call({ type: "set_model", provider: chosen.provider, modelId: chosen.id });
+          if (!alive) return;
+          selectedModel = wanted;
+          modelName = chosen.name;
+          pendingModelOnStart = null;
+          void call<{ levels: unknown[] }>({ type: "get_available_thinking_levels" }).then((result) => {
+            if (alive) thinkingLevels = result.levels.map((level) => String(level)).filter(Boolean);
+          }).catch(() => {});
+        } else if (autoSendOnConnect) {
+          await applySavedModelChoice(history.messages.length, next.busy, () => alive);
+          if (!alive) return;
+        } else {
+          void applySavedModelChoice(history.messages.length, next.busy, () => alive);
+        }
+        readyToSend = connected;
       } catch (cause) {
-        if (alive) error = tm(String(cause));
+        if (alive) { error = tm(String(cause)); connected = false; dormant = true; }
       } finally {
         if (alive) {
           initializing = false;
@@ -1165,7 +1228,7 @@
           // 提前调用会被 send() 开头的检查静默吞掉，用户被迫再按一次回车。
           if (autoSendOnConnect) {
             autoSendOnConnect = false;
-            if (!unknownPromptOutcome) void send();
+            if (readyToSend && !unknownPromptOutcome) void send();
           }
         }
       }
@@ -1215,7 +1278,7 @@
         historyOffset = page.start;
         if (!followScroll) {
           pinnedMessageStart = 0;
-          historyLimit = conversation.messages.length;
+          historyLimit = displayMessages.length;
         }
         await tick();
         if (current === generation && !followScroll) restoreTranscriptAnchor(port, anchor);
@@ -1224,7 +1287,7 @@
       const port = transcriptPort(transcript);
       const anchor = captureTranscriptAnchor(port);
       pinnedMessageStart = Math.max(0, messageStart - 100);
-      historyLimit = conversation.messages.length - pinnedMessageStart;
+      historyLimit = displayMessages.length - pinnedMessageStart;
       await tick();
       if (current === generation && !followScroll) restoreTranscriptAnchor(port, anchor);
     } catch (cause) { if (current === generation) error = tm(String(cause)); }
@@ -1299,8 +1362,8 @@
   }
 
   function commandError(cause: unknown) {
-    // 先把 `429: {json}` 之类的原始错误收敛成可读文本，再过一遍消息码渲染。
-    error = tm(readableRpcError(String(cause)));
+    // 保留原始错误供详情展开；未知结果的断线判定仍基于原始错误码。
+    error = String(cause);
     if (error.includes("RPC_OUTCOME_UNKNOWN:")) connected = false;
   }
 
@@ -1379,25 +1442,31 @@
     return "$0";
   }
 
-  $effect(() => {
-    if (autoNamed || conversation.busy) return;
-    const messages = conversation.messages;
-    if (!messages.some((message) => message.role === "user")) return;
-    if (!messages.some((message) => message.role !== "user" && message.role !== "toolResult")) return;
-    const next = deriveSessionTitle(messages);
-    if (!next) return;
-    // 默认标题匹配自动命名；另外允许把旧版 24 字截断的自动标题升级为完整标题。
-    if (!autoName && !isTruncatedTitleUpgrade(title, next)) return;
-    autoNamed = true;
-    // 休眠态没有进程可同步名称；pi 启动时会经 --name 带上新标题。
-    if (connected) void call({ type: "set_session_name", name: next }).catch(() => {});
-    onAutoRename(next);
-  });
+  function scheduleTitleEvaluation(id: string, prompt: string, messages: ReturnType<typeof sessionTitleContext>) {
+    titleQueue = titleQueue.then(async () => {
+      if (!autoName) return;
+      const expected = title;
+      try {
+        const next = await invoke<string | null>("auto_name_task", {
+          request: { taskId: id, expectedTitle: expected, prompt: prompt.slice(0, 4000), messages },
+        });
+        if (next && onAutoRename(next, expected) && connected && taskId === id) {
+          void call({ type: "set_session_name", name: next }).catch(() => {});
+        }
+      } catch { /* Naming is best effort; prompt delivery must not depend on it. */ }
+    });
+  }
 
 
-  async function changeModel(value: string) {
+  async function changeModel(value: string): Promise<boolean> {
     const model = models.find((model) => `${model.provider}/${model.id}` === value);
-    if (!model || changingModel) return;
+    if (!model || changingModel) return false;
+    if (dormant) {
+      pendingModelOnStart = value;
+      selectedModel = value;
+      modelName = model.name;
+      return true;
+    }
     const current = generation;
     changingModel = true;
     try {
@@ -1415,9 +1484,11 @@
       });
     } catch (cause) {
       if (current === generation) commandError(cause);
+      return false;
     } finally {
       if (current === generation) changingModel = false;
     }
+    return true;
   }
 
   /// 空状态下重载会话：交给父组件重启 RPC 任务（保留会话与历史），新会话初始化时会重新读取模型列表。
@@ -1440,8 +1511,35 @@
     modelsStale = true;
   }
 
-  $effect(() => onModelsChanged(() => { void handleModelsChanged(); }));
-
+  $effect(() => onModelsChanged((reason) => {
+    if (dormant) {
+      void loadStoppedModels(() => dormant);
+      return;
+    }
+    if (reason === "selection") {
+      if (connected && !conversation.closed) void refreshModels();
+      return;
+    }
+    void handleModelsChanged();
+  }));
+  async function loadStoppedModels(alive: () => boolean) {
+    try {
+      const available = await stoppedModels(invoke);
+      if (!alive()) return;
+      models = available;
+      modelsLoadFailed = false;
+      modelsLoadError = "";
+      if (pendingModelOnStart) {
+        const chosen = available.find((model) => `${model.provider}/${model.id}` === pendingModelOnStart);
+        if (chosen) { selectedModel = pendingModelOnStart; modelName = chosen.name; }
+      } else {
+        const current = available.find((model) => `${model.provider}/${model.id}` === selectedModel);
+        if (current) modelName = current.name;
+      }
+    } catch (cause) {
+      if (alive()) { modelsLoadFailed = true; modelsLoadError = tm(String(cause)); }
+    }
+  }
   /// 读取当前会话可用的模型列表；列表为空时由空状态提示兜底。返回解析后的列表
   /// （失败时返回读取前的值，通常为空数组），供新会话应用上次模型选择时使用。
   async function refreshModels(alive?: () => boolean): Promise<typeof models> {
@@ -1533,8 +1631,8 @@
     if (alive() && current === generation) thinkingLevel = level;
   }
 
-  async function changeThinkingLevel(level: string) {
-    if (!level || changingThinking) return;
+  async function changeThinkingLevel(level: string): Promise<boolean> {
+    if (!level || changingThinking) return false;
     const current = generation;
     changingThinking = true;
     try {
@@ -1548,9 +1646,11 @@
       }
     } catch (cause) {
       if (current === generation) commandError(cause);
+      return false;
     } finally {
       if (current === generation) changingThinking = false;
     }
+    return true;
   }
 
   /// 把 /model 参数解析为 `provider/id`：支持完整键、唯一模型 id、唯一显示名。
@@ -1578,27 +1678,54 @@
     slashIndex = (slashIndex + delta + slashItems.length) % slashItems.length;
   }
 
+  async function syncSwitchedSession(): Promise<boolean> {
+    const updated = await syncSessionRebound(
+      () => onSessionRebound?.() ?? Promise.resolve(),
+      () => { reconnect++; },
+      commandError,
+    );
+    if (!updated) notice = t("会话已切换，但界面映射刷新失败；请重新加载页面以同步会话");
+    return updated;
+  }
+
   /// 执行 `/` 命令：内置命令映射到 RPC/界面动作，pi 命令交由 prompt 管道展开。
   /// 返回 "blocked" 时保留草稿（错误提示可读、可直接改）。
   async function runSlashCommand(name: string, args: string): Promise<"handled" | "prompt" | "blocked"> {
-    const builtin = BUILTIN_SLASH_COMMANDS.find((command) => command.name === name);
-    if (builtin) {
-      if (!builtin.available) { notice = t("该命令仅在终端兼容模式可用"); return "blocked"; }
-      if (!connected || conversation.closed) { notice = t("请先启动会话后再使用命令"); return "blocked"; }
+    const route = slashCommandRoute(name, piCommands);
+    if (route === "host") {
+      const previousDraft = draft;
+      const outcome = await runHostSlash(
+        () => onHostSlash?.(name as Parameters<NonNullable<Props["onHostSlash"]>>[0], args) ?? Promise.resolve(false),
+        commandError,
+      );
+      if (outcome === "blocked") { notice ||= t("操作已取消或未完成"); return "blocked"; }
+      if (name === "import") {
+        if (!await syncSwitchedSession()) return "blocked";
+        notice = t("会话已导入");
+      }
+      if (draft === previousDraft) draft = "";
+      return "handled";
+    }
+    if (route === "rpc") {
       const scope = `rpc:${taskId}:${runId}`;
+      if (!connected || conversation.closed) { notice = t("请先启动会话后再使用命令"); return "blocked"; }
       try {
         switch (name) {
-          case "compact": await compactContext(); break;
+          case "compact": {
+            if (!await compactContext()) { notice ||= t("操作已取消或未完成"); return "blocked"; }
+            break;
+          }
           case "model": {
             if (args) {
               const value = resolveModelChoice(args);
               if (!value) { notice = t("未找到模型「{name}」；可用 /model 查看列表", { name: args }); return "blocked"; }
-              await changeModel(value);
+              if (!await changeModel(value)) return "blocked";
             } else {
               const value = await onDialog({ scope, kind: "choice", title: t("选择模型"),
                 message: t("选择本会话使用的模型。"),
                 choices: models.map((model) => ({ value: `${model.provider}/${model.id}`, label: `${model.name} · ${model.provider}` })) });
-              if (typeof value === "string") await changeModel(value);
+              if (typeof value !== "string") { notice = t("已取消选择模型"); return "blocked"; }
+              if (!await changeModel(value)) return "blocked";
             }
             break;
           }
@@ -1608,12 +1735,13 @@
                 notice = t("未知推理强度「{level}」；可用值：{levels}", { level: args, levels: thinkingLevels.join(" / ") || t("无") });
                 return "blocked";
               }
-              await changeThinkingLevel(args);
+              if (!await changeThinkingLevel(args)) return "blocked";
             } else if (thinkingLevels.length) {
               const value = await onDialog({ scope, kind: "choice", title: t("选择推理强度"),
                 message: t("选择本会话使用的推理强度。"),
                 choices: thinkingLevels.map((level) => ({ value: level, label: level })) });
-              if (typeof value === "string") await changeThinkingLevel(value);
+              if (typeof value !== "string") { notice = t("已取消选择推理强度"); return "blocked"; }
+              if (!await changeThinkingLevel(value)) return "blocked";
             } else {
               notice = t("当前模型没有可用的推理强度");
               return "blocked";
@@ -1623,7 +1751,7 @@
           case "name": {
             if (!args) { notice = t("用法：/name <会话名称>"); return "blocked"; }
             await call({ type: "set_session_name", name: args });
-            onAutoRename(args);
+            await onManualRename(args);
             notice = t("会话已重命名为「{name}」", { name: args });
             break;
           }
@@ -1650,16 +1778,40 @@
             break;
           }
           case "tree": turnMenuOpen = true; break;
-          default: notice = t("该命令仅在终端兼容模式可用"); return "blocked";
+          case "fork": {
+            if (conversation.busy) { notice = t("请等待当前回合完成后再创建分支"); return "blocked"; }
+            const result = await call<{ messages: { entryId: string; text: string }[] }>({ type: "get_fork_messages" });
+            const messages = result.messages ?? [];
+            if (!messages.length) { notice = t("当前会话没有可分支的用户消息"); return "blocked"; }
+            const entryId = args || await onDialog({ scope, kind: "choice", title: t("从历史消息创建分支"),
+              message: t("选择分支起点"), choices: messages.map((item) => ({ value: item.entryId, label: item.text.slice(0, 120) })) });
+            if (typeof entryId !== "string" || !messages.some((item) => item.entryId === entryId)) {
+              notice = t("已取消或未找到分支起点"); return "blocked";
+            }
+            const fork = await call<{ cancelled: boolean }>({ type: "fork", entryId });
+            if (fork.cancelled) { notice = t("已取消创建分支"); return "blocked"; }
+            if (!await syncSwitchedSession()) return "blocked";
+            notice = t("已创建会话分支");
+            break;
+          }
+          case "clone": {
+            if (conversation.busy) { notice = t("请等待当前回合完成后再复制会话"); return "blocked"; }
+            const clone = await call<{ cancelled: boolean }>({ type: "clone" });
+            if (clone.cancelled) { notice = t("已取消复制会话"); return "blocked"; }
+            if (!await syncSwitchedSession()) return "blocked";
+            notice = t("会话已复制");
+            break;
+          }
+          default: notice = t("当前命令无法在图形界面执行"); return "blocked";
         }
         draft = "";
         return "handled";
       } catch (cause) {
         commandError(cause);
-        return "handled";
+        return "blocked";
       }
     }
-    if (piCommands.some((command) => command.name === name)) return "prompt";
+    if (route === "prompt") return "prompt";
     notice = t("未知命令 /{name}；输入 / 查看可用命令", { name });
     return "blocked";
   }
@@ -1675,42 +1827,69 @@
       if (outcome !== "prompt") return;
     }
     if (dormant) {
-      // 第一条提示词即启动信号：保留草稿，交父组件启动 pi，连接就绪后自动发送。
-      // 启动失败时草稿留在输入框、错误提示可见，可直接重试。
-      if (!onReloadSession) return;
+      if (!onStartSession || starting) return;
+      starting = true;
       autoSendOnConnect = true;
-      onReloadSession();
+      try {
+        if (!await onStartSession()) {
+          autoSendOnConnect = false;
+          error = t("无法启动会话，请重试");
+        } else {
+          error = "";
+        }
+      } catch (cause) {
+        autoSendOnConnect = false;
+        commandError(cause);
+      } finally {
+        starting = false;
+      }
       return;
     }
     const text = draft;
+    const titleContext = sessionTitleContext(conversation.messages);
     const images = attachments.map((file) => ({ type: "image", data: file.data, mimeType: file.mimeType }));
     /// 发送时若 AI 正在执行，本条会被 pi 排队；本地记住图片，供待发送列表恢复。
     const queuedByPi = conversation.busy;
     const queuedAttachments = attachments.map((file) => ({ ...file }));
     const current = generation;
     const sentTaskId = taskId;
+    const promptToken = ++promptSequence;
+    pendingPromptTasks = { ...pendingPromptTasks, [sentTaskId]: promptToken };
     sending = true;
     error = "";
     try {
       await call({ type: "prompt", message: text, streamingBehavior, ...(images.length ? { images } : {}) });
-      if (current !== generation) return;
-      if (queuedByPi && queuedAttachments.length) {
+      if (text.trim()) scheduleTitleEvaluation(sentTaskId, text, titleContext);
+      if (taskId !== sentTaskId) return;
+      if (current === generation && queuedByPi && queuedAttachments.length) {
         queuedImages = [...queuedImages, { mode: streamingBehavior, text, images: queuedAttachments }];
       }
-      if (draft === text) { draft = ""; attachments = []; attachmentError = ""; }
-      followScroll = true;
-      pinnedMessageStart = null;
-      refreshStats();
+      // A reconnect can supersede the view while the original RPC succeeds. Clear only
+      // the acknowledged content, never a subsequently edited draft or added images.
+      if (draft === text) draft = "";
+      attachments = attachments.filter((file) => !queuedAttachments.some((sent) =>
+        sent.id === file.id && sent.data === file.data && sent.mimeType === file.mimeType));
+      if (!attachments.length) attachmentError = "";
+      if (current === generation) {
+        followScroll = true;
+        pinnedMessageStart = null;
+        refreshStats();
+      }
     } catch (cause) {
-      if (isUnknownPromptOutcome(cause)) unknownPromptTaskId = sentTaskId;
-      if (current === generation) commandError(cause);
+      if (isUnknownPromptOutcome(cause)) unknownPromptTasks = { ...unknownPromptTasks, [sentTaskId]: true };
+      if (current === generation && taskId === sentTaskId) commandError(cause);
     } finally {
-      if (current === generation) sending = false;
+      if (pendingPromptTasks[sentTaskId] === promptToken) {
+        const { [sentTaskId]: _settled, ...remaining } = pendingPromptTasks;
+        pendingPromptTasks = remaining;
+      }
+      if (current === generation && taskId === sentTaskId) sending = false;
     }
   }
 
-  async function interrupt() {
+  async function interrupt(recordStop = false) {
     if (stopping || conversation.closed) return;
+    const shouldRecordStop = recordStop && conversation.busy;
     const current = generation;
     stopping = true;
     try {
@@ -1721,11 +1900,18 @@
         restoredDraft = text;
         if (!draft) { draft = text; restoredDraft = ""; }
       }
+      const anchor = shouldRecordStop ? lastUserAnchor(conversation.messages) : null;
+      pendingStopAnchor = anchor;
       await call({ type: "abort" });
+      if (current !== generation) return;
+      if (anchor !== null) {
+        stopRecords = saveStopRecord(window.localStorage, taskId, { id: crypto.randomUUID(), anchor, timestamp: Date.now() });
+        conversation = suppressStoppedAbort(conversation, stopRecords, null);
+      }
     } catch (cause) {
       if (current === generation) commandError(cause);
     } finally {
-      if (current === generation) stopping = false;
+      if (current === generation) { pendingStopAnchor = null; stopping = false; }
     }
   }
 
@@ -1925,7 +2111,7 @@
     {#if error || conversation.error || conversation.closed}
       <article class="chat-error" role="alert">
         <div class="message-label"><CircleAlert size={14} />{t("错误")}</div>
-        <p class="chat-error-text">{error || conversation.error ? tm(error || conversation.error) : t("会话进程已退出")}</p>
+        {#if error || conversation.error}<AiError raw={error || conversation.errorRaw || conversation.error} />{:else}<p class="chat-error-text">{t("会话进程已退出")}</p>{/if}
         <button type="button" class="chat-error-retry" disabled={recovering || switching} onclick={() => void recoverSession()}><RefreshCw size={13} />{recovering ? t("正在检查会话…") : t("恢复会话")}</button>
       </article>
     {/if}
@@ -1976,10 +2162,11 @@
       {/if}
     {/each}
     {#if liveStatusVisible}
-      <p class="turn-total live-status" role="status" class:stalled={toolStalled}>
+      <div class="turn-total live-status" role="status" class:stalled={toolStalled}>
         {#if activeTool}<span class="activity-dot {outputActivity(activeTool, elapsedNow)}" aria-hidden="true"></span>{/if}
         <span class="live-status-text" title={statusText}>{statusText}</span>
-      </p>
+        {#if conversation.retry?.error}<AiError raw={conversation.retry.rawError || conversation.retry.error} compact />{/if}
+      </div>
     {/if}
     {#if initializing}<p role="status">{t("正在连接 Pi 会话…")}</p>{/if}
     {#if !initializing && !visibleEntries.length && !error}
@@ -2006,10 +2193,10 @@
   {#if unknownPromptOutcome}
     <p class="model-hint" role="alert">
       <span>{t("上一条提示词的提交结果不明。草稿和附件已保留；请先检查会话历史与工具执行情况，避免重复提交。")}</span>
-      <span class="model-hint-actions"><button type="button" onclick={() => { unknownPromptTaskId = null; }}>{t("已核对，允许手动发送")}</button></span>
+      <span class="model-hint-actions"><button type="button" onclick={() => { const { [taskId]: _acknowledged, ...remaining } = unknownPromptTasks; unknownPromptTasks = remaining; }}>{t("已核对，允许手动发送")}</button></span>
     </p>
   {/if}
-  {#if connected && !initializing && !conversation.closed && models.length === 0}
+  {#if (dormant || (connected && !initializing && !conversation.closed)) && models.length === 0}
     <p class="model-hint" role="status">
       {#if modelsLoadFailed}
         <span>{t("模型列表读取失败：{error}", { error: modelsLoadError })}</span>
@@ -2018,7 +2205,7 @@
       {/if}
       <span class="model-hint-actions">
         {#if onOpenModelSettings && !modelsLoadFailed}<button type="button" onclick={onOpenModelSettings}>{t("打开模型设置")}</button>{/if}
-        <button type="button" onclick={() => void refreshModels()}>{t("重试")}</button>
+        <button type="button" onclick={() => void (dormant ? loadStoppedModels(() => dormant) : refreshModels())}>{t("重试")}</button>
         {#if onReloadSession}<button type="button" onclick={reloadSession}>{t("重载会话")}</button>{/if}
       </span>
     </p>
@@ -2031,7 +2218,7 @@
       </span>
     </p>
   {/if}
-  {#if !followScroll && conversation.messages.length}
+  {#if !followScroll && displayMessages.length}
     <div class="scroll-actions">
       <div class="scroll-actions-row">
         <button type="button" title={t("回到最新消息")} aria-label={t("回到最新消息")} onclick={returnToLatest}><ArrowDown size={16} /></button>
@@ -2091,8 +2278,7 @@
       </ul>
     {/if}
     <textarea bind:this={input} bind:value={draft} rows="3" maxlength="131072" aria-keyshortcuts={shortcutAria("composer")}
-      aria-label={t("发送给 Pi")} placeholder={dormant ? t("输入提示词并回车，启动会话") : conversation.closed ? t("会话已停止") : conversation.busy ? t("AI 执行中，可继续发送新消息") : t("发送消息；输入 / 使用命令")}
-      disabled={conversation.closed}
+      aria-label={t("发送给 Pi")} placeholder={dormant ? t("输入提示词并回车，启动会话") : conversation.busy ? t("AI 执行中，可继续发送新消息") : t("发送消息；输入 / 使用命令")}
       oncompositionstart={() => { composing = true; }} oncompositionend={() => { composing = false; }}
       onpaste={onComposerPaste}
       onkeydown={(event) => {
@@ -2107,15 +2293,15 @@
         if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void send(); }
       }}></textarea>
     <div class="composer-actions">
-      {#if models.length}
-        <select aria-label={t("对话模型")} value={selectedModel} disabled={switching || !connected || changingModel}
+      {#if models.length || dormant}
+        <select aria-label={t("对话模型")} value={selectedModel} disabled={switching || (!connected && !dormant) || changingModel || starting}
           title={conversation.busy ? t("当前回复生成中；改动对下一条消息生效") : undefined}
           onchange={(event) => {
             const select = event.currentTarget;
             void changeModel(select.value).then(() => { select.value = selectedModel; });
           }}>
           {#if !models.some((model) => `${model.provider}/${model.id}` === selectedModel)}
-            <option value={selectedModel} disabled>{modelName}</option>
+            <option value={selectedModel} disabled>{modelName || t("无可用模型")}</option>
           {/if}
           {#each groupedModels as group (group.provider)}
             <optgroup label={group.label}>
@@ -2145,16 +2331,6 @@
           {/each}
         </select>
       {/if}
-      {#if connected && !initializing}
-        <button type="button" class="context-ring" title={ringTitle}
-          aria-label={t("上下文用量 {percent}，点击压缩上下文", { percent: ringLabel })} disabled={!canCompact}
-          onclick={() => void compactContext()}>
-          <svg viewBox="0 0 32 32" aria-hidden="true">
-            <circle class="ring-bg" cx="16" cy="16" r="13" />
-            <circle class="ring-fg" cx="16" cy="16" r="13" style={`stroke-dasharray:${ringDash}`} />
-          </svg>
-        </button>
-      {/if}
       <select aria-label={t("运行时消息处理方式")} bind:value={streamingBehavior}>
         <option value="followUp">{t("排队跟进")}</option><option value="steer">{t("优先引导")}</option>
       </select>
@@ -2180,10 +2356,20 @@
           {#if enhancing}<span class="spin"><RefreshCw size={14} /></span>{:else}<Sparkles size={15} />{/if}
         </button>
         {#if conversation.busy || conversation.queue.length}
-          <button type="button" class="send-button stop-button" class:stalled={toolStalled} disabled={switching || stopping} title={t("停止当前响应并清空队列")} aria-label={t("停止当前响应并清空队列")} onclick={() => void interrupt()}><Square size={16} /></button>
+          <button type="button" class="send-button stop-button" class:stalled={toolStalled} disabled={switching || stopping} title={t("停止当前响应并清空队列")} aria-label={t("停止当前响应并清空队列")} onclick={() => void interrupt(true)}><Square size={16} /></button>
         {/if}
         <button type="submit" class="send-button primary-send" disabled={!canSend} title={sendHint} aria-label={sendHint}><ArrowUp size={18} /></button>
       </div>
+      {#if connected && !initializing}
+        <button type="button" class="context-ring" title={ringTitle}
+          aria-label={t("上下文用量 {percent}，点击压缩上下文", { percent: ringLabel })} disabled={!canCompact}
+          onclick={() => void compactContext()}>
+          <svg viewBox="0 0 32 32" aria-hidden="true">
+            <circle class="ring-bg" cx="16" cy="16" r="13" />
+            <circle class="ring-fg" cx="16" cy="16" r="13" style={`stroke-dasharray:${ringDash}`} />
+          </svg>
+        </button>
+      {/if}
     </div>
   </form>
 </section>
@@ -2240,7 +2426,11 @@
   .activity-dot.fresh { background: #58a661; animation: activity-pulse 1.6s ease-in-out infinite; }
   .activity-dot.stale { background: #d8a04a; animation: activity-pulse 1.6s ease-in-out infinite; }
   @keyframes activity-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
-  .user-message .message-content { padding: 12px; border-left: 2px solid var(--accent); background: var(--surface); }
+  .user-message { width: fit-content; max-width: min(78%, 700px); margin-right: 0; margin-left: auto; min-width: 0; }
+  .user-message .message-label { justify-content: flex-end; }
+  .user-message .message-content { padding: 12px; border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border)); border-radius: 6px; background: color-mix(in srgb, var(--accent) 12%, var(--surface)); }
+  .user-message :global(img) { max-width: 100%; }
+  @media (max-width: 560px) { .user-message { max-width: 92%; } }
   .tool-call { max-width: 900px; border: 1px solid var(--border); border-radius: 4px; padding: 8px 12px; margin: 0 auto 8px; font-size: 12px; }
   /* 运行中的工具卡：具体参数摘要 + 活跃点 + 实时输出尾部，让「AI 在做什么」可见。 */
   .tool-call.live { border-color: color-mix(in srgb, var(--accent) 30%, var(--border)); }

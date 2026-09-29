@@ -12,6 +12,8 @@ export const DIAGNOSTIC_LABELS = {
   frame_too_large: "输出帧超过大小上限", invalid_json: "输出不是合法的 JSON 对象",
   incomplete_frame: "进程退出时输出帧不完整", output_read_failed: "输出管道读取失败",
   history_failed: "历史响应解析或临时存储失败",
+  model_transport_failure: "模型传输失败", model_stream_terminated: "模型流被中止（原因未提供）",
+  model_retry_start: "模型自动重试", model_retry_succeeded: "模型重试成功", model_retry_exhausted: "模型重试结束但未成功",
 } as const;
 
 const SAFE_DIAGNOSTIC_ERRORS = new Set([
@@ -29,6 +31,7 @@ export interface DiagnosticEvent {
   code: keyof typeof DIAGNOSTIC_LABELS;
   count: number;
   exitCode: number | null;
+  transport?: { protocol: "sse" | "websocket"; phase: "headers" | "body" | "stream"; cause: string; durationMs: number; idleMs: number | null; closeCode: number | null };
 }
 export interface DiagnosticReport {
   schemaVersion: number;

@@ -104,7 +104,7 @@ describe("ChatPane display wiring", () => {
   it("applies the selected mode to live, finished and paged history entries", () => {
     expect(pane).toContain('.filter((entry) => showConversationMessage(entry.message, chatDetailLevel))');
     expect(pane).toContain('conversation = prependRpcHistory(conversation, page, historyOffset)');
-    expect(pane).toContain('historyLimit = conversation.messages.length');
+    expect(pane).toContain('historyLimit = displayMessages.length');
     expect(pane).toContain('{#each visibleEntries as entry, offset (historyOffset + entry.index)}');
     expect(pane).toContain('detail={chatDetailLevel} resolvedToolIds={toolResults}');
     expect(pane).toContain('<MessageFallback {message} detail={chatDetailLevel} />');

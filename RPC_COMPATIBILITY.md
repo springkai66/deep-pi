@@ -67,7 +67,7 @@ Pi 0.85 起，助手文本不再每次重发整条消息，而是发 `message_up
 
 - 恢复：`--session <file>`，读取前校验会话 ID、项目目录与文件身份；新会话使用 `--session-id`；标题使用 `--name`。
 - 历史读取只经 `get_messages` 快照；不复制或改写原生会话文件。
-- v1.0 只启动托管环境（`PI_CODING_AGENT_DIR` 指向任务绑定的托管目录）。
+- 只启动托管环境（`PI_CODING_AGENT_DIR` 指向任务绑定的托管目录）。
 
 ## 覆盖测试
 

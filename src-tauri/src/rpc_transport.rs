@@ -218,6 +218,32 @@ impl Shared {
     }
 
     fn receive(&self, mut value: Value) {
+        if value["type"] == "deeppi_transport_diagnostic" {
+            if let Some(failure) = crate::pi_transport::TransportFailure::parse(&value["transport"])
+            {
+                self.diagnostics
+                    .record_transport(self.diagnostic_run, failure);
+            }
+            // Private host diagnostics must not enter conversation history or UI event replay.
+            return;
+        }
+        let diagnostic = match value["type"].as_str() {
+            Some("auto_retry_start") => Some(DiagnosticCode::ModelRetryStart),
+            Some("auto_retry_end") if value["success"] == true => {
+                Some(DiagnosticCode::ModelRetrySucceeded)
+            }
+            Some("auto_retry_end") => Some(DiagnosticCode::ModelRetryExhausted),
+            Some("message_end")
+                if value["message"]["role"] == "assistant"
+                    && value["message"]["errorMessage"] == "terminated" =>
+            {
+                Some(DiagnosticCode::ModelStreamTerminated)
+            }
+            _ => None,
+        };
+        if let Some(code) = diagnostic {
+            self.diagnostics.record(self.diagnostic_run, code, 1, None);
+        }
         if value["type"] == "response" {
             if let Some(id) = value["id"].as_str() {
                 let reply = self
@@ -526,7 +552,6 @@ impl RpcTransport {
             history_gate: Mutex::new(()),
         })
     }
-
     /// A stopped reader/writer is no longer a usable RPC run, even before the exit callback removes it.
     pub fn is_open(&self) -> bool {
         !self.shared.stop.load(Ordering::Acquire)

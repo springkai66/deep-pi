@@ -1,5 +1,5 @@
 /**
- * 官方账号 OAuth 登录（pi SDK 桥）的前端客户端。
+ * DeepPi 托管的 Pi 官方供应商认证（OAuth / API Key）。
  *
  * Rust 侧在登录过程中通过全局事件 `pi-auth-event` 下发授权链接、进度与输入
  * 提示（见 src-tauri/src/pi_auth.rs 与 resources/pi-auth-bridge.mjs）；组件
@@ -7,11 +7,12 @@
  */
 import { invoke as nativeInvoke } from "@tauri-apps/api/core";
 
-/** pi 内置支持官方 OAuth 登录的 provider（来自 pi SDK 的运行时枚举）。 */
+/** Pi 运行时可用的官方供应商及认证能力。 */
 export interface PiAuthProviderInfo {
   id: string;
   name: string;
   oauth: boolean;
+  apiKey: boolean;
   oauthName: string | null;
   isSubscription: boolean;
 }
@@ -28,6 +29,28 @@ export interface PiAuthStatusResponse {
   credentials: PiAuthCredentialSummary[];
   activeLogin: string | null;
   activeLoginProvider: string | null;
+}
+
+export interface PiOfficialModel {
+  id: string;
+  name: string;
+  contextWindow: number | null;
+  maxTokens: number | null;
+  reasoning: boolean;
+  thinkingLevels?: string[];
+  input: string[];
+  inputCost: number | null;
+  outputCost: number | null;
+}
+
+export interface PiModelDefaults {
+  defaultProvider: string | null;
+  defaultModel: string | null;
+  modelThinkingLevels: Record<string, string>;
+}
+/** DeepPi 聊天模型选择：null 表示完整目录（包括后续新增模型），[] 表示不显示模型。 */
+export interface PiModelSelection {
+  modelIds: string[] | null;
 }
 
 /** pi_auth_start_login 的返回（登录会话句柄）。 */
@@ -97,6 +120,7 @@ export const AUTH_EVENT_NAME = "pi-auth-event";
 /** `pi auth start_login` 类命令的请求体（serde camelCase）。 */
 export interface PiAuthLoginRequest {
   providerId: string;
+  authType?: "oauth" | "api_key";
 }
 
 /** `pi auth respond` 的请求体。 */

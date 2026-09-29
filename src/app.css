@@ -137,9 +137,6 @@ select:focus-visible {
 .project-sidebar { display: flex; flex-direction: column; min-width: 0; min-height: 0; border-right: 1px solid var(--border); background: var(--surface-alt); }
 .sidebar-panel { flex: 1; min-height: 0; overflow: hidden; }
 .sidebar-panel > .task-sidebar { height: 100%; border: 0; }
-.file-project-selector { display: flex; gap: 4px; padding: 8px 10px 0; }
-.file-project-selector select { flex: 1; min-width: 0; width: 100%; padding: 5px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); color: var(--text); }
-.file-project-selector button { display: grid; place-items: center; border: 0; background: transparent; color: var(--text-muted); cursor: pointer; }
 .file-panel { display: flex; flex-direction: column; min-width: 0; min-height: 0; border-left: 1px solid var(--border); background: var(--surface-alt); }
 .file-panel .sidebar-panel { flex: 1; min-height: 0; overflow: hidden; }
 .file-panel .sidebar-panel > .file-sidebar { height: 100%; border: 0; }
@@ -195,7 +192,8 @@ aside.project-sidebar, aside.file-panel, aside.git-sidebar { position: relative;
 
 /* 为压线/贴边按钮预留位置，避免压住搜索框与标签。 */
 .app-shell .project-sidebar .task-search { margin-right: 24px; }
-.app-shell .file-panel .file-project-selector { padding-left: 30px; }
+/* 文件栏标题避开骑在左边界上的收起按钮。 */
+.app-shell .file-panel .file-sidebar > header { padding-left: 30px; }
 .app-shell.sidebar-hidden .workspace .task-tabs-shell,
 .app-shell.files-hidden .workspace .task-tabs-shell {
   background: var(--surface-alt);
@@ -665,13 +663,18 @@ aside.project-sidebar, aside.file-panel, aside.git-sidebar { position: relative;
   place-content: center;
   justify-items: center;
   gap: 14px;
+  min-width: 0;
+  max-width: 100%;
+  overflow: auto;
+  padding: 12px;
   color: #778078;
 }
 
 .dsh-error {
   display: grid;
   gap: 6px;
-  max-width: min(720px, 80vw);
+  width: min(720px, 100%);
+  max-width: 100%;
   margin: 0;
   padding: 12px 14px;
   border: 1px solid #74423e;

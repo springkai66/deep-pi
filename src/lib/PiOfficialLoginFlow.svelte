@@ -22,6 +22,7 @@
     /// 创建流程里预先选定的登录方式（如 openai-codex 的 browser / device_code）；
     /// null 时由 pi 的默认流程决定，选择提示照常展示。
     loginMethod?: string | null;
+    authType?: "oauth" | "api_key";
     invokeCommand?: typeof nativeInvoke;
     onError: (error: unknown) => void;
     onSuccess: (providerId: string) => void;
@@ -40,6 +41,7 @@
     providerId,
     providerName,
     loginMethod = null,
+    authType = "oauth",
     invokeCommand = nativeInvoke,
     onError,
     onSuccess,
@@ -99,7 +101,7 @@
         await invoke("pi_auth_cancel", { request: { loginId: status.activeLogin } }).catch(() => {});
       }
       const ack = await invoke<PiAuthLoginAck>("pi_auth_start_login", {
-        request: { providerId, loginMethod },
+        request: { providerId, loginMethod, authType },
       });
       loginId = ack.loginId;
       replay();
@@ -308,7 +310,7 @@
       {/if}
     </div>
   {:else if !starting && !errorText}
-    <p class="login-wait" role="status">{t("等待浏览器端完成授权…")}<span class="login-spin"><RefreshCw size={12} /></span></p>
+    <p class="login-wait" role="status">{authType === "api_key" ? t("正在等待 API Key 输入…") : t("等待浏览器端完成授权…")}<span class="login-spin"><RefreshCw size={12} /></span></p>
   {/if}
 
   {#if errorText}

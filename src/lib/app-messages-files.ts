@@ -367,9 +367,9 @@ export const APP_MESSAGES_FILES: Record<string, import("./app-messages").AppMess
     en: "The file watch is not available right now.",
   },
   "managed.dsh_missing": {
-    "zh-CN": "托管 DSH 运行时未安装，请在“设置 → 运行时与更新”安装 DSH",
-    "zh-TW": "托管 DSH 運行時未安裝，請在“設置 → 運行時與更新”安裝 DSH",
-    en: "The managed DSH runtime is not installed. Install DSH in Settings → “Runtime & Updates”.",
+    "zh-CN": "托管 DSH 运行时未安装，请在“设置 → DSH 服务”安装 DSH",
+    "zh-TW": "托管 DSH 運行時未安裝，請在“設置 → DSH 服務”安裝 DSH",
+    en: "The managed DSH runtime is not installed. Install DSH in Settings → DSH Service.",
   },
   "managed.native_task_unsupported": {
     "zh-CN": "当前稳定版仅支持 DeepPi 托管任务，本机会话记录已保留",
@@ -377,14 +377,14 @@ export const APP_MESSAGES_FILES: Record<string, import("./app-messages").AppMess
     en: "The current stable release only supports DeepPi managed tasks; the local session record was kept.",
   },
   "managed.node_missing": {
-    "zh-CN": "托管 Node 运行时未安装，请在“设置 → 运行时与更新”安装 Node",
-    "zh-TW": "托管 Node 運行時未安裝，請在“設置 → 運行時與更新”安裝 Node",
-    en: "The managed Node runtime is not installed. Install Node in Settings → “Runtime & Updates”.",
+    "zh-CN": "托管 Node 运行时未安装，请在“设置 → Pi 服务”安装 Node",
+    "zh-TW": "托管 Node 運行時未安裝，請在“設置 → Pi 服務”安裝 Node",
+    en: "The managed Node runtime is not installed. Install Node in Settings → Pi Service.",
   },
   "managed.npm_missing": {
-    "zh-CN": "托管 npm 不可用，请在“设置 → 运行时与更新”修复 Node 运行时",
-    "zh-TW": "托管 npm 不可用，請在“設置 → 運行時與更新”修復 Node 運行時",
-    en: "The managed npm is not available. Repair the Node runtime in Settings → “Runtime & Updates”.",
+    "zh-CN": "托管 npm 不可用，请在“设置 → Pi 服务”重新安装 Node 运行时",
+    "zh-TW": "托管 npm 不可用，請在“設置 → Pi 服務”重新安裝 Node 運行時",
+    en: "The managed npm is unavailable. Reinstall the Node runtime in Settings → Pi Service.",
   },
   "managed.pi_config_unavailable": {
     "zh-CN": "任务绑定的 Pi 配置目录不可用",
@@ -392,9 +392,9 @@ export const APP_MESSAGES_FILES: Record<string, import("./app-messages").AppMess
     en: "The Pi configuration directory bound to the task is not available.",
   },
   "managed.pi_missing": {
-    "zh-CN": "托管 Pi 运行时未安装，请在“设置 → 运行时与更新”安装 Pi",
-    "zh-TW": "托管 Pi 運行時未安裝，請在“設置 → 運行時與更新”安裝 Pi",
-    en: "The managed Pi runtime is not installed. Install Pi in Settings → “Runtime & Updates”.",
+    "zh-CN": "托管 Pi 运行时未安装，请在“设置 → Pi 服务”安装 Pi",
+    "zh-TW": "托管 Pi 運行時未安裝，請在“設置 → Pi 服務”安裝 Pi",
+    en: "The managed Pi runtime is not installed. Install Pi in Settings → Pi Service.",
   },
   "managed.runtime_dir_create_failed": {
     "zh-CN": "无法创建运行时目录 {path}：{error}。Pi/DSH 运行时安装在 DeepPi 安装目录下的 runtimes 子文件夹，请把 DeepPi 安装到可写的位置（不要安装在受保护的系统目录）",

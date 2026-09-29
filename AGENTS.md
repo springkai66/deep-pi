@@ -2,7 +2,7 @@
 
 DeepPi is a Tauri v2 desktop host for the Pi Coding Agent and the DeepSeek Harness. The SvelteKit app in `src/` is the UI; the Rust crate in `src-tauri/` is the host that owns PTYs, processes, and the filesystem bridge. `src/` and `src-tauri/` are two halves of one product, not two contexts.
 
-Commands live in `package.json` and `src-tauri/Cargo.toml`. Other docs worth knowing about: `DESIGN.md`, `DEVELOPMENT.md`, `REVIEW.md`, `RELEASING.md`.
+Commands live in `package.json` and `src-tauri/Cargo.toml`. For development and release procedures, see `DEVELOPMENT.md` and `RELEASING.md`; for product vocabulary, see `CONTEXT.md`.
 
 ## Agent skills
 

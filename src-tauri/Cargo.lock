@@ -766,7 +766,7 @@ dependencies = [
 
 [[package]]
 name = "deeppi"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "atomic-write-file",
  "base64 0.22.1",
@@ -793,6 +793,8 @@ dependencies = [
  "tempfile",
  "ureq",
  "uuid",
+ "windows",
+ "windows-core 0.61.2",
  "windows-sys 0.61.2",
  "winreg 0.55.0",
  "zip",

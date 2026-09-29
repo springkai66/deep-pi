@@ -27,7 +27,7 @@ const MAX_HEADER_NAME_LENGTH: usize = 128;
 const MAX_HEADER_VALUE_LENGTH: usize = 4_096;
 
 #[derive(Default)]
-pub struct ProviderConfigGate(Mutex<()>);
+pub struct ProviderConfigGate(pub(crate) Mutex<()>);
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -65,6 +65,13 @@ pub struct SaveProviderRequest {
     pub headers: BTreeMap<String, String>,
     #[serde(default)]
     pub proxy: Option<String>,
+    pub models: Vec<ConfiguredModel>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveProviderModelSelectionRequest {
+    pub provider_id: String,
     pub models: Vec<ConfiguredModel>,
 }
 
@@ -682,6 +689,78 @@ fn save_provider_file(
     provider_from_json(&request.id, &saved_provider)
 }
 
+fn save_provider_model_selection_file(
+    path: &Path,
+    request: &SaveProviderModelSelectionRequest,
+) -> Result<ProviderRecord, String> {
+    validate_provider_id(&request.provider_id)?;
+    if request.provider_id == "openai-codex" {
+        return Err(msg_with(
+            "provider.not_found",
+            &[("provider", &request.provider_id)],
+        ));
+    }
+    if request.models.len() > MAX_MODELS {
+        return Err(msg("provider.models.too_many"));
+    }
+
+    crate::snapshot::reject_link(path)?;
+    let mut root = read_models_file(path)?;
+    let providers = root
+        .get_mut("providers")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "Pi models.json providers must be an object".to_string())?;
+    if providers.len() > MAX_PROVIDERS {
+        return Err(msg("provider.count.too_many"));
+    }
+    let provider = providers
+        .get_mut(&request.provider_id)
+        .ok_or_else(|| msg_with("provider.not_found", &[("provider", &request.provider_id)]))?
+        .as_object_mut()
+        .ok_or_else(|| format!("Pi provider {} is not an object", request.provider_id))?;
+    let existing_models = provider
+        .get("models")
+        .map(|models| {
+            models
+                .as_array()
+                .ok_or_else(|| "Pi provider models must be an array".to_string())
+        })
+        .transpose()?;
+    let mut existing = BTreeMap::new();
+    for model in existing_models.into_iter().flatten() {
+        let id = model
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "Pi model has no id".to_string())?;
+        valid_text(id, "provider.model_id.invalid", MAX_TEXT_LENGTH)?;
+        if existing.insert(id.to_owned(), model.clone()).is_some() {
+            return Err(msg("provider.models.duplicate"));
+        }
+    }
+
+    let mut ids = BTreeSet::new();
+    let mut models = Vec::with_capacity(request.models.len());
+    for model in &request.models {
+        valid_text(&model.id, "provider.model_id.invalid", MAX_TEXT_LENGTH)?;
+        if !ids.insert(&model.id) {
+            return Err(msg("provider.models.duplicate"));
+        }
+        if let Some(saved) = existing.get(&model.id) {
+            models.push(saved.clone());
+        } else {
+            validate_model(model)?;
+            models.push(pi_schema_converged_model(&model_to_json(model)));
+        }
+    }
+    provider.insert("models".into(), Value::Array(models));
+    let record = provider_from_json(&request.provider_id, &Value::Object(provider.clone()))?;
+    let content = serde_json::to_vec_pretty(&root)
+        .map_err(|error| format!("failed to serialize Pi models.json: {error}"))?;
+    crate::durable_file::write(path, &content)
+        .map_err(|error| format!("failed to write Pi models.json: {error}"))?;
+    Ok(record)
+}
+
 fn delete_provider_file(path: &Path, id: &str) -> Result<(), String> {
     validate_provider_id(id)?;
     let mut root = read_models_file(path)?;
@@ -1218,6 +1297,23 @@ pub async fn save_pi_provider(
 }
 
 #[tauri::command]
+pub async fn save_pi_provider_model_selection(
+    app: AppHandle,
+    request: SaveProviderModelSelectionRequest,
+) -> Result<ProviderRecord, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let gate = app.state::<ProviderConfigGate>();
+        let _permit = gate
+            .0
+            .lock()
+            .map_err(|_| "Provider configuration lock is poisoned")?;
+        save_provider_model_selection_file(&app.state::<AppPaths>().pi_models_file(), &request)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 pub async fn delete_pi_provider(
     app: AppHandle,
     request: DeleteProviderRequest,
@@ -1238,8 +1334,9 @@ pub async fn delete_pi_provider(
 mod tests {
     use super::{
         credential_command, list_provider_file, parse_provider_models, pi_schema_input_types,
-        provider_models_url, save_provider_file, validate_headers, validate_proxy,
-        write_models_file, ConfiguredModel, ModelCostConfig, SaveProviderRequest,
+        provider_models_url, save_provider_file, save_provider_model_selection_file,
+        validate_headers, validate_proxy, write_models_file, ConfiguredModel, ModelCostConfig,
+        SaveProviderModelSelectionRequest, SaveProviderRequest,
     };
     use serde_json::json;
 
@@ -1566,5 +1663,204 @@ mod tests {
         assert_eq!(records[0].models[0].cost, None);
 
         std::fs::remove_dir_all(root).expect("test directory should be removed");
+    }
+    #[test]
+    fn selection_preserves_existing_models_and_provider_configuration() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("models.json");
+        let auth = root.path().join("auth.json");
+        std::fs::write(&auth, "credential-sentinel").unwrap();
+        let original = json!({
+            "topLevelSentinel": {"intact": true},
+            "modelOverrides": {"gpt-5": {"maxTokens": 20}},
+            "providers": {
+                "third-party": {
+                    "name": "On disk", "api": "openai-completions",
+                    "apiKey": "credential-sentinel", "baseUrl": "https://api.example.com/v1",
+                    "headers": {"x-secret": "header-sentinel"},
+                    "proxy": "http://127.0.0.1:7890", "custom": "untouched",
+                    "models": [
+                        {"id": "remove", "name": "Remove", "input": ["text"]},
+                        {"id": "gpt-5", "name": "Original", "contextWindow": 8192,
+                         "maxTokens": 4096, "input": ["image"],
+                         "cost": {"input": 1.5, "output": 2.5, "cacheRead": 0.0, "cacheWrite": 0.0},
+                         "extra": {"diskOnly": true}}
+                    ]
+                },
+                "other": {"apiKey": "other-secret", "models": [
+                    {"id": "untouched", "input": ["pdf"], "cost": {"input": null}}
+                ]}
+            }
+        });
+        std::fs::write(&path, serde_json::to_vec(&original).unwrap()).unwrap();
+
+        let mut submitted_existing = model();
+        submitted_existing.name = "Unsaved edit".into();
+        submitted_existing.context_window = 0;
+        submitted_existing.input.clear();
+        submitted_existing.cost = Some(ModelCostConfig {
+            input: Some(-1.0),
+            output: None,
+            cache_read: None,
+            cache_write: None,
+        });
+        let mut added = model();
+        added.id = "new".into();
+        added.name = "New".into();
+        added.input = vec!["pdf".into(), "IMAGE".into()];
+        added.cost = Some(ModelCostConfig {
+            input: Some(0.5),
+            output: None,
+            cache_read: None,
+            cache_write: None,
+        });
+        let request = SaveProviderModelSelectionRequest {
+            provider_id: "third-party".into(),
+            models: vec![added, submitted_existing],
+        };
+        let saved = save_provider_model_selection_file(&path, &request).unwrap();
+        assert_eq!(
+            saved
+                .models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["new", "gpt-5"]
+        );
+        assert_eq!(saved.models[1].name, "Original");
+        assert_eq!(saved.models[1].context_window, 8192);
+        let after: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            after["providers"]["third-party"]["models"][1],
+            original["providers"]["third-party"]["models"][1]
+        );
+        assert_eq!(after["providers"]["other"], original["providers"]["other"]);
+        assert_eq!(after["modelOverrides"], original["modelOverrides"]);
+        assert_eq!(after["topLevelSentinel"], original["topLevelSentinel"]);
+        let mut expected_provider = original["providers"]["third-party"].clone();
+        expected_provider.as_object_mut().unwrap().remove("models");
+        let mut actual_provider = after["providers"]["third-party"].clone();
+        actual_provider.as_object_mut().unwrap().remove("models");
+        assert_eq!(actual_provider, expected_provider);
+        let new = &after["providers"]["third-party"]["models"][0];
+        assert_eq!(new["id"], "new");
+        assert_eq!(new["input"], json!(["image"]));
+        assert_eq!(new["thinkingLevelMap"]["low"], "low");
+        assert_eq!(
+            new["cost"],
+            json!({"input": 0.5, "output": 0.0, "cacheRead": 0.0, "cacheWrite": 0.0})
+        );
+        assert_eq!(
+            std::fs::read_to_string(&auth).unwrap(),
+            "credential-sentinel"
+        );
+
+        let cleared = save_provider_model_selection_file(
+            &path,
+            &SaveProviderModelSelectionRequest {
+                provider_id: "third-party".into(),
+                models: vec![],
+            },
+        )
+        .unwrap();
+        assert!(cleared.models.is_empty());
+        let empty: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(empty["providers"]["third-party"]["models"], json!([]));
+        let mut empty_provider = empty["providers"]["third-party"].clone();
+        empty_provider.as_object_mut().unwrap().remove("models");
+        assert_eq!(empty_provider, expected_provider);
+        assert_eq!(empty["providers"]["other"], original["providers"]["other"]);
+        assert_eq!(
+            std::fs::read_to_string(&auth).unwrap(),
+            "credential-sentinel"
+        );
+    }
+
+    #[test]
+    fn selection_rejects_unknown_official_duplicate_and_invalid_models_without_writing() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("models.json");
+        std::fs::write(
+            &path,
+            br#"{"providers":{"third-party":{"models":[]},"openai-codex":{"models":[]}}}"#,
+        )
+        .unwrap();
+        let original = std::fs::read(&path).unwrap();
+        for id in ["unknown", "openai-codex"] {
+            let request = SaveProviderModelSelectionRequest {
+                provider_id: id.into(),
+                models: vec![model()],
+            };
+            assert!(save_provider_model_selection_file(&path, &request).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+        }
+        let mut invalid = model();
+        invalid.max_tokens = 0;
+        let mut invalid_cost = model();
+        invalid_cost.cost = Some(ModelCostConfig {
+            input: Some(f64::NAN),
+            output: None,
+            cache_read: None,
+            cache_write: None,
+        });
+        for models in [
+            vec![model(), model()],
+            vec![invalid],
+            vec![invalid_cost],
+            vec![model(); 101],
+        ] {
+            let request = SaveProviderModelSelectionRequest {
+                provider_id: "third-party".into(),
+                models,
+            };
+            assert!(save_provider_model_selection_file(&path, &request).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+        }
+        std::fs::write(&path, br#"{"providers":{"third-party":{"models":{}}}}"#).unwrap();
+        let bad_models = std::fs::read(&path).unwrap();
+        assert!(save_provider_model_selection_file(
+            &path,
+            &SaveProviderModelSelectionRequest {
+                provider_id: "third-party".into(),
+                models: vec![model()],
+            }
+        )
+        .is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bad_models);
+        std::fs::write(&path, b"{bad json").unwrap();
+        let bad_json = std::fs::read(&path).unwrap();
+        assert!(save_provider_model_selection_file(
+            &path,
+            &SaveProviderModelSelectionRequest {
+                provider_id: "third-party".into(),
+                models: vec![],
+            }
+        )
+        .is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bad_json);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn selection_rejects_linked_models_file() {
+        let root = tempfile::tempdir().unwrap();
+        let actual = root.path().join("actual.json");
+        std::fs::write(&actual, br#"{"providers":{"third-party":{"models":[]}}}"#).unwrap();
+        let linked = root.path().join("models.json");
+        std::os::unix::fs::symlink(&actual, &linked).unwrap();
+        assert!(save_provider_model_selection_file(
+            &linked,
+            &SaveProviderModelSelectionRequest {
+                provider_id: "third-party".into(),
+                models: vec![],
+            }
+        )
+        .is_err());
+        assert_eq!(
+            std::fs::read(&actual).unwrap(),
+            br#"{"providers":{"third-party":{"models":[]}}}"#
+        );
     }
 }

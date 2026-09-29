@@ -112,8 +112,62 @@ pub struct DshDiagnosis {
     pub error: Option<String>,
     pub lines: Vec<String>,
     pub culprit: Option<String>,
+    pub culprits: Vec<String>,
     pub pending: Vec<String>,
     pub kind: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DshPlugin {
+    pub name: String,
+    pub official: bool,
+}
+
+fn configured_plugins(profile: &Path) -> Result<Vec<DshPlugin>, String> {
+    let content = match fs::read_to_string(profile.join("package.json")) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("failed to read DSH profile manifest: {error}")),
+    };
+    let manifest: Value = serde_json::from_str(&content)
+        .map_err(|error| format!("DSH profile manifest is not valid JSON: {error}"))?;
+    let mut names = std::collections::BTreeSet::new();
+    if let Some(deps) = manifest.get("dependencies").and_then(Value::as_object) {
+        names.extend(
+            deps.keys()
+                .filter(|name| package_name_is_valid(name))
+                .cloned(),
+        );
+    }
+    if let Some(bundles) = manifest
+        .pointer("/dsh/profile/bundles")
+        .and_then(Value::as_array)
+    {
+        names.extend(
+            bundles
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|name| package_name_is_valid(name))
+                .map(str::to_owned),
+        );
+    }
+    Ok(names
+        .into_iter()
+        .map(|name| DshPlugin {
+            official: is_official_dsh_package(&name),
+            name,
+        })
+        .collect())
+}
+
+#[tauri::command]
+pub async fn dsh_plugins(app: AppHandle) -> Result<Vec<DshPlugin>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        configured_plugins(&app.state::<AppPaths>().dsh_profile())
+    })
+    .await
+    .map_err(|error| format!("DSH plugin list worker failed: {error}"))?
 }
 
 /// DSH 插件修复结果。
@@ -179,64 +233,105 @@ fn package_name_is_valid(name: &str) -> bool {
     crate::market::validate_package_name(name).is_ok()
 }
 
-/// 从启动失败的 stderr 摘要中定位肇事插件包名。
-/// 优先匹配 `failed to import loader entry <id> (<pkg>)` 行；否则回退到
-/// stderr 中的 node_modules 路径段（跳过官方运行时包）。
-fn culprit_from_lines(lines: &[String]) -> Option<String> {
+/// 只从加载失败链与 node_modules 栈中提取候选；最终必须和 web profile 的
+/// 直接插件清单交叉核验，避免将运行时依赖错误归咎于未安装的插件。
+fn culprits_from_lines(lines: &[String]) -> Vec<String> {
+    let mut found = Vec::new();
     for line in lines {
-        // 同一行可能连续出现多个 `failed to import loader entry <id> (<pkg>)`
-        // 嵌套错误链，需要逐个检查括号里的包名直到找到非官方的候选。
         let mut cursor = 0usize;
         while let Some(offset) = line[cursor..].find("failed to import loader entry") {
             let tail = &line[cursor + offset..];
-            let open = tail.find('(');
-            let close = tail.find(')');
-            if let (Some(open), Some(close)) = (open, close) {
+            if let (Some(open), Some(close)) = (tail.find('('), tail.find(')')) {
                 if close > open {
                     let candidate = tail[open + 1..close].trim();
-                    if !is_official_dsh_package(candidate) && package_name_is_valid(candidate) {
-                        return Some(candidate.to_owned());
+                    if !is_official_dsh_package(candidate)
+                        && package_name_is_valid(candidate)
+                        && !found.iter().any(|name| name == candidate)
+                    {
+                        found.push(candidate.to_owned());
                     }
                 }
             }
             cursor += offset + "failed to import loader entry".len();
         }
     }
-    for line in lines {
-        let mut cursor = 0usize;
-        while cursor < line.len() {
-            let Some(offset) = line[cursor..].find("node_modules") else {
-                break;
-            };
-            let start = cursor + offset + "node_modules".len();
-            let bytes = line.as_bytes();
-            if start >= bytes.len() || (bytes[start] != b'/' && bytes[start] != b'\\') {
-                cursor = start + 1;
-                continue;
-            }
-            let rest = &line[start + 1..];
-            let end = rest.find(['/', '\\']).unwrap_or(rest.len());
-            let segment = &rest[..end];
-            let candidate = if segment.starts_with('@') {
-                if segment == "@deepseek-ai" || end >= rest.len() {
+    // 路径回退可能定位到间接依赖；诊断时仍需核验 web profile 清单。
+    if found.is_empty() {
+        for line in lines {
+            let mut cursor = 0usize;
+            while let Some(offset) = line[cursor..].find("node_modules") {
+                let start = cursor + offset + "node_modules".len();
+                let bytes = line.as_bytes();
+                if start >= bytes.len() || (bytes[start] != b'/' && bytes[start] != b'\\') {
                     cursor = start + 1;
                     continue;
                 }
-                let after = &rest[end + 1..];
-                let end2 = after.find(['/', '\\']).unwrap_or(after.len());
-                format!("{segment}/{}", &after[..end2])
-            } else {
-                segment.to_owned()
-            };
-            if !is_official_dsh_package(&candidate) && package_name_is_valid(&candidate) {
-                return Some(candidate);
+                let rest = &line[start + 1..];
+                let end = rest.find(['/', '\\']).unwrap_or(rest.len());
+                let segment = &rest[..end];
+                let candidate = if segment.starts_with('@') {
+                    if segment == "@deepseek-ai" || end >= rest.len() {
+                        cursor = start + 1;
+                        continue;
+                    }
+                    let after = &rest[end + 1..];
+                    let end2 = after.find(['/', '\\']).unwrap_or(after.len());
+                    format!("{segment}/{}", &after[..end2])
+                } else {
+                    segment.to_owned()
+                };
+                if !is_official_dsh_package(&candidate)
+                    && package_name_is_valid(&candidate)
+                    && !found.contains(&candidate)
+                {
+                    found.push(candidate);
+                }
+                cursor = start + 1;
             }
-            cursor = start + 1;
         }
     }
-    None
+    found
 }
 
+#[cfg(test)]
+fn culprit_from_lines(lines: &[String]) -> Option<String> {
+    culprits_from_lines(lines).into_iter().next()
+}
+
+fn configured_culprits(profile: &Path, lines: &[String]) -> Vec<String> {
+    if !lines
+        .iter()
+        .any(|line| line.contains("failed to import loader entry"))
+    {
+        return Vec::new();
+    }
+    configured_packages(profile, culprits_from_lines(lines))
+}
+
+fn configured_packages(profile: &Path, candidates: Vec<String>) -> Vec<String> {
+    let Ok(content) = fs::read_to_string(profile.join("package.json")) else {
+        return Vec::new();
+    };
+    let Ok(manifest) = serde_json::from_str::<Value>(&content) else {
+        return Vec::new();
+    };
+    candidates
+        .into_iter()
+        .filter(|name| {
+            manifest
+                .get("dependencies")
+                .and_then(|deps| deps.get(name))
+                .is_some()
+                || manifest
+                    .pointer("/dsh/profile/bundles")
+                    .and_then(Value::as_array)
+                    .is_some_and(|bundles| bundles.iter().any(|entry| entry.as_str() == Some(name)))
+        })
+        .collect()
+}
+
+/// 从失败日志确认具体包名后，只有配置在 profile 中的包才可供移除。
+/// 等待服务的插件同样允许用户在升级无效后手动选择移除。
 /// 从失败输出中提取“等待服务而未能激活”的插件名。
 /// 该输出可能被压成一行（`pkg-a: pending (waiting for service: x)pkg-b: pending (...)`），
 /// 因此这里按标记全局扫描，再向前回读包名。
@@ -289,6 +384,27 @@ fn diagnosis_kind(
     None
 }
 
+fn failure_is_stale(paths: &AppPaths, timestamp: Option<u64>) -> bool {
+    let Some(timestamp) = timestamp else {
+        return true;
+    };
+    let Some(runtime) = paths.dsh_runtime().ok() else {
+        return true;
+    };
+    [
+        paths.dsh_profile().join("package.json"),
+        AppPaths::dsh_cli_path(&runtime),
+    ]
+    .iter()
+    .any(|path| {
+        path.metadata()
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .is_none_or(|modified| modified.as_millis() as u64 > timestamp)
+    })
+}
+
 fn diagnose_inner(paths: &AppPaths) -> DshDiagnosis {
     let empty = DshDiagnosis {
         has_failure: false,
@@ -296,6 +412,7 @@ fn diagnose_inner(paths: &AppPaths) -> DshDiagnosis {
         error: None,
         lines: Vec::new(),
         culprit: None,
+        culprits: Vec::new(),
         pending: Vec::new(),
         kind: None,
     };
@@ -305,6 +422,9 @@ fn diagnose_inner(paths: &AppPaths) -> DshDiagnosis {
     let Ok(value) = serde_json::from_str::<Value>(&content) else {
         return empty;
     };
+    if failure_is_stale(paths, value.get("timestamp").and_then(Value::as_u64)) {
+        return empty;
+    }
     let lines = value
         .get("lines")
         .and_then(Value::as_array)
@@ -315,8 +435,14 @@ fn diagnose_inner(paths: &AppPaths) -> DshDiagnosis {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let culprit = culprit_from_lines(&lines);
     let pending = pending_plugins_from_lines(&lines);
+    let mut culprits = configured_culprits(&paths.dsh_profile(), &lines);
+    for candidate in configured_packages(&paths.dsh_profile(), pending.clone()) {
+        if !culprits.contains(&candidate) {
+            culprits.push(candidate);
+        }
+    }
+    let culprit = culprits.first().cloned();
     let kind = diagnosis_kind(&lines, culprit.as_ref(), &pending);
     DshDiagnosis {
         has_failure: true,
@@ -326,6 +452,7 @@ fn diagnose_inner(paths: &AppPaths) -> DshDiagnosis {
             .and_then(Value::as_str)
             .map(str::to_owned),
         culprit,
+        culprits,
         pending,
         kind,
         lines,
@@ -345,6 +472,8 @@ pub async fn dsh_diagnose(app: AppHandle) -> Result<DshDiagnosis, String> {
 /// 修复插件导致的 DSH 启动失败：先快照，再从 web profile 的
 /// dependencies/bundles/node_modules 中移除指定插件，失败可回滚。
 fn repair_inner(app: &AppHandle, package: &str) -> Result<DshRepairReport, String> {
+    let lifecycle = app.state::<crate::runtime::RuntimeOperationLock>();
+    let _lifecycle = lifecycle.acquire()?;
     let paths = app.state::<AppPaths>();
     let package = crate::market::validate_package_name(package)?;
     if is_official_dsh_package(package) {
@@ -356,6 +485,13 @@ fn repair_inner(app: &AppHandle, package: &str) -> Result<DshRepairReport, Strin
     let profile = paths.dsh_profile();
     if !profile.is_dir() {
         return Err(msg("dsh.profile.missing"));
+    }
+    if !diagnose_inner(&paths)
+        .culprits
+        .iter()
+        .any(|name| name == package)
+    {
+        return Err(msg("dsh.repair.not_in_profile"));
     }
     let manifest = profile.join("package.json");
     let targets = [manifest, profile.join("node_modules")];
@@ -406,31 +542,59 @@ pub async fn dsh_repair(
 
 /// 从 web profile 移除一个插件：dependencies、dsh.profile.bundles 与
 /// node_modules/<pkg>（存在时）。pnpm 链接目录只移除链接本身。
-fn remove_package_from_profile(profile: &Path, package: &str) -> Result<DshRepairReport, String> {
+pub(crate) fn remove_package_from_profile(
+    profile: &Path,
+    package: &str,
+) -> Result<DshRepairReport, String> {
+    remove_package_from_profile_inner(profile, package, true)
+}
+
+pub(crate) fn uninstall_market_from_profile(profile: &Path) -> Result<DshRepairReport, String> {
+    remove_package_from_profile_inner(profile, "dshmarket", false)
+}
+
+fn remove_package_from_profile_inner(
+    profile: &Path,
+    package: &str,
+    require_declared: bool,
+) -> Result<DshRepairReport, String> {
     let manifest = profile.join("package.json");
-    let content = fs::read_to_string(&manifest)
-        .map_err(|error| format!("failed to read DSH profile manifest: {error}"))?;
-    let mut value: Value = serde_json::from_str(&content)
-        .map_err(|error| format!("DSH profile manifest is not valid JSON: {error}"))?;
-    let (removed_from_dependencies, removed_from_bundles) =
-        strip_package_from_manifest(&mut value, package)?;
-    if !removed_from_dependencies && !removed_from_bundles {
+    let content = match fs::read_to_string(&manifest) {
+        Ok(content) => Some(content),
+        Err(error) if !require_declared && error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(format!("failed to read DSH profile manifest: {error}")),
+    };
+    let mut value = content
+        .as_deref()
+        .map(|content| {
+            serde_json::from_str::<Value>(content)
+                .map_err(|error| format!("DSH profile manifest is not valid JSON: {error}"))
+        })
+        .transpose()?;
+    let (removed_from_dependencies, removed_from_bundles) = match value.as_mut() {
+        Some(value) => strip_package_from_manifest(value, package)?,
+        None => (false, false),
+    };
+    let entry = profile.join("node_modules").join(package);
+    if !removed_from_dependencies && !removed_from_bundles && (require_declared || !entry.exists())
+    {
         return Err(msg_with(
             "dsh.repair.not_in_profile",
             &[("package", package)],
         ));
     }
-    let serialized = serde_json::to_vec_pretty(&value)
-        .map_err(|error| format!("failed to serialize DSH profile manifest: {error}"))?;
-    let mut file = AtomicWriteFile::open(&manifest)
-        .map_err(|error| format!("failed to open DSH profile manifest: {error}"))?;
-    file.write_all(&serialized)
-        .map_err(|error| format!("failed to write DSH profile manifest: {error}"))?;
-    file.commit()
-        .map_err(|error| format!("failed to commit DSH profile manifest: {error}"))?;
+    if removed_from_dependencies || removed_from_bundles {
+        let serialized = serde_json::to_vec_pretty(&value)
+            .map_err(|error| format!("failed to serialize DSH profile manifest: {error}"))?;
+        let mut file = AtomicWriteFile::open(&manifest)
+            .map_err(|error| format!("failed to open DSH profile manifest: {error}"))?;
+        file.write_all(&serialized)
+            .map_err(|error| format!("failed to write DSH profile manifest: {error}"))?;
+        file.commit()
+            .map_err(|error| format!("failed to commit DSH profile manifest: {error}"))?;
+    }
 
     let mut node_modules_removed = false;
-    let entry = profile.join("node_modules").join(package);
     if entry.exists() {
         remove_node_modules_entry(&entry)?;
         node_modules_removed = true;
@@ -1041,6 +1205,55 @@ mod tests {
         );
         assert!(error.contains("missing-pkg"));
         std::fs::remove_dir_all(root).expect("test directory should be removed");
+    }
+    #[test]
+    fn lists_configured_plugins_without_confusing_official_plugins_with_repair_targets() {
+        let root =
+            std::env::temp_dir().join(format!("deeppi-dsh-plugin-list-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("package.json"), r#"{"dependencies":{"dshmarket":"1.0.0","demo-plugin":"1.0.0"},"dsh":{"profile":{"bundles":["@deepseek-ai/dsh-base","demo-plugin","another-plugin"]}}}"#).unwrap();
+        let plugins = super::configured_plugins(&root).unwrap();
+        assert_eq!(
+            plugins
+                .iter()
+                .map(|plugin| plugin.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "@deepseek-ai/dsh-base",
+                "another-plugin",
+                "demo-plugin",
+                "dshmarket"
+            ]
+        );
+        assert!(plugins[0].official);
+        assert!(!plugins[1].official);
+        assert!(plugins[3].official);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn diagnosis_only_offers_configured_plugins_from_import_failures() {
+        let root =
+            std::env::temp_dir().join(format!("deeppi-dsh-culprits-{}", uuid::Uuid::new_v4()));
+        let profile = root.join("web");
+        std::fs::create_dir_all(&profile).unwrap();
+        std::fs::write(profile.join("package.json"), r#"{"dependencies":{"demo-a":"1.0.0","demo-b":"1.0.0"},"dsh":{"profile":{"bundles":["demo-b"]}}}"#).unwrap();
+        let failures = lines(&["failed to import loader entry a (demo-a): failed to import loader entry b (demo-b): failed to import loader entry c (uninstalled): boom"]);
+        assert_eq!(
+            super::configured_culprits(&profile, &failures),
+            vec!["demo-a", "demo-b"]
+        );
+        assert!(
+            super::configured_culprits(&profile, &lines(&["node_modules/demo-a/index.js:1"]))
+                .is_empty()
+        );
+        let pending = super::pending_plugins_from_lines(&lines(&["demo-a: pending (waiting for service: uiSession)uninstalled: pending (waiting for service: sidebarRight)"]));
+        assert_eq!(
+            super::configured_packages(&profile, pending),
+            vec!["demo-a"]
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
 

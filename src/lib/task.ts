@@ -9,6 +9,7 @@ export interface Task {
   id: string;
   runId?: string | null;
   title: string;
+  titleOrigin?: "auto" | "manual";
   agent: "pi" | "dsh";
   status: TaskStatus;
   projectId: string | null;

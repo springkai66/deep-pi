@@ -80,8 +80,19 @@ describe("Pi conversation display modes", () => {
       message: { role: "assistant", content: [], errorMessage: "Request failed" },
       detail: "concise", onOpenLink: () => {},
     } }).body;
-    expect(body).toContain("Request failed");
+    expect(body).toContain("AI_REQUEST_FAILED · 请求失败，请展开详情查看原因");
+    expect(body).toMatch(/<details[^>]*>\s*<summary[^>]*>错误详情<\/summary>\s*<pre[^>]*>Request failed<\/pre>/);
   });
+  it("keeps the provider error only in the collapsed details for restored assistant messages", () => {
+    const body = render(ChatMessage, { props: {
+      message: { role: "assistant", content: [], errorMessage: '429: {"code":"LIMITED","message":"private account detail"}' },
+      detail: "concise", onOpenLink: () => {},
+    } }).body;
+    expect(body).toContain("LIMITED · 请求过于频繁，请稍后重试");
+    expect(body.slice(0, body.indexOf("<details"))).not.toContain("private account detail");
+    expect(body).toMatch(/<pre[^>]*>429: \{"code":"LIMITED","message":"private account detail"\}<\/pre>/);
+  });
+
 
   it("shows a restored tool-result error in full mode even without output text", () => {
     const body = render(ChatMessage, { props: {
@@ -100,6 +111,8 @@ describe("Pi conversation display modes", () => {
     const concise = render(MessageFallback, { props: { message, detail: "concise" } }).body;
     expect(concise).toContain('alt="会话图片"');
     expect(concise).toContain("Request failed");
+    expect(concise).toContain("AI_REQUEST_FAILED · 请求失败，请展开详情查看原因");
+    expect(concise).toMatch(/<summary[^>]*>错误详情<\/summary>/);
     expect(concise).not.toContain("private reasoning");
     expect(concise).not.toContain("secret.txt");
     const verbose = render(MessageFallback, { props: { message, detail: "verbose" } }).body;

@@ -1,6 +1,6 @@
 # DeepPi 快捷键
 
-菜单、工具提示、可访问性标注、宿主按键处理及文件差异按键均从 `src/lib/shortcuts.ts` 读取定义。此清单描述主 Webview 中已接入的行为；DSH 原生子 Webview 内的宿主快捷键转发仍待实现和验收（Tauri 菜单加速键在 WebView2 子窗口聚焦时不会触发，需改用 WebView2 `AcceleratorKeyPressed`，见 `UI_REDESIGN_PLAN.md` 第 38 节）。
+菜单、工具提示、可访问性标注、宿主按键处理及文件差异按键均从 `src/lib/shortcuts.ts` 读取定义。此清单描述主 Webview 中已接入的行为；DSH 原生子 Webview 获得焦点时，宿主快捷键转发尚未接入。
 
 | 快捷键 | 操作 | 生效范围 |
 | --- | --- | --- |

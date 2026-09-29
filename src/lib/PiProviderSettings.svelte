@@ -7,17 +7,21 @@
     Plus,
     RefreshCw,
     Save,
-    Search,
     Server,
     Trash2,
     X,
     Zap,
   } from "@lucide/svelte";
   import { notifyModelsChanged } from "./model-config-sync";
+  import { createModelSelectionSaver } from "./model-selection";
+  import ModelSelectionList from "./ModelSelectionList.svelte";
   import PiAuthSettings from "./PiAuthSettings.svelte";
   import PiOfficialLoginFlow from "./PiOfficialLoginFlow.svelte";
+  import PiSubscriptionModels from "./PiSubscriptionModels.svelte";
+  import CodexTransportSettings from "./CodexTransportSettings.svelte";
+  import type { CodexTransport } from "./settings";
   import { type PiAuthProviderInfo, type PiAuthStatusResponse } from "./pi-auth";
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import type {
     ConfiguredModel,
     PiModelProfile,
@@ -35,6 +39,9 @@
     onError: (error: unknown) => void;
     embedded?: boolean;
     invokeCommand?: typeof nativeInvoke;
+    loginRequest?: { provider: string; serial: number } | null;
+    codexTransport?: CodexTransport;
+    onCodexTransportChange?: (value: CodexTransport) => void;
   }
 
   interface ProviderPreset {
@@ -131,7 +138,7 @@
 
   const KNOWN_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
-  let { confirm, onClose, onError, embedded = false, invokeCommand = nativeInvoke }: Props = $props();
+  let { confirm, onClose, onError, embedded = false, invokeCommand = nativeInvoke, loginRequest = null, codexTransport = "sse", onCodexTransportChange }: Props = $props();
   const invoke = <T,>(command: string, args?: Parameters<typeof nativeInvoke>[1]) => invokeCommand<T>(command, args);
   let providers = $state<ProviderRecord[]>([]);
   let draft = $state<ProviderRecord>({
@@ -158,6 +165,11 @@
   let fetchedModels = $state<Record<string, ProviderModelSummary[]>>({});
   let detailMode = $state<"provider" | "model">("provider");
   let selectedModelId = $state<string | null>(null);
+  let previewModel = $state<ConfiguredModel | null>(null);
+  let selectionBase = $state<ConfiguredModel[]>([]);
+  let selectionCandidates = $state<Record<string, ConfiguredModel>>({});
+  let selectionSaving = $state(false);
+  let selectionError = $state("");
   let modelTest = $state<Record<string, ModelTestMessage>>({});
   /// 保存成功后快照的草稿；草稿与快照一致时保存按钮置灰并提示已保存。
   let savedSnapshot = $state<string | null>(null);
@@ -169,16 +181,15 @@
   /// 编辑弹窗：编辑中的供应商与高级设置（Provider 字段）面板的显隐。
   let editorOpen = $state(false);
   let showAdvanced = $state(false);
-  /// 弹窗左侧模型列表的搜索词。
-  let modelSearch = $state("");
   const isNewProvider = $derived(!providers.some((provider) => provider.id === draft.id));
-  /// 官方供应商可用模型（pi 运行时自带目录）；只读展示，不写回配置。
+  /// 官方目录与可覆盖参数；订阅身份和权限仍由 Pi 管理。
   interface PiOfficialModel {
     id: string;
     name: string;
     contextWindow: number | null;
     maxTokens: number | null;
     reasoning: boolean;
+    thinkingLevels?: string[];
     input: string[];
     inputCost: number | null;
     outputCost: number | null;
@@ -191,7 +202,7 @@
 
   /// 各官方供应商实际支持的登录方式（对照 pi 运行时实现）：
   /// openai-codex 支持网页与设备码；anthropic / openrouter 为浏览器授权 + 粘贴回调；
-  /// github-copilot / kimi-coding / radius / xai 走设备码；未知供应商交给 pi 默认流程。
+  /// github-copilot / kimi-coding / xai 走设备码；其他 OAuth 供应商交给 pi 默认流程。
   const OFFICIAL_LOGIN_METHODS: Record<string, OfficialLoginMethod[]> = {
     "openai-codex": [
       { id: "browser", label: "网页登录（本机回调授权）" },
@@ -201,12 +212,19 @@
     openrouter: [{ id: "browser", label: "网页登录（浏览器授权 + 粘贴回调）" }],
     "github-copilot": [{ id: "device_code", label: "设备码登录（浏览器输入设备码）" }],
     "kimi-coding": [{ id: "device_code", label: "设备码登录（浏览器输入设备码）" }],
-    radius: [{ id: "device_code", label: "设备码登录（浏览器输入设备码）" }],
     xai: [{ id: "device_code", label: "设备码登录（浏览器输入设备码）" }],
   };
   const DEFAULT_OFFICIAL_METHODS: OfficialLoginMethod[] = [
     { id: "default", label: "由 pi 决定（默认登录流程）" },
   ];
+
+  function methodsForProvider(provider?: PiAuthProviderInfo): OfficialLoginMethod[] {
+    if (!provider) return DEFAULT_OFFICIAL_METHODS;
+    const oauthMethods = provider.oauth ? OFFICIAL_LOGIN_METHODS[provider.id] ?? DEFAULT_OFFICIAL_METHODS : [];
+    return provider.apiKey
+      ? [...oauthMethods, { id: "api_key", label: "API Key" }]
+      : oauthMethods;
+  }
 
   /// 新建/查看官方模型弹窗：类型选择、登录步骤与只读模型目录。
   let createOpen = $state(false);
@@ -224,7 +242,7 @@
   let officialModelsError = $state("");
   /// 官方分组刷新令牌：登录/退出后递增，驱动 PiAuthSettings 重新拉取状态。
   let authRefreshToken = $state(0);
-  const officialMethods = $derived(OFFICIAL_LOGIN_METHODS[officialProviderId] ?? DEFAULT_OFFICIAL_METHODS);
+  const officialMethods = $derived(methodsForProvider(officialProviders.find((provider) => provider.id === officialProviderId)));
   const createReady = $derived(
     createKind === "official"
       ? officialProviderId !== ""
@@ -235,10 +253,10 @@
     PROVIDER_PRESETS.find((preset) => preset.key === providerPreset)?.catalogProvider ?? draft.id,
   );
   const editingModel = $derived(
-    detailMode === "model" ? draft.models.find((model) => model.id === selectedModelId) ?? null : null,
+    detailMode === "model" ? draft.models.find((model) => model.id === selectedModelId) ?? (previewModel?.id === selectedModelId ? previewModel : null) : null,
   );
   const draftDirty = $derived(savedSnapshot !== null && draftSnapshot() !== savedSnapshot);
-  const saveReady = $derived(!isLoading && (savedSnapshot === null || draftDirty));
+  const saveReady = $derived(!isLoading && !selectionSaving && (savedSnapshot === null || draftDirty));
 
   function draftSnapshot(): string {
     // Traverse nested model proxies without writing state from a derived.
@@ -308,6 +326,12 @@
   }
 
   function selectProvider(provider: ProviderRecord) {
+    if (selectionSaving) return;
+    selectionBase = provider.models.map(cloneModel);
+    selectionCandidates = {};
+    selectionError = "";
+    selectionSaver = makeSelectionSaver(provider.id);
+    previewModel = null;
     draft = cloneProvider(provider);
     setHeaderEntries(provider.headers);
     providerPreset = presetFor(provider)?.key ?? "custom";
@@ -323,6 +347,7 @@
   }
 
   function newProvider() {
+    if (selectionSaving) return;
     draft = { id: "", name: "", api: "openai-completions", baseUrl: "", headers: {}, proxy: null, models: [] };
     providerPreset = "custom";
     headerEntries = [];
@@ -333,6 +358,10 @@
     credentialConfigured = false;
     statusMessage = "";
     connectionMessage = "";
+    previewModel = null;
+    selectionBase = [];
+    selectionCandidates = {};
+    selectionError = "";
     detailMode = "provider";
     selectedModelId = null;
     savedSnapshot = null;
@@ -340,10 +369,10 @@
 
   /// 打开某个供应商的编辑弹窗：草稿未指向该供应商时先载入，弹窗内共享同一草稿。
   function openProviderEditor(provider: ProviderRecord) {
+    if (selectionSaving) return;
     if (draft.id !== provider.id) selectProvider(provider);
     detailMode = "provider";
     selectedModelId = null;
-    modelSearch = "";
     manualAddVisible = false;
     showAdvanced = false;
     editorOpen = true;
@@ -351,10 +380,10 @@
 
   /// 新建 Provider 弹窗：先选类型（官方 / 自定义）。官方走登录流程，自定义
   /// 保存后切换到模型拉取弹窗；官方模型目录为只读展示。
-  async function openCreateModal() {
+  async function openCreateModal(providerId = "") {
+    if (selectionSaving) return;
     newProvider();
     manualAddVisible = false;
-    modelSearch = "";
     createOpen = true;
     createStep = "form";
     createKind = "official";
@@ -373,7 +402,8 @@
         invoke<PiAuthProviderInfo[]>("pi_auth_providers"),
         invoke<PiAuthStatusResponse>("pi_auth_status"),
       ]);
-      officialProviders = providerList.filter((provider) => provider.oauth);
+      officialProviders = providerList;
+      if (providerId && officialProviders.some((provider) => provider.id === providerId)) selectOfficialProvider(providerId);
       signedInIds = new Set(status.credentials.map((credential) => credential.provider));
     } catch (error) {
       onError(error);
@@ -382,7 +412,13 @@
     }
   }
 
+  $effect(() => {
+    const request = loginRequest;
+    if (request) untrack(() => void openCreateModal(request.provider));
+  });
+
   function closeCreate() {
+    if (createBusy) return;
     createOpen = false;
     createStep = "form";
     createBusy = false;
@@ -393,7 +429,7 @@
   /// 切换官方供应商：登录方式默认取该供应商支持的第一种（未命中则交给 pi 默认流程）。
   function selectOfficialProvider(providerId: string) {
     officialProviderId = providerId;
-    const methods = OFFICIAL_LOGIN_METHODS[providerId] ?? DEFAULT_OFFICIAL_METHODS;
+    const methods = methodsForProvider(officialProviders.find((provider) => provider.id === providerId));
     officialLoginMethod = methods[0]?.id ?? null;
   }
 
@@ -464,6 +500,7 @@
   }
 
   function closeProviderEditor() {
+    if (selectionSaving) return;
     editorOpen = false;
   }
 
@@ -482,6 +519,7 @@
   }
 
   function applyProviderPreset(value: string) {
+    if (selectionSaving) return;
     providerPreset = value;
     const preset = PROVIDER_PRESETS.find((candidate) => candidate.key === value);
     if (!preset) {
@@ -543,6 +581,7 @@
 
   async function saveProvider(showStatus = true): Promise<ProviderRecord | null> {
     if (isLoading) return null;
+    if (selectionSaving) return null;
     const submittedDraft = draft;
     const submittedSnapshot = draftSnapshot();
     // 是否有真实变更：决定是否广播（无变更的保存不值得让所有对话重载）。
@@ -551,6 +590,7 @@
       draft: ProviderRecord; apiKey: string; providerPreset: string;
     };
     if (showStatus) statusMessage = "";
+    isLoading = true;
     try {
       const saved = await invoke<ProviderRecord>("save_pi_provider", {
         request: {
@@ -566,6 +606,11 @@
         });
       }
       providers = [saved, ...providers.filter((provider) => provider.id !== saved.id)];
+      if (submittedDraft.id === saved.id) {
+        selectionBase = saved.models.map(cloneModel);
+        selectionSaver = makeSelectionSaver(saved.id);
+        selectionCandidates = {};
+      }
       if (draft === submittedDraft) {
         const unchanged = draftSnapshot() === submittedSnapshot;
         if (unchanged) {
@@ -652,8 +697,10 @@
   }
 
   async function removeProvider(provider: ProviderRecord) {
+    if (selectionSaving) return;
     if (!provider.id) return;
     if (!(await confirm(t("删除 Provider"), t("删除 {name} 及其模型配置吗？", { name: provider.name || provider.id }), t("删除")))) return;
+    if (selectionSaving || isLoading) return;
     try {
       await invoke("delete_pi_provider", { request: { id: provider.id } });
       await invoke("delete_provider_credential", { request: { providerId: provider.id } });
@@ -675,31 +722,72 @@
     return provider.id === draft.id ? draft.models : provider.models;
   }
 
-  /// 弹窗左侧的模型行：草稿中已配置的模型在前，拉取到但未配置的在后，再按搜索词过滤。
   function modalModelRows(): ModelRow[] {
     const rows: ModelRow[] = draft.models.map((model) => ({
-      id: model.id,
-      name: model.name,
-      sub: `${model.id} · ${formatContext(model.contextWindow)}${model.reasoning ? ` · ${t("推理")}` : ""}${model.cost ? ` · ${formatCost(model.cost.input)}/${formatCost(model.cost.output)}` : ""}`,
-      configured: true,
-      summary: null,
+      id: model.id, name: model.name,
+      sub: `${model.id} · ${formatContext(model.contextWindow)}${model.reasoning ? ` · ${t("推理")}` : ""}`,
+      configured: true, summary: null,
     }));
-    for (const summary of fetchedModels[draft.id] ?? []) {
-      if (draft.models.some((model) => model.id === summary.id)) continue;
-      rows.push({
-        id: summary.id,
-        name: summary.name,
-        sub: `${summary.id} · ${formatContext(summary.contextWindow)}`,
-        configured: false,
-        summary,
-      });
+    for (const model of [...selectionBase, ...Object.values(selectionCandidates)]) {
+      if (rows.some((row) => row.id === model.id)) continue;
+      rows.push({ id: model.id, name: model.name, sub: model.id, configured: false, summary: null });
     }
-    const query = modelSearch.trim().toLowerCase();
-    if (!query) return rows;
-    return rows.filter((row) =>
-      row.id.toLowerCase().includes(query) ||
-      row.name.toLowerCase().includes(query) ||
-      row.sub.toLowerCase().includes(query));
+    for (const summary of fetchedModels[draft.id] ?? []) {
+      if (rows.some((row) => row.id === summary.id)) continue;
+      rows.push({ id: summary.id, name: summary.name, sub: `${summary.id} · ${formatContext(summary.contextWindow)}`, configured: false, summary });
+    }
+    return rows;
+  }
+
+  function cloneModel(model: ConfiguredModel): ConfiguredModel {
+    return { ...model, input: [...model.input], thinkingLevels: [...model.thinkingLevels], cost: model.cost ? { ...model.cost } : null };
+  }
+
+  function makeSelectionSaver(providerId: string) {
+    return createModelSelectionSaver<ConfiguredModel[], ProviderRecord>({
+      save: (models) => invoke<ProviderRecord>("save_pi_provider_model_selection", { request: { providerId, models } }),
+      saved: (_models, saved, latest) => {
+        providers = [saved, ...providers.filter((provider) => provider.id !== saved.id)];
+        if (draft.id !== providerId) return;
+        selectionBase = saved.models.map(cloneModel);
+        savedSnapshot = JSON.stringify({ draft: saved, apiKey: "", providerPreset });
+        if (latest) { selectionError = ""; notifyModelsChanged("selection"); }
+      },
+      failed: (cause) => { if (draft.id === providerId) { selectionError = tm(String(cause)); onError(cause); } },
+      busy: (value) => { if (draft.id === providerId) selectionSaving = value; },
+    });
+  }
+
+  let selectionSaver = makeSelectionSaver("");
+
+  function enqueueModelSelection() {
+    if (!draft.id || isNewProvider) return;
+    selectionError = "";
+    selectionSaver.enqueue(draft.models.map((model) =>
+      cloneModel(selectionBase.find((saved) => saved.id === model.id) ?? selectionCandidates[model.id] ?? model)));
+  }
+
+  function selectAllModels() {
+    if (isLoading) return;
+    for (const row of modalModelRows()) {
+      if (row.configured) continue;
+      const model = selectionBase.find((candidate) => candidate.id === row.id)
+        ?? selectionCandidates[row.id] ?? (row.summary ? summaryToConfigured(row.summary) : null);
+      if (!model) continue;
+      if (row.summary) selectionCandidates = { ...selectionCandidates, [row.id]: cloneModel(model) };
+      draft.models = [...draft.models, cloneModel(model)];
+    }
+    enqueueModelSelection();
+  }
+
+  function clearModelSelection() {
+    if (isLoading) return;
+    selectionCandidates = {
+      ...selectionCandidates,
+      ...Object.fromEntries(draft.models.map((model) => [model.id, cloneModel(selectionBase.find((saved) => saved.id === model.id) ?? selectionCandidates[model.id] ?? model)])),
+    };
+    draft.models = [];
+    enqueueModelSelection();
   }
 
   async function refreshProviderModels() {
@@ -710,12 +798,11 @@
     isFetchingProviderModels = true;
     statusMessage = "";
     try {
-      const saved = await saveProvider(false);
-      if (!saved) return;
+      if (isNewProvider || selectionSaving) return;
       const models = await invoke<ProviderModelSummary[]>("list_provider_models", {
-        request: { providerId: saved.id },
+        request: { providerId: draft.id },
       });
-      fetchedModels = { ...fetchedModels, [saved.id]: models };
+      fetchedModels = { ...fetchedModels, [draft.id]: models };
       statusMessage = t("已拉取 {count} 个模型", { count: models.length });
     } catch (error) {
       onError(error);
@@ -793,6 +880,7 @@
 
   /// 手动添加模型：供应商 /models 接口不可用时，用户可以直接录入模型并保存。
   function addManualModel() {
+    if (isLoading) return;
     const id = manualModelId.trim();
     if (!id) {
       onError(t("请输入模型 ID"));
@@ -814,9 +902,11 @@
       api: null,
     };
     upsertModel(model);
+    selectionCandidates = { ...selectionCandidates, [id]: cloneModel(model) };
+    enqueueModelSelection();
     manualModelId = "";
     manualModelName = "";
-    statusMessage = t("模型 {name} 已添加，记得保存 Provider", { name: model.name });
+    statusMessage = t("模型 {name} 已添加", { name: model.name });
     selectedModelId = id;
     detailMode = "model";
   }
@@ -841,58 +931,33 @@
     };
   }
 
-  async function addProviderModel(summary: ProviderModelSummary) {
-    busyModel = summary.id;
-    try {
-      let official: PiModelSummary | undefined;
-      let catalogUnavailable = false;
-      try {
-        official = await officialSummaryFor(summary.id);
-      } catch {
-        catalogUnavailable = true;
-      }
-      if (official) {
-        const profile = await invoke<PiModelProfile>("pi_model_profile", {
-          request: { path: official.path, provider: official.provider, modelId: official.id },
-        });
-        upsertModel(modelFromProfile(profile, summary));
-        statusMessage = t("{name} 已从 pi.dev/models 补全并填入", { name: profile.name });
-      } else {
-        upsertModel(summaryToConfigured(summary));
-        statusMessage = catalogUnavailable
-          ? t("{name} 已填入，官方模型目录暂不可用", { name: summary.name })
-          : t("{name} 已填入，pi.dev/models 暂无对应详情", { name: summary.name });
-      }
-    } catch (error) {
-      onError(error);
-    } finally {
-      busyModel = null;
-    }
-  }
-
-  async function toggleModel(row: ModelRow) {
+  function toggleModel(row: ModelRow) {
+    if (isLoading) return;
     if (row.configured) {
+      const removed = draft.models.find((model) => model.id === row.id);
+      if (removed && selectedModelId === row.id) previewModel = cloneModel(removed);
+      if (removed) selectionCandidates = { ...selectionCandidates, [row.id]: cloneModel(selectionBase.find((saved) => saved.id === row.id) ?? selectionCandidates[row.id] ?? removed) };
       draft.models = draft.models.filter((model) => model.id !== row.id);
-      if (selectedModelId === row.id) {
-        selectedModelId = null;
-        detailMode = "provider";
-      }
-      statusMessage = t("{name} 已取消选择", { name: row.name });
-      return;
+    } else {
+      const source = selectionBase.find((model) => model.id === row.id) ?? selectionCandidates[row.id]
+        ?? (row.summary ? summaryToConfigured(row.summary) : null);
+      if (!source) return;
+      if (row.summary) selectionCandidates = { ...selectionCandidates, [row.id]: cloneModel(source) };
+      draft.models = [...draft.models, previewModel?.id === row.id ? cloneModel(previewModel) : cloneModel(source)];
     }
-    if (!row.summary) return;
-    await addProviderModel(row.summary);
-    selectedModelId = row.id;
-    detailMode = "model";
+    enqueueModelSelection();
   }
 
   function openModelDetail(row: ModelRow) {
-    if (!row.configured && row.summary) {
-      upsertModel(summaryToConfigured(row.summary));
+    if (!row.configured && previewModel?.id !== row.id) {
+      const source = selectionBase.find((model) => model.id === row.id) ?? selectionCandidates[row.id]
+        ?? (row.summary ? summaryToConfigured(row.summary) : null);
+      previewModel = source ? cloneModel(source) : null;
     }
     selectedModelId = row.id;
     detailMode = "model";
   }
+
 
   function setNumberField(model: ConfiguredModel, field: "contextWindow" | "maxTokens", raw: string) {
     const value = Number(raw);
@@ -959,28 +1024,18 @@
 
   async function testModelConnection() {
     const model = editingModel;
-    if (!model || !draft.id) return;
+    if (!model || !draft.id || isNewProvider || busyModel) return;
     const id = model.id;
+    busyModel = id;
     modelTest = { ...modelTest, [id]: { ok: false, text: t("正在测试…") } };
     try {
-      const saved = await saveProvider(false);
-      if (!saved) {
-        modelTest = { ...modelTest, [id]: { ok: false, text: t("Provider 保存失败") } };
-        return;
-      }
       const result = await invoke<{ ok: boolean; status: number | null; latencyMs: number | null; error: string | null }>(
-        "test_model_connection",
-        { request: { providerId: saved.id, modelId: id } },
-      );
-      modelTest = {
-        ...modelTest,
-        [id]: result.ok
-          ? { ok: true, text: t("连通 · HTTP {status} · {latency}ms", { status: result.status ?? "", latency: result.latencyMs ?? 0 }) }
-          : { ok: false, text: result.error ?? t("连接失败") },
-      };
-    } catch (error) {
-      modelTest = { ...modelTest, [id]: { ok: false, text: tm(String(error)) } };
-    }
+        "test_model_connection", { request: { providerId: draft.id, modelId: id } });
+      modelTest = { ...modelTest, [id]: result.ok
+        ? { ok: true, text: t("连通 · HTTP {status} · {latency}ms", { status: result.status ?? "", latency: result.latencyMs ?? 0 }) }
+        : { ok: false, text: result.error ?? t("连接失败") } };
+    } catch (error) { modelTest = { ...modelTest, [id]: { ok: false, text: tm(String(error)) } }; }
+    finally { busyModel = null; }
   }
 
   function formatContext(value: number | null) {
@@ -1007,7 +1062,7 @@
       {#if savedSnapshot !== null && !draftDirty}
         <span class="saved-note" role="status">{t("已保存")}</span>
       {/if}
-      <button type="button" class="quiet-button" onclick={() => void openCreateModal()}>
+      <button type="button" class="quiet-button" disabled={selectionSaving} onclick={() => void openCreateModal()}>
         <Plus size={13} />{t("新建 Provider")}
       </button>
       <button type="button" class="primary-button" disabled={!saveReady}
@@ -1019,7 +1074,7 @@
   <!-- 官方供应商（OAuth 账户）分组卡片；PiAuthSettings 自带分组标题 / 计数 / 刷新。 -->
   <div class="provider-groups">
     <div class="detail-panel">
-      <PiAuthSettings onError={onError} refreshToken={authRefreshToken}
+      <PiAuthSettings {invokeCommand} onError={onError} refreshToken={authRefreshToken}
         onViewModels={(providerId, providerName) => void openOfficialModels(providerId, providerName)} />
     </div>
 
@@ -1060,9 +1115,9 @@
   <!-- 新建 Provider：先选类型；官方走登录流程，自定义保存后进入模型拉取弹窗。 -->
   <div class="editor-backdrop" role="presentation"
     onclick={(event) => event.target === event.currentTarget && closeCreate()}>
-    <div class="editor-modal create-modal" role="dialog" aria-modal="true" aria-label={t("新建 Provider")}>
+    <div class="editor-modal create-modal" class:subscription-modal={createStep === "models" && officialProviderId === "openai-codex"} role="dialog" aria-modal="true" aria-label={createStep === "models" && officialProviderId === "openai-codex" ? t("OpenAI 订阅设置") : t("新建 Provider")}>
       <header class="editor-head">
-        <h2>{createStep === "models" ? t("模型目录 · {name}", { name: officialProviderName }) : t("新建 Provider")}</h2>
+        <h2>{createStep === "models" ? t(officialProviderId === "openai-codex" ? "订阅设置 · {name}" : "模型目录 · {name}", { name: officialProviderName }) : t("新建 Provider")}</h2>
         <div class="editor-head-actions">
           <button class="icon-button" type="button" aria-label={t("关闭")} title={t("关闭")}
             onclick={closeCreate}><X size={16} /></button>
@@ -1081,10 +1136,10 @@
               </label>
               {#if createKind === "official"}
                 <label>{t("官方供应商")}
-                  <select bind:value={officialProviderId}>
+                  <select bind:value={officialProviderId} onchange={(event) => selectOfficialProvider(event.currentTarget.value)}>
                     <option value="">{t("请选择官方供应商")}</option>
                     {#each officialProviders as provider (provider.id)}
-                      <option value={provider.id}>{provider.name}{provider.isSubscription ? t(" · 订阅") : ""}{signedInIds.has(provider.id) ? t("（已登录）") : ""}</option>
+                      <option value={provider.id}>{provider.name}{provider.isSubscription ? t(" · 订阅") : ""}{signedInIds.has(provider.id) ? t("（已配置）") : ""}</option>
                     {/each}
                   </select>
                 </label>
@@ -1103,7 +1158,7 @@
                   <span class="method-name">{t(officialMethods[0]?.label ?? DEFAULT_OFFICIAL_METHODS[0].label)}</span>
                 {/if}
               </div>
-              <p class="create-hint">{t("创建后会打开登录流程，登录成功即出现在「官方供应商」分组。")}</p>
+              <p class="create-hint">{t("连接后会出现在「官方供应商」分组；API Key 由 pi 托管。")}</p>
             {:else}
               <div class="form-grid">
                 <label>{t("Provider 预设")}
@@ -1143,7 +1198,8 @@
           <PiOfficialLoginFlow
             providerId={officialProviderId}
             providerName={officialProviderName}
-            loginMethod={officialLoginMethod}
+            loginMethod={officialLoginMethod === "api_key" ? null : officialLoginMethod}
+            authType={officialLoginMethod === "api_key" ? "api_key" : "oauth"}
             invokeCommand={invokeCommand}
             onError={onError}
             onSuccess={(providerId) => void onOfficialLoggedIn(providerId)}
@@ -1151,7 +1207,10 @@
           />
         </div>
       {:else}
-        <div class="editor-scroll">
+        <div class="editor-scroll" class:subscription-content={officialProviderId === "openai-codex"}>
+          {#if officialProviderId === "openai-codex" && onCodexTransportChange}
+            <CodexTransportSettings value={codexTransport} onChange={onCodexTransportChange} />
+          {/if}
           {#if officialModelsBusy}
             <p class="empty">{t("正在读取模型目录…")}</p>
           {:else if officialModelsError}
@@ -1159,8 +1218,11 @@
             <button type="button" class="quiet-button compact" onclick={() => void loadOfficialModels()}>{t("重试")}</button>
           {:else if officialModels.length === 0}
             <p class="empty">{t("该供应商暂未提供模型目录")}</p>
+          {:else if officialProviderId === "openai-codex"}
+            <PiSubscriptionModels models={officialModels} {invokeCommand} {onError}
+              onModelsChanged={(models) => { officialModels = models; }} onBusyChange={(busy) => { createBusy = busy; }} />
           {:else}
-            <p class="create-hint">{t("模型目录由 pi 运行时提供，登录后无需 API Key 即可使用。")}</p>
+            <p class="create-hint">{t("模型目录由 pi 运行时提供；模型可用性取决于账号或 API Key 权限。")}</p>
             <div class="catalog-list">
               {#each officialModels as model (model.id)}
                 <div class="catalog-row">
@@ -1176,7 +1238,7 @@
         <footer class="editor-foot">
           <span class="foot-status" role="status">{t("{count} 个模型", { count: officialModels.length })}</span>
           <div class="foot-actions">
-            <button type="button" class="primary-button" onclick={closeCreate}>{t("完成")}</button>
+            <button type="button" class="primary-button" disabled={createBusy} onclick={closeCreate}>{t("完成")}</button>
           </div>
         </footer>
       {/if}
@@ -1273,50 +1335,33 @@
         </div>
       {:else}
         <div class="editor-body">
-          <aside class="editor-models" aria-label={t("模型列表")}>
-            <div class="models-toolbar">
-              <button type="button" class="quiet-button compact"
-                disabled={isFetchingProviderModels || busyModel !== null || !draft.id || !draft.baseUrl}
-                onclick={() => void refreshProviderModels()}>
-                {#if isFetchingProviderModels}<span class="spin"><RefreshCw size={13} /></span>{:else}<RefreshCw size={13} />{/if}
-                {t("获取列表")}
-              </button>
-              <button type="button" class="quiet-button compact"
-                disabled={busyModel !== null}
-                title={t("手动录入一个模型，不依赖供应商的 /models 接口")}
-                onclick={() => (manualAddVisible = !manualAddVisible)}>
-                {t("手动添加")}
-              </button>
-            </div>
-            <div class="model-search-row">
-              <Search size={13} />
-              <input bind:value={modelSearch} placeholder={t("搜索模型…")} aria-label={t("搜索模型")} autocomplete="off" />
-            </div>
-            {#if manualAddVisible}
-              <div class="manual-model-form">
-                <input bind:value={manualModelId} placeholder={t("模型 ID（如 deepseek-chat）")} aria-label={t("手动添加模型的 ID")} autocomplete="off" />
-                <input bind:value={manualModelName} placeholder={t("显示名称（可选）")} aria-label={t("手动添加模型的显示名称")} autocomplete="off" />
-                <button type="button" class="quiet-button compact" disabled={!manualModelId.trim()} onclick={addManualModel}>
-                  {t("添加")}
+          <ModelSelectionList rows={modalModelRows().map((row) => ({
+              id: row.id, name: row.name, sub: row.sub, checked: row.configured, busy: busyModel === row.id,
+            }))} selectedId={detailMode === "model" ? selectedModelId : null}
+            disabled={isLoading} saving={selectionSaving} error={selectionError}
+            onPick={(id) => { const row = modalModelRows().find((candidate) => candidate.id === id); if (row) openModelDetail(row); }}
+            onToggle={(id) => { const row = modalModelRows().find((candidate) => candidate.id === id); if (row) toggleModel(row); }}
+            onSelectAll={selectAllModels} onClear={clearModelSelection} onRetry={() => { if (!isLoading) selectionSaver.retry(); }}>
+            {#snippet tools()}
+              <div class="models-toolbar">
+                <button type="button" class="quiet-button compact"
+                  disabled={isLoading || isFetchingProviderModels || busyModel !== null || selectionSaving || !draft.id || !draft.baseUrl}
+                  onclick={() => void refreshProviderModels()}>
+                  {#if isFetchingProviderModels}<span class="spin"><RefreshCw size={13} /></span>{:else}<RefreshCw size={13} />{/if}
+                  {t("获取列表")}
                 </button>
+                <button type="button" class="quiet-button compact" title={t("手动录入一个模型，不依赖供应商的 /models 接口")}
+                  disabled={isLoading} onclick={() => (manualAddVisible = !manualAddVisible)}>{t("手动添加")}</button>
               </div>
-            {/if}
-            {#if modalModelRows().length === 0}
-              <p class="empty">{t("暂无模型；可先获取列表或手动添加")}</p>
-            {:else}
-              {#each modalModelRows() as row (row.id)}
-                <div class="model-row" class:selected={detailMode === "model" && selectedModelId === row.id}>
-                  <input type="checkbox" checked={row.configured} disabled={busyModel === row.id}
-                    aria-label={t("选择 {name}", { name: row.name })} title={row.configured ? t("取消选择") : t("选择模型")}
-                    onchange={() => void toggleModel(row)} />
-                  <button type="button" class="model-open" onclick={() => openModelDetail(row)}>
-                    <strong>{row.name}</strong>
-                    <small>{row.sub}</small>
-                  </button>
+              {#if manualAddVisible}
+                <div class="manual-model-form">
+                  <input bind:value={manualModelId} placeholder={t("模型 ID（如 deepseek-chat）")} aria-label={t("手动添加模型的 ID")} autocomplete="off" />
+                  <input bind:value={manualModelName} placeholder={t("显示名称（可选）")} aria-label={t("手动添加模型的显示名称")} autocomplete="off" />
+                  <button type="button" class="quiet-button compact" disabled={isLoading || !manualModelId.trim()} onclick={addManualModel}>{t("添加")}</button>
                 </div>
-              {/each}
-            {/if}
-          </aside>
+              {/if}
+            {/snippet}
+          </ModelSelectionList>
 
           <div class="editor-detail">
             {#if detailMode === "model" && editingModel}
@@ -1331,15 +1376,15 @@
                     {#if busyModel === editingModel.id}<span class="spin"><RefreshCw size={13} /></span>{:else}<Zap size={13} />{/if}
                     {t("自动填入")}
                   </button>
-                  <button type="button" class="quiet-button compact" disabled={!draft.id || busyModel === editingModel.id}
-                    onclick={() => void testModelConnection()}>
+                  <button type="button" class="quiet-button compact" disabled={!draft.id || isNewProvider || busyModel !== null}
+                    title={t("会向模型发送最小测试请求，可能消耗额度")} onclick={() => void testModelConnection()}>
                     {#if busyModel === editingModel.id}<span class="spin"><RefreshCw size={13} /></span>{:else}<Check size={13} />{/if}
                     {t("测试连通")}
                   </button>
-                  <button class="danger-icon" type="button" aria-label={t("移除模型")} title={t("移除模型")}
-                    onclick={() => { const id = editingModel.id; draft.models = draft.models.filter((candidate) => candidate.id !== id); selectedModelId = null; detailMode = "provider"; }}>
-                    <Trash2 size={14} />
-                  </button>
+                  {#if draft.models.some((model) => model.id === editingModel.id)}
+                    <button class="danger-icon" type="button" aria-label={t("移除模型")} title={t("移除模型")}
+                      onclick={() => { const row = modalModelRows().find((candidate) => candidate.id === editingModel.id); if (row) toggleModel(row); }}><Trash2 size={14} /></button>
+                  {/if}
                 </span>
               </div>
               <div class="form-grid">
@@ -1421,7 +1466,7 @@
   .provider-page.embedded { padding: 0; }
   .embedded .provider-header { justify-content: flex-end; }
   .provider-page { height: 100%; padding: 14px 18px 18px; display: grid; grid-template-rows: 42px minmax(0, 1fr) 24px; gap: 10px; color: var(--text); overflow: hidden; font-family: var(--text-font); }
-  .provider-header, .provider-title, .header-actions, .section-heading, .provider-row, .credential-row, .models-toolbar, .model-row { display: flex; align-items: center; }
+  .provider-header, .provider-title, .header-actions, .section-heading, .provider-row, .credential-row, .models-toolbar { display: flex; align-items: center; }
   .provider-header, .section-heading { justify-content: space-between; }
   .provider-title { gap: 8px; }
   h1, p { margin: 0; }
@@ -1443,23 +1488,18 @@
   .editor-modal { width: min(920px, 100%); max-height: calc(100vh - 56px); display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--border-strong); border-radius: 7px; background: var(--surface); color: var(--text); font-family: var(--text-font); box-shadow: 0 18px 48px rgb(0 0 0 / 38%); }
   /* 新建/模型目录弹窗是单列表单，不需要编辑弹窗的双栏宽度。 */
   .create-modal { width: min(600px, 100%); }
+  .create-modal.subscription-modal { width: min(920px, 100%); height: min(760px, calc(100vh - 56px)); }
   .editor-head { flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--border); }
   .editor-head h2 { margin: 0; color: var(--text-strong); font-size: 14px; font-weight: 650; }
   .editor-head-actions { display: flex; align-items: center; gap: 6px; }
   .editor-name-row { flex-shrink: 0; padding: 12px 16px 0; }
   .editor-scroll { flex: 1; min-height: 0; overflow: auto; padding: 12px 16px; }
+  .editor-scroll.subscription-content { display: flex; flex-direction: column; gap: 12px; overflow: hidden; }
   .editor-body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(250px, 320px) minmax(0, 1fr); gap: 12px; padding: 12px 16px; overflow: hidden; }
-  .editor-models { min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 6px; padding: 10px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface-alt); }
   .editor-detail { min-height: 0; overflow: auto; padding: 12px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface-alt); }
   .models-toolbar { justify-content: flex-start; gap: 6px; min-height: 26px; }
-  .model-search-row { display: flex; align-items: center; gap: 6px; color: var(--text-muted); }
-  .model-search-row input { flex: 1; min-width: 0; height: 28px; }
   .manual-model-form { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 4px 0; }
   .manual-model-form input { flex: 1 1 150px; min-width: 0; height: 28px; padding: 2px 8px; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--surface); color: var(--text); font: inherit; font-size: 12px; }
-  .model-row { gap: 6px; padding: 2px; border: 1px solid transparent; border-radius: 4px; }
-  .model-row:hover, .model-row.selected { border-color: var(--border-strong); background: var(--surface-hover); }
-  .model-row input[type="checkbox"] { width: 14px; height: 14px; flex-shrink: 0; accent-color: var(--accent); cursor: pointer; }
-  .model-open { flex: 1; min-width: 0; display: grid; gap: 2px; padding: 4px; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
   .editor-section + .editor-section { border-top: 1px solid var(--border); margin-top: 14px; padding-top: 12px; }
   .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
   label { display: grid; gap: 5px; color: var(--text-muted); font-size: 11px; }

@@ -34,3 +34,13 @@ describe("model config change broadcast", () => {
     offGood();
   });
 });
+
+it("identifies selection-only updates separately from runtime configuration changes", () => {
+  const listener = vi.fn();
+  const off = onModelsChanged(listener);
+  try {
+    notifyModelsChanged("selection");
+    notifyModelsChanged();
+    expect(listener.mock.calls).toEqual([["selection"], ["configuration"]]);
+  } finally { off(); }
+});

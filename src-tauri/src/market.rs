@@ -838,6 +838,7 @@ pub fn validate_package_name(name: &str) -> Result<&str, String> {
 /// npm 单次搜索上限 250；100 足以覆盖当前 Pi 生态，避免高下载量包被
 /// 相关性排序挤出首页（这正是“按下载量排序却看不到下载量最高的包”的原因）。
 const NPM_SEARCH_SIZE: usize = 250;
+const MAX_PACKAGE_QUERY_LENGTH: usize = 214;
 /// 命中任一关键词即视为 Pi 相关包。
 const PI_PACKAGE_KEYWORDS: [&str; 6] = [
     "pi-package",
@@ -1041,15 +1042,26 @@ pub fn parse_npm_package_search(body: &str) -> Result<Vec<PiPackage>, String> {
     Ok(relevant)
 }
 
-/// 通过 npm registry 搜索接口按关键字枚举 Pi 生态：
-/// Pi 包用 `pi-package`/`pi-extension`/`pi-skill`/… 关键字标记，
-/// 单一 `text=pi-package` 搜索既匹配不到全部（120 万条噪声明中）
-/// 也无法保证高下载量包在前；按关键字分别搜索后合并去重。
+/// 空查询浏览 Pi 生态；非空查询额外读取包元数据，确保完整包名不会被
+/// npm 搜索的 250 条上限挤出结果。
 pub fn fetch_npm_pi_packages(query: &str) -> Result<Vec<PiPackage>, String> {
     let query = query.trim();
-    if query.len() > MAX_QUERY_LENGTH || query.chars().any(char::is_control) {
+    if query.len() > MAX_PACKAGE_QUERY_LENGTH || query.chars().any(char::is_control) {
         return Err("package search query is invalid".into());
     }
+    search_npm_pi_packages_with(query, fetch_npm_search, fetch_exact_npm_package)
+}
+
+fn search_npm_pi_packages_with(
+    query: &str,
+    search: impl Fn(&str) -> Result<Vec<PiPackage>, String>,
+    exact_lookup: impl Fn(&str) -> Result<Option<PiPackage>, String>,
+) -> Result<Vec<PiPackage>, String> {
+    let exact = if !query.is_empty() && validate_package_name(query).is_ok() {
+        exact_lookup(query).ok().flatten()
+    } else {
+        None
+    };
     let mut packages: Vec<PiPackage> = Vec::new();
     for keyword in PI_PACKAGE_KEYWORDS {
         let text = if query.is_empty() {
@@ -1057,7 +1069,11 @@ pub fn fetch_npm_pi_packages(query: &str) -> Result<Vec<PiPackage>, String> {
         } else {
             format!("keywords:{keyword} {query}")
         };
-        for package in fetch_npm_search(&text)? {
+        let results = match search(&text) {
+            Ok(results) => results,
+            Err(error) => return exact.map(|package| vec![package]).ok_or(error),
+        };
+        for package in results {
             if !packages
                 .iter()
                 .any(|existing| existing.name == package.name)
@@ -1066,7 +1082,98 @@ pub fn fetch_npm_pi_packages(query: &str) -> Result<Vec<PiPackage>, String> {
             }
         }
     }
+    if let Some(package) = exact {
+        if !packages
+            .iter()
+            .any(|existing| existing.name == package.name)
+        {
+            packages.push(package);
+        }
+    }
     Ok(packages)
+}
+
+fn parse_exact_npm_package(body: &str, requested_name: &str) -> Result<Option<PiPackage>, String> {
+    let value: Value = serde_json::from_str(body)
+        .map_err(|error| format!("npm package metadata is invalid: {error}"))?;
+    let Some(name) = registry_string(&value, "name") else {
+        return Ok(None);
+    };
+    if name != requested_name || validate_package_name(&name).is_err() {
+        return Ok(None);
+    }
+    let Some(version) = value
+        .get("dist-tags")
+        .and_then(|tags| tags.get("latest"))
+        .and_then(Value::as_str)
+        .filter(|version| is_valid_version(version))
+    else {
+        return Ok(None);
+    };
+    let latest = value
+        .get("versions")
+        .and_then(|versions| versions.get(version));
+    let keywords: Vec<String> = value
+        .get("keywords")
+        .or_else(|| latest.and_then(|package| package.get("keywords")))
+        .and_then(Value::as_array)
+        .map(|keywords| {
+            keywords
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    if !package_is_pi_related(&name, &keywords) {
+        return Ok(None);
+    }
+    let published_at = value
+        .get("time")
+        .and_then(|time| time.get(version))
+        .and_then(Value::as_str)
+        .and_then(parse_rfc3339_seconds)
+        .unwrap_or_default();
+    Ok(Some(PiPackage {
+        description: registry_string(&value, "description")
+            .or_else(|| latest.and_then(|package| registry_string(package, "description")))
+            .unwrap_or_else(|| name.clone()),
+        types: package_types_from_keywords(&keywords),
+        downloads: 0,
+        published_at,
+        path: format!("https://www.npmjs.com/package/{name}"),
+        name,
+    }))
+}
+
+fn fetch_exact_npm_package(name: &str) -> Result<Option<PiPackage>, String> {
+    validate_package_name(name)?;
+    let url = format!("{NPM_REGISTRY_URL}/{}", name.replace('/', "%2f"));
+    let body = crate::retry::retry_network(|_attempt| {
+        let mut response = match http_agent()
+            .get(&url)
+            .header("Accept", "application/json")
+            .call()
+        {
+            Ok(response) => response,
+            Err(ureq::Error::StatusCode(404)) => return Ok(None),
+            Err(error) => {
+                return Err(crate::retry::AttemptFailure {
+                    message: format!("npm package lookup failed: {error}"),
+                    retryable: crate::retry::is_retryable_ureq_error(&error),
+                    status: crate::retry::status_of_ureq_error(&error),
+                    retry_after: None,
+                })
+            }
+        };
+        read_response(response.body_mut())
+            .map(Some)
+            .map_err(crate::retry::AttemptFailure::retryable)
+    })
+    .map_err(|failure| failure.message)?;
+    body.map(|body| parse_exact_npm_package(&body, name))
+        .transpose()
+        .map(Option::flatten)
 }
 
 fn fetch_npm_search(text: &str) -> Result<Vec<PiPackage>, String> {
@@ -1497,6 +1604,136 @@ mod tests {
     };
     use serde_json::json;
     #[test]
+    fn exact_metadata_requires_a_real_matching_pi_package() {
+        let body = r#"{"name":"pi-matt-pocock","description":"Pi extension","keywords":["pi-package","pi-extension"],"dist-tags":{"latest":"1.2.3"},"time":{"1.2.3":"2026-01-05T00:00:00.000Z"}}"#;
+        let package = super::parse_exact_npm_package(body, "pi-matt-pocock")
+            .unwrap()
+            .expect("matching package");
+        assert_eq!(package.name, "pi-matt-pocock");
+        assert_eq!(package.description, "Pi extension");
+        assert_eq!(package.types, vec!["extension"]);
+        assert!(package.published_at > 0);
+        assert_eq!(package.path, "https://www.npmjs.com/package/pi-matt-pocock");
+        assert!(super::parse_exact_npm_package(body, "pi-other")
+            .unwrap()
+            .is_none());
+        assert!(
+            super::parse_exact_npm_package(r#"{"name":"pi-other"}"#, "pi-other")
+                .unwrap()
+                .is_none()
+        );
+        assert!(super::parse_exact_npm_package(
+            r#"{"name":"express","dist-tags":{"latest":"1.0.0"}}"#,
+            "express"
+        )
+        .unwrap()
+        .is_none());
+        let scoped = r#"{"name":"@scope/tools","keywords":["pi-package","pi-skill"],"dist-tags":{"latest":"2.0.0"}}"#;
+        let scoped = super::parse_exact_npm_package(scoped, "@scope/tools")
+            .unwrap()
+            .unwrap();
+        assert_eq!(scoped.types, vec!["skill"]);
+        assert_eq!(scoped.path, "https://www.npmjs.com/package/@scope/tools");
+    }
+
+    #[test]
+    fn exact_package_outside_catalog_is_found_and_deduplicated() {
+        let exact = super::parse_exact_npm_package(
+            r#"{"name":"pi-matt-pocock","dist-tags":{"latest":"1.0.0"}}"#,
+            "pi-matt-pocock",
+        )
+        .unwrap()
+        .unwrap();
+        let results = super::search_npm_pi_packages_with(
+            "pi-matt-pocock",
+            |_| Ok(vec![]),
+            |name| {
+                assert_eq!(name, "pi-matt-pocock");
+                Ok(Some(exact.clone()))
+            },
+        )
+        .unwrap();
+        assert_eq!(results, vec![exact.clone()]);
+        let results = super::search_npm_pi_packages_with(
+            "pi-matt-pocock",
+            |_| Ok(vec![exact.clone()]),
+            |_| Ok(Some(exact.clone())),
+        )
+        .unwrap();
+        assert_eq!(results.len(), 1);
+        let results = super::search_npm_pi_packages_with(
+            "pi-matt-pocock",
+            |_| Err("catalog unavailable".into()),
+            |_| Ok(Some(exact.clone())),
+        )
+        .unwrap();
+        assert_eq!(results, vec![exact]);
+    }
+
+    #[test]
+    fn scoped_and_missing_packages_handle_catalog_omissions() {
+        let scoped = super::parse_exact_npm_package(
+            r#"{"name":"@scope/pi-tools","dist-tags":{"latest":"1.0.0"}}"#,
+            "@scope/pi-tools",
+        )
+        .unwrap()
+        .unwrap();
+        let results = super::search_npm_pi_packages_with(
+            "@scope/pi-tools",
+            |_| Ok(vec![]),
+            |_| Ok(Some(scoped.clone())),
+        )
+        .unwrap();
+        assert_eq!(results, vec![scoped]);
+        let results =
+            super::search_npm_pi_packages_with("pi-not-published", |_| Ok(vec![]), |_| Ok(None))
+                .unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn regular_and_empty_queries_keep_keyword_search() {
+        let calls = std::cell::RefCell::new(Vec::new());
+        let results = super::search_npm_pi_packages_with(
+            "advisor",
+            |text| {
+                calls.borrow_mut().push(text.to_owned());
+                super::parse_npm_package_search(
+                    r#"{"objects":[{"package":{"name":"pi-advisor","keywords":["pi-package"]}}]}"#,
+                )
+            },
+            |_| Ok(None),
+        )
+        .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(calls.borrow().len(), super::PI_PACKAGE_KEYWORDS.len());
+        assert_eq!(calls.borrow()[0], "keywords:pi-package advisor");
+        assert!(super::search_npm_pi_packages_with(
+            "",
+            |_| Ok(vec![]),
+            |_| panic!("empty query must not read exact metadata")
+        )
+        .unwrap()
+        .is_empty());
+        assert!(super::search_npm_pi_packages_with(
+            "pi-invalid name",
+            |_| Ok(vec![]),
+            |_| panic!("invalid name must not be looked up")
+        )
+        .unwrap()
+        .is_empty());
+    }
+    #[test]
+    fn exact_metadata_reads_latest_version_fields_when_root_lacks_them() {
+        let body = r#"{"name":"@scope/tools","dist-tags":{"latest":"1.0.0"},"versions":{"1.0.0":{"keywords":["pi-package","pi-extension"],"description":"Scoped Pi extension"}}}"#;
+        let package = super::parse_exact_npm_package(body, "@scope/tools")
+            .unwrap()
+            .expect("scoped Pi package");
+        assert_eq!(package.description, "Scoped Pi extension");
+        assert_eq!(package.types, vec!["extension"]);
+    }
+
+    #[test]
     fn sorts_packages_by_downloads_descending_then_name() {
         let mut packages = vec![
             super::PiPackage {
@@ -1830,6 +2067,25 @@ mod tests {
         assert_eq!(packages.len(), 2);
         assert_eq!(packages[0].name, "express");
         assert_eq!(packages[1].name, "loadshed");
+    }
+
+    #[test]
+    #[ignore = "requires network access to the npm registry"]
+    fn fetches_live_exact_pi_matt_pocock() {
+        let package = super::fetch_exact_npm_package("pi-matt-pocock")
+            .expect("npm registry should be reachable")
+            .expect("published Pi package should be found");
+        assert_eq!(package.name, "pi-matt-pocock");
+        assert!(!package.description.is_empty());
+        assert!(package.published_at > 0);
+        let results = super::fetch_npm_pi_packages("pi-matt-pocock")
+            .expect("package search should be reachable");
+        assert!(results.iter().any(|result| result.name == package.name));
+        assert!(
+            super::fetch_exact_npm_package("pi-not-published-deeppi-20260928")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

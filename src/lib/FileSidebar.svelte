@@ -1,9 +1,9 @@
 <script lang="ts">
   import { invoke, isTauri } from "@tauri-apps/api/core";
-  import { ChevronDown, ChevronRight, File, Folder, RefreshCw, Search, Square, X, Radio } from "@lucide/svelte";
+  import { ChevronDown, ChevronRight, Copy, ExternalLink, File, FilePlus2, Folder, FolderPlus, Pencil, Radio, RefreshCw, Search, Square, Trash2, X } from "@lucide/svelte";
   import { onDestroy, onMount, untrack } from "svelte";
   import type { Project } from "./project";
-  import { visibleFiles, type FileEntry, type FileIndex } from "./files";
+  import { retainEmptyDirectories, visibleFiles, type FileEntry, type FileIndex, type FileTreeAction } from "./files";
   import { createLatestSearch, type SearchMatch } from "./search";
   import ContentSearchResults from "./ContentSearchResults.svelte";
   import { shortcutAria } from "./shortcuts";
@@ -12,13 +12,14 @@
   interface Props {
     project: Project | undefined;
     onOpen: (path: string, line?: number, column?: number) => void;
+    onAction: (action: FileTreeAction, entry: FileEntry | null) => Promise<void>;
     searchFocusToken: number;
     visible: boolean;
     refreshToken: number;
     watchError?: string;
     onRetryWatch?: () => void;
   }
-  let { project, onOpen, searchFocusToken, visible, refreshToken, watchError = "", onRetryWatch }: Props = $props();
+  let { project, onOpen, onAction, searchFocusToken, visible, refreshToken, watchError = "", onRetryWatch }: Props = $props();
   let entries = $state<FileEntry[]>([]);
   let expanded = $state<Set<string>>(new Set());
   let loaded = new Set<string>();
@@ -38,6 +39,9 @@
   let list = $state<HTMLDivElement>();
   let scrollTop = $state(0);
   let height = $state(400);
+  let menu = $state<{ entry: FileEntry | null; x: number; y: number } | null>(null);
+  let menuElement = $state<HTMLDivElement>();
+  let menuOrigin: HTMLElement | null = null;
   let generation = 0;
   let directoryQueue = Promise.resolve();
   let composing = $state(false);
@@ -67,22 +71,26 @@
   let debounce: ReturnType<typeof setTimeout> | undefined;
   let refreshTimer: ReturnType<typeof setTimeout> | undefined;
   let refreshAgain = false;
+  let refreshing = false;
   const rowHeight = 28;
   const rows = $derived(visibleFiles(entries, query, expanded));
   const start = $derived(Math.max(0, Math.min(Math.floor(scrollTop / rowHeight) - 8, rows.length - 1)));
   const end = $derived(Math.min(rows.length, start + Math.ceil(height / rowHeight) + 16));
   const windowRows = $derived(rows.slice(start, end));
+  let watchedProjectId: string | undefined;
 
   $effect(() => {
-    const selected = project;
-    untrack(() => { void refresh(selected, true); });
+    const projectId = project?.id;
+    if (watchedProjectId === projectId) return;
+    watchedProjectId = projectId;
+    untrack(() => { void refresh(projectId ? project : undefined, true); });
   });
   function scheduleRefresh() {
     clearTimeout(refreshTimer);
     refreshTimer = setTimeout(() => {
       if (!visible) return;
-      if (loading) refreshAgain = true;
-      else void refresh(project, false, entries.length > 0); // 已有内容时静默刷新，避免监听事件造成可见重载
+      if (refreshing) refreshAgain = true;
+      else void refresh(project, false, true); // 自动刷新期间保持现有目录可见
     }, 250);
   }
   $effect(() => {
@@ -90,9 +98,17 @@
   });
   onMount(() => {
     const focus = () => { if (visible) scheduleRefresh(); };
+    const dismiss = () => { menu = null; };
     window.addEventListener("focus", focus);
-    return () => window.removeEventListener("focus", focus);
+    window.addEventListener("resize", dismiss);
+    document.addEventListener("click", dismiss);
+    return () => {
+      window.removeEventListener("focus", focus);
+      window.removeEventListener("resize", dismiss);
+      document.removeEventListener("click", dismiss);
+    };
   });
+  $effect(() => { if (menu) menuElement?.querySelector("button")?.focus(); });
   $effect(() => {
     void contentRefreshToken;
     untrack(() => { contentRefreshPending = true; });
@@ -144,20 +160,22 @@
 
   async function refresh(selected = project, reset = false, silent = false) {
     const current = ++generation;
-    pending = new Set();
-    loaded = new Set();
-    emptyDirectories = [];
-    error = "";
     if (reset) {
+      clearTimeout(refreshTimer);
       refreshAgain = false;
+      pending = new Set();
+      loaded = new Set();
+      emptyDirectories = [];
       entries = [];
       expanded = new Set();
       searchText = query = "";
       clearTimeout(debounce);
+      incomplete = false;
+      unreadable = [];
     }
-    incomplete = false;
-    unreadable = [];
-    if (!selected || !isTauri()) { loading = false; return; }
+    error = "";
+    if (!selected || !isTauri()) { refreshing = false; loading = false; return; }
+    refreshing = true;
     if (!silent) loading = true;
     try {
       const result = await invoke<FileIndex>("list_project_files", {
@@ -165,13 +183,20 @@
       });
       if (current !== generation) return;
       entries = result.entries;
+      loaded = new Set();
+      pending = new Set();
+      emptyDirectories = retainEmptyDirectories(emptyDirectories, result.entries);
       incomplete = result.truncated;
       unreadable = result.unreadableDirectories;
       contentRefreshToken++;
     } catch (cause) {
-      if (current === generation) error = tm(String(cause));
+      if (current === generation) {
+        error = tm(String(cause));
+        pending = new Set();
+      }
     } finally {
       if (current === generation) {
+        refreshing = false;
         if (!silent) loading = false;
         if (refreshAgain) { refreshAgain = false; scheduleRefresh(); }
       }
@@ -245,8 +270,47 @@
     searchInput?.focus();
   }
 
+  function showMenu(entry: FileEntry | null, x: number, y: number, origin: HTMLElement | null) {
+    if (!project) return;
+    menuOrigin = origin;
+    activePath = entry?.path ?? "";
+    const itemCount = entry ? 5 : 2;
+    menu = {
+      entry,
+      x: Math.max(8, Math.min(x, window.innerWidth - 212)),
+      y: Math.max(8, Math.min(y, window.innerHeight - itemCount * 32 - 16)),
+    };
+  }
+  function menuKeydown(event: KeyboardEvent) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      menu = null;
+      menuOrigin?.focus();
+    } else if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+      event.preventDefault();
+      const buttons = [...(menuElement?.querySelectorAll<HTMLButtonElement>("button") ?? [])];
+      const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+      const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1
+        : (index + (event.key === "ArrowDown" ? 1 : buttons.length - 1)) % buttons.length;
+      buttons[next]?.focus();
+    } else if (event.key === "Tab") menu = null;
+  }
+  function chooseAction(action: FileTreeAction) {
+    const entry = menu?.entry ?? null;
+    menu = null;
+    void onAction(action, entry);
+  }
+
   function keyboard(event: KeyboardEvent) {
-    if (event.isComposing || composing) return;
+    if (event.key === "ContextMenu" || event.shiftKey && event.key === "F10") {
+      event.preventDefault();
+      const entry = rows.find((row) => row.path === activePath) ?? null;
+      const origin = document.activeElement instanceof HTMLElement ? document.activeElement : list ?? null;
+      const rect = (entry ? document.getElementById(rowId(entry.path)) : list)?.getBoundingClientRect();
+      showMenu(entry, rect?.left ?? 8, rect?.bottom ?? 8, origin);
+      return;
+    }
+    if (menu) return;
     if (event.key === "Escape") { event.preventDefault(); clearSearch(); return; }
     if (searchMode === "content") {
       if (event.key === "ArrowDown" && contentResults.length) { event.preventDefault(); contentFocusToken++; }
@@ -325,7 +389,8 @@
   <div class="file-tree" role="tree" aria-label={t("文件目录")} tabindex="0"
     aria-activedescendant={windowRows.some((entry) => entry.path === activePath) ? rowId(activePath) : undefined}
     aria-busy={loading} bind:this={list} bind:clientHeight={height}
-    onscroll={(event) => { scrollTop = event.currentTarget.scrollTop; }} onkeydown={keyboard}>
+    onscroll={(event) => { scrollTop = event.currentTarget.scrollTop; menu = null; }} onkeydown={keyboard}
+    oncontextmenu={(event) => { event.preventDefault(); showMenu(null, event.clientX, event.clientY, list ?? null); }}>
     <div role="none" style:height={`${start * rowHeight}px`}></div>
     {#each windowRows as entry (entry.path)}
       <button type="button" role="treeitem" id={rowId(entry.path)} tabindex="-1" class:active={activePath === entry.path}
@@ -333,7 +398,8 @@
         aria-selected={activePath === entry.path}
         aria-expanded={entry.isDirectory ? !!query.trim() || expanded.has(entry.path) : undefined}
         style:padding-left={`${8 + (entry.path.split("/").length - 1) * 12}px`}
-        title={entry.path} onclick={() => { activePath = entry.path; void toggle(entry); }}>
+        title={entry.path} onclick={() => { activePath = entry.path; void toggle(entry); }}
+        oncontextmenu={(event) => { event.preventDefault(); event.stopPropagation(); showMenu(entry, event.clientX, event.clientY, event.currentTarget); }}>
         {#if entry.isDirectory}
           {#if query.trim() || expanded.has(entry.path)}<ChevronDown size={12} />{:else}<ChevronRight size={12} />{/if}
           <Folder size={14} />
@@ -350,6 +416,25 @@
   {/if}
   <footer>{t("{count} 个文件", { count: entries.filter((entry) => !entry.isDirectory).length })}</footer>
 </section>
+{#if menu}
+  <div bind:this={menuElement} class="context-menu" role="menu" tabindex="-1" aria-label={t("文件操作")}
+    style={`left: ${menu.x}px; top: ${menu.y}px`}
+    onkeydown={menuKeydown} onclick={(event) => event.stopPropagation()}>
+    {#if menu.entry && !menu.entry.isDirectory}
+      <button type="button" role="menuitem" onclick={() => chooseAction("open")}><File size={14} />{t("打开并编辑")}</button>
+      <button type="button" role="menuitem" onclick={() => chooseAction("external")}><ExternalLink size={14} />{t("在外部编辑器中打开")}</button>
+    {/if}
+    {#if !menu.entry || menu.entry.isDirectory}
+      <button type="button" role="menuitem" onclick={() => chooseAction("newFile")}><FilePlus2 size={14} />{t("新建文件")}</button>
+      <button type="button" role="menuitem" onclick={() => chooseAction("newFolder")}><FolderPlus size={14} />{t("新建文件夹")}</button>
+    {/if}
+    {#if menu.entry}
+      <button type="button" role="menuitem" onclick={() => chooseAction("rename")}><Pencil size={14} />{t("重命名")}</button>
+      <button type="button" role="menuitem" onclick={() => chooseAction("copyPath")}><Copy size={14} />{t("复制完整路径")}</button>
+      <button type="button" role="menuitem" onclick={() => chooseAction("delete")}><Trash2 size={14} />{t("移到回收站")}</button>
+    {/if}
+  </div>
+{/if}
 
 <style>
   .file-sidebar { display: flex; flex-direction: column; min-height: 0; height: 100%; }
@@ -375,4 +460,8 @@
   .filename { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .indent { width: 12px; }
   footer { padding: 8px 10px; border-top: 1px solid var(--border); font-size: 11px; color: var(--text-muted); }
+  .context-menu { position: fixed; z-index: 100; width: 204px; max-width: calc(100vw - 16px); padding: 4px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface); box-shadow: 0 8px 24px #0003; }
+  .context-menu button { display: flex; align-items: center; gap: 9px; width: 100%; min-height: 32px; padding: 5px 8px; border: 0; border-radius: 4px; background: transparent; color: var(--text); text-align: left; font-size: 12px; cursor: pointer; }
+  .context-menu button:hover, .context-menu button:focus-visible { background: var(--surface-hover); outline: none; }
+  .context-menu button:last-child { color: #ce5147; }
 </style>
