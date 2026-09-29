@@ -227,6 +227,15 @@ enum HeadError {
     Malformed,
 }
 
+/// 清除握手期设置的读写超时。
+/// `TcpStream::try_clone` 得到的句柄各自持有超时值（Windows 实测：清原句柄并不影响
+/// 克隆句柄），因此建立隧道时必须把两端都清掉，否则流式响应会在握手预算那一刻被
+/// 误判成读失败，中继会主动拆掉一条本来健康的连接。
+fn clear_handshake_timeouts(stream: &TcpStream) {
+    let _ = stream.set_read_timeout(None);
+    let _ = stream.set_write_timeout(None);
+}
+
 fn handle_connection(mut client: TcpStream, resolve: Resolver, limits: Limits) {
     let _ = client.set_read_timeout(Some(limits.handshake));
     let _ = client.set_write_timeout(Some(limits.handshake));
@@ -245,19 +254,19 @@ fn handle_connection(mut client: TcpStream, resolve: Resolver, limits: Limits) {
                 "Bad Request",
                 "proxy request head is too large",
             );
-            drain_before_close(&mut client);
             return;
         }
         Err(HeadError::Malformed) => {
             log::debug!("event=proxy_relay status=malformed_request");
             respond_status(&mut client, 400, "Bad Request", "malformed proxy request");
-            drain_before_close(&mut client);
             return;
         }
     };
-    // 握手完成：隧道可能是长时间空闲的流式响应（SSE），不保留读超时。
-    let _ = client.set_read_timeout(None);
-    let _ = client.set_write_timeout(None);
+    // 握手完成：隧道可能是长时间空闲的流式响应（SSE），两端句柄都不保留超时。
+    // 隧道读写与请求消息体都走克隆出的 `reader`，只清原句柄等于没清（见
+    // `clear_handshake_timeouts`），会让流式回答在握手预算处被切断。
+    clear_handshake_timeouts(&client);
+    clear_handshake_timeouts(reader.get_ref());
     // 上游在这里才解析：系统模式的按协议分流、PAC 与例外列表都依赖目标。
     let upstream = resolve(&resolve_target(&head));
     if head.method == "CONNECT" {
@@ -336,6 +345,9 @@ fn relay_connect(
                     return;
                 }
             };
+            // 上游握手同样要有界：挂死的代理不能永久占住这条连接线程。
+            let _ = proxy.set_read_timeout(Some(limits.handshake));
+            let _ = proxy.set_write_timeout(Some(limits.handshake));
             let Ok(mut proxy_reader) = proxy.try_clone().map(BufReader::new) else {
                 respond_status(
                     &mut client,
@@ -383,6 +395,9 @@ fn relay_connect(
                 );
                 return;
             }
+            // 隧道建立：两端句柄都不再保留握手超时，流式响应可以一直空闲。
+            clear_handshake_timeouts(&proxy);
+            clear_handshake_timeouts(proxy_reader.get_ref());
             respond_connect_established(&mut client);
             tunnel(reader, client, proxy_reader, proxy);
         }
@@ -404,7 +419,6 @@ fn relay_http(
             respond_status(&mut client, 502, "Bad Gateway", reason);
             // 消息体可能还没读：不排空就关闭，Windows 会发 RST 并丢掉刚写的 502，
             // 客户端看到的是 ECONNRESET —— 恰好把这个诊断弄丢（见 drain_before_close）。
-            drain_before_close(&mut client);
             return;
         }
         Upstream::Direct => match absolute_form_target(&head.target) {
@@ -438,7 +452,6 @@ fn relay_http(
                     "Bad Gateway",
                     "upstream proxy address is unusable",
                 );
-                drain_before_close(&mut client);
                 return;
             }
         },
@@ -453,13 +466,11 @@ fn relay_http(
                 "Bad Gateway",
                 "cannot reach the request target",
             );
-            drain_before_close(&mut client);
             return;
         }
     };
     let Ok(mut outbound_reader) = outbound.try_clone().map(BufReader::new) else {
         respond_status(&mut client, 502, "Bad Gateway", "upstream is unusable");
-        drain_before_close(&mut client);
         return;
     };
 
@@ -476,7 +487,6 @@ fn relay_http(
     outbound_head.push_str("Connection: close\r\n\r\n");
     if outbound.write_all(outbound_head.as_bytes()).is_err() || outbound.flush().is_err() {
         respond_status(&mut client, 502, "Bad Gateway", "upstream write failed");
-        drain_before_close(&mut client);
         return;
     }
 
@@ -902,6 +912,9 @@ fn drain_before_close(stream: &mut TcpStream) {
     }
 }
 
+/// 给客户端写一个失败响应，并排空对端输入，随后由调用方关闭连接。
+/// 必须排空：Windows 在接收缓冲区仍有未读数据（含对端已发出的 FIN）时关闭 socket
+/// 会直接发 RST，把刚写出的响应一起丢掉，客户端只看到 ECONNRESET。
 fn respond_status(stream: &mut TcpStream, status: u16, reason: &str, body: &str) {
     let response = format!(
         "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n{body}",
@@ -909,6 +922,7 @@ fn respond_status(stream: &mut TcpStream, status: u16, reason: &str, body: &str)
     );
     let _ = stream.write_all(response.as_bytes());
     let _ = stream.flush();
+    drain_before_close(stream);
 }
 
 #[cfg(test)]
@@ -1724,6 +1738,171 @@ mod tests {
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "timeout must not hang"
+        );
+    }
+
+    /// 读到对端关闭或出错为止，返回结束方式；已收到的字节留给调用方断言。
+    /// 对端如何关闭（FIN 还是 RST）不是断言目标，但要能从失败信息里看出来。
+    fn read_to_quiescence(stream: &mut TcpStream, into: &mut Vec<u8>) -> String {
+        let mut buffer = [0u8; 256];
+        loop {
+            match stream.read(&mut buffer) {
+                Ok(0) => return "eof".into(),
+                Ok(read) => into.extend_from_slice(&buffer[..read]),
+                Err(error) => return format!("{error:?}"),
+            }
+        }
+    }
+
+    /// 起一个使用自定义超时预算的中继，返回监听端口。
+    fn relay_with_limits(upstream: Upstream, limits: Limits) -> u16 {
+        let listener = bind_loopback().unwrap();
+        let port = listener.local_addr().unwrap().port();
+        spawn_accept_loop(listener, move |_target: &str| upstream.clone(), limits).unwrap();
+        port
+    }
+
+    /// 隧道建立后的静默不是错误：流式响应在超过握手预算后仍必须继续转发。
+    /// 回归：`try_clone` 得到的句柄各自持有超时值，只清原句柄会让克隆句柄继续按
+    /// 握手预算读流；于是每次长于该预算的模型流都会被中继自己切断，Pi 侧表现为
+    /// 一次 `terminated`（内容已送达，但连接在结束事件前被拆掉）。
+    #[test]
+    fn connect_tunnel_outlives_the_handshake_timeout() {
+        let target = TcpListener::bind((LOOPBACK, 0)).unwrap();
+        let target_port = target.local_addr().unwrap().port();
+        let relay_port = relay_with_limits(
+            Upstream::Direct,
+            Limits {
+                handshake: Duration::from_millis(250),
+                connect: Duration::from_secs(2),
+            },
+        );
+        let server = thread::spawn(move || {
+            let (mut stream, _) = target.accept().unwrap();
+            stream.write_all(b"first").unwrap();
+            stream.flush().unwrap();
+            // 复刻真实上游：对端一半关闭就立刻收尾，不再发送后续数据。
+            // 静默远超握手预算时，中继若把这段静默当成读失败就会半关闭过来，
+            // 于是这里读到 EOF 并提前结束，客户端拿不到第二段数据。
+            let mut probe = stream.try_clone().unwrap();
+            probe
+                .set_read_timeout(Some(Duration::from_millis(1200)))
+                .unwrap();
+            let mut scratch = [0u8; 64];
+            let peer_closed = matches!(probe.read(&mut scratch), Ok(0));
+            if !peer_closed {
+                stream.write_all(b"second").unwrap();
+                stream.flush().unwrap();
+                let _ = stream.shutdown(Shutdown::Write);
+            }
+            thread::sleep(Duration::from_millis(300));
+        });
+        let mut client = TcpStream::connect((LOOPBACK, relay_port)).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(20)))
+            .unwrap();
+        client
+            .write_all(
+                format!(
+                    "CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\nHost: 127.0.0.1:{target_port}\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        client.flush().unwrap();
+        let mut received = Vec::new();
+        client.read_to_end(&mut received).unwrap();
+        let text = String::from_utf8_lossy(&received);
+        assert!(
+            text.contains("200 Connection established"),
+            "response: {text:?}"
+        );
+        assert!(
+            text.ends_with("firstsecond"),
+            "an idle tunnel must not be cut by the handshake timeout: {text:?}"
+        );
+        server.join().unwrap();
+    }
+
+    /// 普通 HTTP 转发从同一个克隆句柄读请求体：上传中途的静默同样不能被握手预算打断。
+    #[test]
+    fn plain_http_request_body_outlives_the_handshake_timeout() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = seen.clone();
+        let (origin_port, _hits) = spawn_server(move |mut stream| {
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let Ok(head) = read_head(&mut reader) else {
+                return;
+            };
+            let body = receive_body(&mut reader, request_framing(&head.headers))
+                .expect("origin must receive the complete request body");
+            recorder.lock().unwrap().extend_from_slice(&body.bytes);
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK");
+            let _ = stream.flush();
+        });
+        let relay_port = relay_with_limits(
+            Upstream::Direct,
+            Limits {
+                handshake: Duration::from_millis(250),
+                connect: Duration::from_secs(2),
+            },
+        );
+        let mut client = TcpStream::connect((LOOPBACK, relay_port)).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(20)))
+            .unwrap();
+        client
+            .write_all(
+                format!(
+                    "POST http://127.0.0.1:{origin_port}/upload HTTP/1.1\r\nHost: 127.0.0.1:{origin_port}\r\nContent-Length: 11\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        client.flush().unwrap();
+        // 报文头已发完、消息体要等一下：超过握手预算的静默不是错误。
+        thread::sleep(Duration::from_millis(800));
+        client.write_all(b"hello world").unwrap();
+        client.flush().unwrap();
+        // 只断言响应内容：对端如何关闭（FIN 还是 RST）不是这一条要验证的东西，
+        // 但把已收到的字节带进失败信息，出问题时能直接看出卡在哪一步。
+        let mut response = Vec::new();
+        let read = read_to_quiescence(&mut client, &mut response);
+        assert!(
+            String::from_utf8_lossy(&response).starts_with("HTTP/1.1 200"),
+            "response after {read:?}: {:?}",
+            String::from_utf8_lossy(&response)
+        );
+        assert_eq!(&*seen.lock().unwrap(), b"hello world");
+    }
+
+    /// 上游代理不应答 CONNECT 时必须按握手预算有界收尾，不能永久占住连接线程。
+    #[test]
+    fn stalled_upstream_proxy_handshake_is_bounded() {
+        let (upstream_port, _hits) = spawn_server(|_stream| {
+            // 接受连接后什么都不做：模拟挂死的上游代理。
+            thread::sleep(Duration::from_secs(3));
+        });
+        let relay_port = relay_with_limits(
+            Upstream::ViaProxy(format!("http://127.0.0.1:{upstream_port}")),
+            Limits {
+                handshake: Duration::from_millis(250),
+                connect: Duration::from_secs(2),
+            },
+        );
+        let started = std::time::Instant::now();
+        let response = connect(
+            relay_port,
+            "CONNECT example.test:443 HTTP/1.1\r\nHost: example.test:443\r\n\r\n",
+        );
+        assert!(
+            response.starts_with("HTTP/1.1 502"),
+            "response: {response:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "an unresponsive upstream proxy must not hold the connection thread"
         );
     }
 
