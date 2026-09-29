@@ -18,6 +18,7 @@
   import { hasQueuedImages, rekeyQueuedImages, takeQueuedImages, type QueuedImageEntry } from "./queued-images";
   import { formatDuration } from "./duration";
   import { createDormantHistorySession, createRpcHistorySession, prependRpcHistory } from "./rpc-history";
+  import { isUnknownPromptOutcome, recoverRpcSession } from "./rpc-recovery";
   import { deriveSessionTitle, isTruncatedTitleUpgrade } from "./session-title";
   import { BUILTIN_SLASH_COMMANDS, filterSlashCommands, parseSlashCommand, slashSourceLabel, type PiCommand, type SlashCommand } from "./slash-commands";
   import { shortcutAria } from "./shortcuts";
@@ -57,10 +58,11 @@
     onAutoRename: (title: string) => void;
     onOpenModelSettings?: () => void;
     onReloadSession?: () => void;
+    onRecoverSession?: (expectedRunId: string | null | undefined) => Promise<string | null | undefined>;
     /** Pi 对话内容显示级别，来自全局设置。 */
     chatDetailLevel?: ChatDetailLevel;
   }
-  let { taskId, runId, title, tabs, visible, active, switching, focusToken, autoName, onUseTerminal, onDialog, onCancelDialogs, onActivity, onAutoRename, onOpenModelSettings, onReloadSession, chatDetailLevel = "concise" }: Props = $props();
+  let { taskId, runId, title, tabs, visible, active, switching, focusToken, autoName, onUseTerminal, onDialog, onCancelDialogs, onActivity, onAutoRename, onOpenModelSettings, onReloadSession, onRecoverSession, chatDetailLevel = "concise" }: Props = $props();
   let conversation = $state(emptyConversation());
   let draft = $state("");
   let restoredDraft = $state("");
@@ -69,6 +71,10 @@
   let sending = $state(false);
   let stopping = $state(false);
   let error = $state("");
+  let recovering = $state(false);
+  // Keep the confirmation requirement across resubscriptions and process restarts of this task.
+  let unknownPromptTaskId = $state<string | null>(null);
+  const unknownPromptOutcome = $derived(unknownPromptTaskId === taskId);
   /// 扩展通过 ui.notify(…, "error") 上报的错误：展示在会话流内（与失败回合同处），
   /// 不再飘在输入框上方的提示条里。
   let extensionError = $state("");
@@ -765,7 +771,7 @@
       if (current === generation) workflowBusy = false;
     }
   }
-  const canSend = $derived(!switching && (connected || dormant) && !initializing && !stopping && !conversation.closed
+  const canSend = $derived(!switching && !unknownPromptOutcome && (connected || dormant) && !initializing && !stopping && !conversation.closed
     && canSubmitPrompt(sending, draft, attachments.length, pendingImageReads));
   /// 发送按钮提示：执行中说明本条消息将按所选方式引导/排队，而非开启新回复。
   const sendHint = $derived(
@@ -1157,7 +1163,10 @@
           // 回车启动的休眠会话：连接就绪（含历史加载与模型恢复）后自动发出草稿。
           // 必须等 initializing 清零后再调用：canSend 含 !initializing 条件，
           // 提前调用会被 send() 开头的检查静默吞掉，用户被迫再按一次回车。
-          if (autoSendOnConnect) { autoSendOnConnect = false; void send(); }
+          if (autoSendOnConnect) {
+            autoSendOnConnect = false;
+            if (!unknownPromptOutcome) void send();
+          }
         }
       }
     })();
@@ -1262,6 +1271,28 @@
       if (transcript && followScroll) transcript.scrollTop = transcript.scrollHeight;
     });
   });
+
+  async function recoverSession() {
+    if (recovering) return;
+    recovering = true;
+    const expectedTaskId = taskId;
+    const expectedRunId = runId;
+    try {
+      const result = await recoverRpcSession(expectedRunId, {
+        stillCurrent: () => taskId === expectedTaskId && runId === expectedRunId,
+        probe: (currentRunId) => invoke<boolean>("rpc_run_open", { taskId: expectedTaskId, runId: currentRunId }),
+        resubscribe: () => { reconnect++; },
+        restart: () => onRecoverSession?.(expectedRunId) ?? Promise.resolve(null),
+      });
+      notice = result === "restarted"
+        ? t("会话进程已重启，正在同步历史；不会自动重新发送提示词。")
+        : t("正在同步会话；若模型请求已失败，请检查历史后手动继续。不会自动重新发送提示词。");
+    } catch (cause) {
+      commandError(cause);
+    } finally {
+      recovering = false;
+    }
+  }
 
   function call<T>(command: Record<string, unknown>): Promise<T> {
     return invoke<T>("rpc_command", { taskId, runId, command });
@@ -1657,6 +1688,7 @@
     const queuedByPi = conversation.busy;
     const queuedAttachments = attachments.map((file) => ({ ...file }));
     const current = generation;
+    const sentTaskId = taskId;
     sending = true;
     error = "";
     try {
@@ -1670,6 +1702,7 @@
       pinnedMessageStart = null;
       refreshStats();
     } catch (cause) {
+      if (isUnknownPromptOutcome(cause)) unknownPromptTaskId = sentTaskId;
       if (current === generation) commandError(cause);
     } finally {
       if (current === generation) sending = false;
@@ -1889,11 +1922,11 @@
         <p class="chat-error-text">{extensionError}</p>
       </article>
     {/if}
-    {#if error || conversation.error}
+    {#if error || conversation.error || conversation.closed}
       <article class="chat-error" role="alert">
         <div class="message-label"><CircleAlert size={14} />{t("错误")}</div>
-        <p class="chat-error-text">{tm(error || conversation.error)}</p>
-        <button type="button" class="chat-error-retry" onclick={() => { reconnect++; }}><RefreshCw size={13} />{t("重新连接会话")}</button>
+        <p class="chat-error-text">{error || conversation.error ? tm(error || conversation.error) : t("会话进程已退出")}</p>
+        <button type="button" class="chat-error-retry" disabled={recovering || switching} onclick={() => void recoverSession()}><RefreshCw size={13} />{recovering ? t("正在检查会话…") : t("恢复会话")}</button>
       </article>
     {/if}
     {#each runningTools as tool (tool.id)}
@@ -1969,6 +2002,12 @@
   {#if notice}<p class="notice" role="status">{notice}</p>{/if}
   {#if restoredDraft}
     <button class="restore-draft" type="button" onclick={() => { draft = [draft, restoredDraft].filter(Boolean).join("\n\n"); restoredDraft = ""; }}>{t("恢复暂存文本")}</button>
+  {/if}
+  {#if unknownPromptOutcome}
+    <p class="model-hint" role="alert">
+      <span>{t("上一条提示词的提交结果不明。草稿和附件已保留；请先检查会话历史与工具执行情况，避免重复提交。")}</span>
+      <span class="model-hint-actions"><button type="button" onclick={() => { unknownPromptTaskId = null; }}>{t("已核对，允许手动发送")}</button></span>
+    </p>
   {/if}
   {#if connected && !initializing && !conversation.closed && models.length === 0}
     <p class="model-hint" role="status">

@@ -1300,9 +1300,10 @@
     removeTerminal(task.id);
   }
 
-  function requestTaskRestart(task: Task, mode: InteractionMode) {
+  function requestTaskRestart(task: Task, mode: InteractionMode, expectedRunId?: string | null) {
     return invoke<Task>(mode === "rpc" ? "start_rpc_task" : "restart_pi_task", {
-      request: { taskId: task.id, projectId: task.projectId, title: task.title, rows: 32, cols: 100 },
+      request: { taskId: task.id, projectId: task.projectId, title: task.title, rows: 32, cols: 100,
+        ...(expectedRunId ? { expectedRunId } : {}) },
     });
   }
 
@@ -1312,11 +1313,11 @@
     openTask(task);
   }
 
-  async function restartTask(task: Task, mode = task.interactionMode ?? "tui") {
-    if (modeSwitcher.isBusy(task.id) || taskControlBusy.has(task.id)) return;
+  async function restartTask(task: Task, mode = task.interactionMode ?? "tui", expectedRunId?: string | null): Promise<boolean> {
+    if (modeSwitcher.isBusy(task.id) || taskControlBusy.has(task.id)) return false;
     if (task.piEnvironment && task.piEnvironment !== "managed") {
       showError(t("该任务来自旧版本机 Pi 环境，当前稳定版仅支持 DeepPi 托管任务，本机会话记录已保留。"));
-      return;
+      return false;
     }
     taskControlBusy.add(task.id);
     try {
@@ -1325,14 +1326,15 @@
       // 表现就是「点任务没反应」。给请求加时间上限，超时后释放锁、可以重试。
       const outcome = await runBoundedStep(
         "pi_start",
-        () => requestTaskRestart(task, mode),
+        () => requestTaskRestart(task, mode, expectedRunId),
         PI_START_TIMEOUT_MS,
       );
       if (!outcome.ok) {
         showError(outcome.error);
-        return;
+        return false;
       }
       applyTaskRestart(task, outcome.value);
+      return true;
     } finally {
       taskControlBusy.delete(task.id);
     }
@@ -1612,6 +1614,11 @@
                 }}
               onOpenModelSettings={() => openSettingsCategory("models")}
               onReloadSession={() => void restartTask(task, "rpc")}
+              onRecoverSession={async (expectedRunId) => {
+                if (task.runId !== expectedRunId) throw new Error(t("运行中的会话已变化，请重新检查任务状态"));
+                const restarted = await restartTask(task, "rpc", expectedRunId);
+                return restarted ? task.runId : null;
+              }}
               chatDetailLevel={settings.chatDetailLevel}
               />
             {:else if terminalModule}

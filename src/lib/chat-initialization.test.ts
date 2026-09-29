@@ -27,7 +27,7 @@ it("keeps chat initialization tied to task/run/reconnect rather than conversatio
       'let conversation = $state(emptyConversation());',
       'let models = $state([]), connected = $state(false), initializing = $state(true);',
       'let dormant = $state(false), historySession = $state.raw(null);',
-      'let generation = 0, autoSendOnConnect = false, sent = 0;',
+      'let generation = 0, autoSendOnConnect = false, unknownPromptOutcome = $state(false), sent = 0;',
       'let turnDurations, runningTurn, turnStartedAt, historyLimit, followScroll, pinnedMessageStart;',
       'let sending, stopping, changingModel, changingThinking, thinkingLevels, thinkingLevel;',
       'let autoNamed, sessionStats, modelsLoadFailed, modelsLoadError, modelsStale, piCommands;',
@@ -53,6 +53,7 @@ it("keeps chat initialization tied to task/run/reconnect rather than conversatio
       'get models() { return models; }, get initializing() { return initializing; }, get sent() { return sent; },',
       'updateMessages() { conversation = { ...conversation, messages: [...conversation.messages, { role: "assistant", content: "reply" }] }; },',
       'start() { autoSendOnConnect = true; runId = "run-a"; }, restart() { runId = "run-b"; },',
+      'markUnknown() { unknownPromptOutcome = true; autoSendOnConnect = true; },',
       'switchTask() { taskId = "task-b"; }, reconnect() { reconnect++; } };',
       '}'
     );
@@ -87,6 +88,10 @@ it("keeps chat initialization tied to task/run/reconnect rather than conversatio
         await settle();
         assert.equal(count('subscribe_rpc'), expected, action + ' must reconnect exactly once');
       }
+      chat.markUnknown();
+      chat.reconnect();
+      await settle();
+      assert.equal(chat.sent, 1, 'a reconnect after unknown prompt outcome must not auto-send the draft');
       console.log('chat lifecycle regression passed');
     } catch (error) {
       console.error(error.message);

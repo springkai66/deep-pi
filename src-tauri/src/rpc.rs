@@ -120,6 +120,8 @@ pub struct StartRpcRequest {
     project_id: String,
     title: String,
     task_id: Option<String>,
+    /// Only session recovery supplies this; reject a replacement run started after its probe.
+    expected_run_id: Option<String>,
 }
 
 #[tauri::command]
@@ -153,6 +155,10 @@ fn start(app: &AppHandle, request: StartRpcRequest) -> Result<TaskRecord, String
     }
     let cli = paths.required_pi_cli()?;
     store.project_path(&request.project_id)?;
+    if let (Some(task_id), Some(expected)) = (&request.task_id, &request.expected_run_id) {
+        // The runtime operation lock serializes this check with other task starts.
+        manager.get_for_stop(task_id, expected)?;
+    }
     let mut record = if let Some(task_id) = request.task_id {
         if pty.contains(&task_id)? || manager.contains(&task_id)? {
             return Err("Task is still running or stopping".into());
@@ -243,6 +249,21 @@ fn start(app: &AppHandle, request: StartRpcRequest) -> Result<TaskRecord, String
         };
     runs.insert(record.id.clone(), RpcRun { run_id, transport });
     Ok(record)
+}
+
+/// Check process liveness without sending a command to the model or replacing the RPC subscriber.
+/// A superseded run is an error: callers must not restart a newer process from a stale pane.
+#[tauri::command]
+pub fn rpc_run_open(
+    webview: tauri::Webview,
+    manager: State<'_, RpcManager>,
+    task_id: String,
+    run_id: String,
+) -> Result<bool, String> {
+    require_main(&webview)?;
+    Ok(manager
+        .get_for_stop(&task_id, &run_id)?
+        .is_some_and(|transport| transport.is_open()))
 }
 
 #[tauri::command]
@@ -616,6 +637,8 @@ mod tests {
         );
         assert!(manager.get_for_stop("task", "old-run").is_err());
         assert!(manager.get_for_stop("task", "new-run").unwrap().is_some());
+        assert!(transport.is_open());
         transport.shutdown(Duration::from_secs(5)).unwrap();
+        assert!(!transport.is_open());
     }
 }

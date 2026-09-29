@@ -248,6 +248,7 @@ pub fn run() {
                 checklist::delete_checklist_item,
                 rpc::start_rpc_task,
                 rpc::subscribe_rpc,
+                rpc::rpc_run_open,
                 rpc::rpc_command,
                 rpc::rpc_history_open,
                 rpc::rpc_history_page,

@@ -527,6 +527,11 @@ impl RpcTransport {
         })
     }
 
+    /// A stopped reader/writer is no longer a usable RPC run, even before the exit callback removes it.
+    pub fn is_open(&self) -> bool {
+        !self.shared.stop.load(Ordering::Acquire)
+    }
+
     pub fn request(&self, command: Value, timeout: Duration) -> Result<Value, String> {
         self.request_with_cursor(command, timeout)
             .map(|reply| reply.data)
