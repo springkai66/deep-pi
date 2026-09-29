@@ -11,6 +11,7 @@
   import { createPetTaskActionClient, PET_TASK_ACTION_EVENT, PET_TASK_RESULT_EVENT, type PetTaskResult } from "$lib/pet-task-actions";
   import { applyAppearance } from "$lib/appearance";
   import { RING_RADIUS_TARGET_DEFAULT } from "$lib/pet-task-ring";
+  import { observePetTaskHover, type PetTaskHover } from "$lib/pet-task-hover";
   import { t } from "$lib/i18n.svelte";
   import type { AppSettings } from "$lib/settings";
   import type { Task } from "$lib/task";
@@ -18,7 +19,6 @@
   let taskBubbles = $state<PetTaskBubblesState>({
     open: false, leaving: false, loading: false, empty: false, tasks: [], pending: [], actionErrors: {}, error: "",
   });
-  let hoverRevision = 0;
   let petDebug = $state(false);
   /** 主窗口当前工作区：环上只显示该工作流的任务（Pi / DSH）。 */
   let activeAgent = $state<"pi" | "dsh" | null>(null);
@@ -130,25 +130,16 @@
           } catch { /* 保留外观 */ }
         })();
       }),
-      // 先注册 hover 监听，再读带版本的当前状态：覆盖页面加载期间的移出事件。
-      listen<{ revision: number; hovered: boolean }>("pet-task-hover", ({ payload }) => {
-        if (payload.revision < hoverRevision) return;
-        hoverRevision = payload.revision;
-        if (payload.hovered) void enterRing(); else bubbles.leave();
-      }),
       // 工作区切换：环上只留当前工作流的任务。
       listen<"pi" | "dsh">("active-agent", ({ payload }) => {
         if (payload === "pi" || payload === "dsh") applyActiveAgent(payload);
       }),
     ];
-    void (async () => {
-      try {
-        const state = await invoke<{ revision: number; hovered: boolean }>("get_pet_task_hover");
-        if (disposed || state.revision < hoverRevision) return;
-        hoverRevision = state.revision;
-        if (state.hovered) void enterRing();
-      } catch { /* 快照读取失败时等待下一次 hover 事件 */ }
-    })();
+    const stopHover = observePetTaskHover(
+      (onHover) => listen<PetTaskHover>("pet-task-hover", ({ payload }) => onHover(payload)),
+      () => invoke<PetTaskHover>("get_pet_task_hover"),
+      (hovered) => { if (hovered) void enterRing(); else bubbles.leave(); },
+    );
     void (async () => {
       try {
         const agent = await invoke<"pi" | "dsh" | null>("get_active_agent");
@@ -157,6 +148,7 @@
     })();
     return () => {
       disposed = true;
+      stopHover();
       bubbles.dispose();
       taskActions.dispose();
       if (rectsEnterTimer) clearTimeout(rectsEnterTimer);
