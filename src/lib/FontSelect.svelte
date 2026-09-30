@@ -28,11 +28,21 @@
   let trigger = $state<HTMLButtonElement | null>(null);
   let listbox = $state<HTMLUListElement | null>(null);
   const listId = `font-list-${Math.random().toString(36).slice(2, 10)}`;
-  /// 弹层用 fixed 定位（不受设置页滚动容器的 overflow 裁剪），打开时按触发器位置摆放。
+  /// 弹层按视口定位，并通过 portalToBody 脱离设置页的滚动/裁切容器。
   let listStyle = $state<{ top: string; left: string; minWidth: string; maxWidth: string; maxHeight: string } | null>(null);
 
   /// 当前选中项；值不在选项里（例如字体已被卸载）时按原始值显示。
   const selected = $derived(options.find((option) => option.value === value) ?? { value, label: value });
+
+  /// 把弹层放到 body，避免设置弹窗/滚动区域的 overflow 或 stacking context 裁切它。
+  function portalToBody(node: HTMLUListElement) {
+    document.body.appendChild(node);
+    return {
+      destroy() {
+        node.remove();
+      },
+    };
+  }
 
   function positionList() {
     const rect = trigger?.getBoundingClientRect();
@@ -126,7 +136,7 @@
     <ChevronDown size={14} />
   </button>
   {#if open && listStyle}
-    <ul class="font-list" bind:this={listbox} role="listbox" id={listId} aria-label={ariaLabel}
+    <ul class="font-list" bind:this={listbox} use:portalToBody role="listbox" id={listId} aria-label={ariaLabel}
       style:top={listStyle.top} style:left={listStyle.left} style:min-width={listStyle.minWidth}
       style:max-width={listStyle.maxWidth} style:max-height={listStyle.maxHeight}>
       {#each options as option, index (option.value || "default")}

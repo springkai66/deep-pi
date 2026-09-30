@@ -1183,3 +1183,48 @@ aside.project-sidebar, aside.file-panel, aside.git-sidebar { position: relative;
   color: var(--accent-ink) !important;
   background: var(--accent) !important;
 }
+/* A readable tint sits behind compact controls while the main canvas stays transparent. */
+:root[data-surface-material="glass"][data-color-scheme="dark"] .app-shell {
+  text-shadow: 0 1px 2px color-mix(in srgb, var(--page-bg) 78%, transparent);
+}
+
+:root[data-surface-material="glass"] :is(
+  .topbar,
+  .project-sidebar,
+  .file-panel,
+  .git-sidebar,
+  .task-tabs-shell,
+  .task-tabs,
+  .workspace-switcher,
+  .file-sidebar,
+  .chat-pane > header
+) {
+  background: color-mix(in srgb, var(--page-bg) var(--theme-reading-surface-opacity, 60%), transparent) !important;
+}
+
+:root[data-surface-material="glass"] .chat-pane article:not(.user-message):not(.tool-message) .message-label {
+  width: fit-content;
+  padding: 3px 7px;
+  border-radius: 5px;
+  color: var(--text-strong) !important;
+  background: color-mix(in srgb, var(--page-bg) var(--theme-reading-surface-opacity, 60%), transparent);
+  font-weight: 600;
+}
+
+:root[data-surface-material="glass"] .chat-pane article:not(.user-message):not(.tool-message) .message-content {
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--border-strong) 55%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--page-bg) var(--theme-reading-surface-opacity, 60%), transparent);
+}
+
+:root[data-surface-material="glass"] .chat-pane .user-message .message-content {
+  color: var(--text-strong);
+  background: color-mix(in srgb, var(--accent) 18%, color-mix(in srgb, var(--page-bg) var(--theme-reading-surface-opacity, 60%), transparent));
+}
+
+:root[data-surface-material="glass"] .chat-pane .tool-call,
+:root[data-surface-material="glass"] .chat-pane .tool-call-live-output,
+:root[data-surface-material="glass"] .chat-pane .composer {
+  background: color-mix(in srgb, var(--page-bg) var(--theme-reading-surface-opacity, 60%), transparent) !important;
+}

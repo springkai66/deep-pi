@@ -54,6 +54,8 @@ export interface ThemeEffects {
   transparency?: ThemeTransparencyRange;
   backdropBlur?: number;
   backdropSaturation?: number;
+  /** Opacity for text-bearing surfaces that need contrast over arbitrary desktop backdrops. */
+  readingSurfaceOpacity?: number;
   windowMaterial?: ThemeWindowMaterial;
   ambient?: {
     primaryColor?: string;
@@ -131,8 +133,8 @@ export const FROSTED_GLASS_THEME: ThemePack = {
     borderStrong: "rgba(225, 238, 255, 0.24)",
     text: "#e4edf8",
     textStrong: "#f5f9ff",
-    textMuted: "#9eafc4",
-    textSubtle: "#8194aa",
+    textMuted: "#c4d2e4",
+    textSubtle: "#afc0d6",
     accent: "#8bd5f5",
     accentInk: "#132433",
     statusWaiting: "#f0cf87",
@@ -171,6 +173,7 @@ export const FROSTED_GLASS_THEME: ThemePack = {
     transparency: DEFAULT_THEME_TRANSPARENCY,
     backdropBlur: 16,
     backdropSaturation: 1.2,
+    readingSurfaceOpacity: 60,
     windowMaterial: "acrylic",
     ambient: {
       primaryColor: "#8bd5f5",
@@ -331,6 +334,7 @@ export function themeCssVariables(
     variables["--theme-transparency"] = `${transparency}%`;
     variables["--theme-backdrop-blur"] = `${clampEffectNumber(effects.backdropBlur, 0, 40, 16)}px`;
     variables["--theme-backdrop-saturation"] = `${clampEffectNumber(effects.backdropSaturation, 0, 3, 1.2)}`;
+    variables["--theme-reading-surface-opacity"] = `${clampEffectNumber(effects.readingSurfaceOpacity, 20, 90, 60)}%`;
     setAmbientVariables(variables, effects.ambient);
   } else if (effects?.windowMaterial === "acrylic") {
     setAmbientVariables(variables, effects.ambient);
@@ -388,6 +392,9 @@ function parseThemeEffects(raw: unknown): ThemeEffects | undefined {
   }
   if (typeof source.backdropSaturation === "number" && Number.isFinite(source.backdropSaturation)) {
     effects.backdropSaturation = clampEffectNumber(source.backdropSaturation, 0, 3, 1.2);
+  }
+  if (typeof source.readingSurfaceOpacity === "number" && Number.isFinite(source.readingSurfaceOpacity)) {
+    effects.readingSurfaceOpacity = clampEffectNumber(source.readingSurfaceOpacity, 20, 90, 60);
   }
   if (source.transparency && typeof source.transparency === "object" && !Array.isArray(source.transparency)) {
     const range = source.transparency as Record<string, unknown>;

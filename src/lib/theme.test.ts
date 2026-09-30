@@ -98,6 +98,8 @@ describe("frosted glass built-in theme", () => {
     expect(themeCssVariables(FROSTED_GLASS_THEME, "dark", 20)["--surface"])
       .toBe(`color-mix(in srgb, ${FROSTED_GLASS_THEME.colors.surface} 80%, transparent)`);
     expect(themeCssVariables(FROSTED_GLASS_THEME, "dark", 50)["--theme-transparency"]).toBe("50%");
+    expect(themeCssVariables(FROSTED_GLASS_THEME, "dark")["--theme-reading-surface-opacity"]).toBe("60%");
+    expect(FROSTED_GLASS_THEME.colors.textMuted).toBe("#c4d2e4");
     expect(themeCssVariables(FROSTED_GLASS_THEME, "dark", 100)["--surface"])
       .toBe(`color-mix(in srgb, ${FROSTED_GLASS_THEME.colors.surface} 0%, transparent)`);
     expect(themeCssVariables(FROSTED_GLASS_THEME, "dark", 0)["--surface"])
@@ -106,25 +108,28 @@ describe("frosted glass built-in theme", () => {
       .toBe(COMMAND_FLOW_THEME.colors.surface);
   });
 
-  it("parses and compiles configurable blur, saturation, ambient positions and material", () => {
+  it("parses and compiles blur, reading opacity, ambient positions and material", () => {
     const result = parseThemePack(validTheme({ effects: {
       surfaceMaterial: "glass",
       windowMaterial: "acrylic",
       transparency: { min: 10, max: 80, default: 35 },
       backdropBlur: 22,
       backdropSaturation: 1.7,
+      readingSurfaceOpacity: 68,
       ambient: { primaryColor: "#abc", primaryOpacity: 18, primaryX: 27, primaryY: 63,
         secondaryColor: "#def", secondaryOpacity: 9, secondaryX: 76, secondaryY: 81 },
     } }));
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.theme.effects?.backdropSaturation).toBe(1.7);
+    expect(result.theme.effects?.readingSurfaceOpacity).toBe(68);
     expect(result.theme.effects?.ambient?.primaryX).toBe(27);
     expect(result.theme.effects?.ambient?.secondaryY).toBe(81);
     const variables = themeCssVariables(result.theme, "dark", 45);
     expect(variables["--theme-transparency"]).toBe("45%");
     expect(variables["--theme-backdrop-blur"]).toBe("22px");
     expect(variables["--theme-backdrop-saturation"]).toBe("1.7");
+    expect(variables["--theme-reading-surface-opacity"]).toBe("68%");
     expect(variables["--theme-glow-primary-x"]).toBe("27%");
     expect(variables["--theme-glow-secondary-y"]).toBe("81%");
   });

@@ -39,6 +39,44 @@ async function open(category: Category) {
   }, `${category} panel`);
 }
 
+async function checkFontDropdowns() {
+  const nav = document.getElementById("settings-nav-appearance");
+  assert(nav, "appearance navigation entry");
+  nav.click();
+  await waitFor(() => nav.getAttribute("aria-current") === "page" ? nav : null, "appearance panel");
+  const triggers = [...document.querySelectorAll<HTMLButtonElement>(".font-trigger")];
+  assert(triggers.length === 3, "all three font controls are rendered");
+
+  for (const [index, trigger] of triggers.entries()) {
+    const label = trigger.getAttribute("aria-label") ?? `font ${index + 1}`;
+    assert(trigger.getBoundingClientRect().width > 0, `${label}: trigger is visible`);
+    trigger.scrollIntoView({ block: "center" });
+    await new Promise((resolve) => requestAnimationFrame(() => resolve(undefined)));
+    if (index === 2) {
+      trigger.focus();
+      trigger.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    } else {
+      trigger.click();
+    }
+    const list = await waitFor(() => {
+      const id = trigger.getAttribute("aria-controls");
+      return id ? document.getElementById(id) : null;
+    }, `${label}: options open`);
+    assert(trigger.getAttribute("aria-expanded") === "true", `${label}: expanded state`);
+    assert(list.parentElement === document.body, `${label}: menu escapes settings clipping`);
+    const bounds = list.getBoundingClientRect();
+    assert(bounds.top >= 0 && bounds.bottom <= innerHeight && bounds.left >= 0 && bounds.right <= innerWidth,
+      `${label}: menu is fully inside the viewport`);
+    assert(list.querySelectorAll('[role="option"]').length > 1, `${label}: font options are populated`);
+    const fixtureFont = [...list.querySelectorAll<HTMLButtonElement>('[role="option"]')]
+      .find((option) => option.textContent?.trim() === "Fixture Sans");
+    assert(fixtureFont, `${label}: fixture font option exists`);
+    fixtureFont.click();
+    await waitFor(() => trigger.querySelector(".font-preview")?.textContent?.trim() === "Fixture Sans", `${label}: selection applied`);
+    await waitFor(() => !document.getElementById(list.id), `${label}: menu closes after selection`);
+  }
+}
+
 async function run() {
   const results: string[] = [];
   const search = document.querySelector<HTMLInputElement>('input[aria-label="搜索设置"]');
@@ -64,6 +102,8 @@ async function run() {
   const note = check.nextElementSibling as HTMLElement;
   assert(note?.classList.contains("muted") && getComputedStyle(check).borderBottomStyle === "none" && getComputedStyle(note).borderBottomStyle !== "none", "description belongs to its row");
   results.push("search and setting row layout ok");
+  await checkFontDropdowns();
+  results.push("all font dropdowns open and select");
   const projectAvailable = new URLSearchParams(location.search).has("project");
   for (const category of ["extensions", "mcp", "skills", "workflows"] as const) {
     const root = await open(category);
