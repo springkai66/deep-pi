@@ -1,6 +1,7 @@
 # terminated / WebSocket 调查与修复记录
 
 日期：2026-09-29（本机 UTC+08:00）。
+> 状态更新（2026-09-30）：下文记录了已退役的 Pi RPC 诊断/observer 实现；当前版本不再采集或展示 Pi RPC 诊断事件。
 
 ## 结论与边界
 
@@ -66,7 +67,6 @@ pnpm check
 pnpm test:web
 pnpm test:transport
 cargo test --manifest-path src-tauri/Cargo.toml --lib proxy_relay -- --test-threads=1
-cargo test --manifest-path src-tauri/Cargo.toml --lib diagnostics -- --test-threads=1
 cargo test --manifest-path src-tauri/Cargo.toml --lib pi_transport -- --test-threads=1
 ```
 
@@ -74,7 +74,7 @@ cargo test --manifest-path src-tauri/Cargo.toml --lib pi_transport -- --test-thr
 
 ## 尚未完成的现场判定
 
-原始错误链在旧实现中未被保存，不能事后恢复。新建 RPC 进程会加载观测器；下一次自然发生的故障可以从持久日志区分 `UND_ERR_BODY_TIMEOUT`、`UND_ERR_SOCKET`、WebSocket 异常关闭和宿主进程退出，再与中继方向记录关联。此前订阅额度限制阻止成功回复验收，本轮没有重复探测额度或发送付费请求。
+Pi RPC 诊断面板、诊断事件采集与 transport observer 已移除；当前应用不再生成或导出这些 Pi RPC 诊断记录。本文前述现场证据与实现说明仅作历史存档，不代表当前功能。
 
 ## WebSocket error 后续处理（2026-09-29）
 

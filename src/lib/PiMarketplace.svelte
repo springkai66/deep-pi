@@ -340,9 +340,10 @@
   h1 { margin: 0; font-size: 16px; }
   .page-controls, .group-header { justify-content: space-between; gap: 8px; }
   .page-controls { flex-wrap: wrap; }
-  .scope-switch { display: inline-flex; gap: 2px; padding: 2px; border: 1px solid var(--border-strong); border-radius: 5px; background: var(--page-bg); }
-  .scope-switch button { min-width: 68px; padding: 6px 12px; border: 0; border-radius: 3px; color: var(--text-muted); background: transparent; font-size: 13px; cursor: pointer; }
-  .scope-switch button.active { color: var(--accent-ink); background: var(--accent); font-weight: 700; }
+  .scope-switch { display: inline-flex; gap: 3px; padding: 3px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--surface); box-shadow: inset 0 1px 2px rgb(0 0 0 / 12%); }
+  .scope-switch button { min-width: 68px; min-height: 32px; padding: 6px 12px; border: 0; border-radius: 5px; color: var(--text-muted); background: transparent; font-size: 13px; cursor: pointer; transition: color .15s ease, background .15s ease, box-shadow .15s ease; }
+  .scope-switch button:hover:not(:disabled) { color: var(--text); background: var(--surface-hover); }
+  .scope-switch button.active { color: var(--accent); background: var(--surface-raised); box-shadow: inset 0 -2px var(--accent); font-weight: 700; }
   button:disabled { opacity: .45; cursor: default; }
   h3 { margin: 0; font-size: 14px; font-weight: 650; color: var(--text-strong); }
   .header-actions { gap: 4px; }

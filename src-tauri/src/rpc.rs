@@ -31,7 +31,6 @@ const MAX_OPEN_RPC_RUNS: usize = 32;
 #[derive(Default)]
 pub struct RpcManager {
     runs: Mutex<HashMap<String, RpcRun>>,
-    pub(crate) diagnostics: Arc<crate::diagnostics::Diagnostics>,
 }
 
 impl RpcManager {
@@ -204,10 +203,6 @@ fn start(app: &AppHandle, request: StartRpcRequest) -> Result<TaskRecord, String
         }
     };
     let mut command = Command::new(paths.node_runtime()?);
-    if let Err(error) = crate::pi_transport::configure(&mut command, &paths.cache) {
-        let _ = store.finish_if_active(&record.id, TaskStatus::Failed);
-        return Err(error);
-    }
     command
         .arg(&cli)
         .args(["--mode", "rpc"])
@@ -233,41 +228,40 @@ fn start(app: &AppHandle, request: StartRpcRequest) -> Result<TaskRecord, String
         .runs
         .lock()
         .map_err(|_| "RPC manager lock is poisoned")?;
-    let transport =
-        match RpcTransport::spawn_observed(&mut command, manager.diagnostics.clone(), move |exit| {
-            let manager = exit_app.state::<RpcManager>();
-            if let Ok(mut runs) = manager.runs.lock() {
-                if runs.get(&task_id).is_some_and(|run| run.run_id == exit_run) {
-                    let status = if exit.stopped {
-                        TaskStatus::Cancelled
-                    } else if exit.code == Some(0) {
-                        TaskStatus::Completed
-                    } else {
-                        TaskStatus::Failed
-                    };
-                    if let Err(error) = exit_app
-                        .state::<TaskStore>()
-                        .finish_if_active(&task_id, status)
-                    {
-                        log::error!("Failed to finish RPC task: {error}");
-                    }
-                    runs.remove(&task_id);
-                    // 广播给所有窗口：主窗口（任务标签）与任务看板浮窗都要即时感知退出。
-                    let _ = exit_app.emit(
-                        "rpc-task-exit",
-                        json!({
-                            "taskId":task_id, "runId":exit_run, "status":status,
-                        }),
-                    );
+    let transport = match RpcTransport::spawn(&mut command, move |exit| {
+        let manager = exit_app.state::<RpcManager>();
+        if let Ok(mut runs) = manager.runs.lock() {
+            if runs.get(&task_id).is_some_and(|run| run.run_id == exit_run) {
+                let status = if exit.stopped {
+                    TaskStatus::Cancelled
+                } else if exit.code == Some(0) {
+                    TaskStatus::Completed
+                } else {
+                    TaskStatus::Failed
+                };
+                if let Err(error) = exit_app
+                    .state::<TaskStore>()
+                    .finish_if_active(&task_id, status)
+                {
+                    log::error!("Failed to finish RPC task: {error}");
                 }
-            };
-        }) {
-            Ok(transport) => Arc::new(transport),
-            Err(error) => {
-                let _ = store.finish_if_active(&record.id, TaskStatus::Failed);
-                return Err(error);
+                runs.remove(&task_id);
+                // 广播给所有窗口：主窗口（任务标签）与任务看板浮窗都要即时感知退出。
+                let _ = exit_app.emit(
+                    "rpc-task-exit",
+                    json!({
+                        "taskId":task_id, "runId":exit_run, "status":status,
+                    }),
+                );
             }
         };
+    }) {
+        Ok(transport) => Arc::new(transport),
+        Err(error) => {
+            let _ = store.finish_if_active(&record.id, TaskStatus::Failed);
+            return Err(error);
+        }
+    };
     runs.insert(record.id.clone(), RpcRun { run_id, transport });
     Ok(record)
 }

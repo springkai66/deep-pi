@@ -20,20 +20,16 @@ fn default_app_font_name() -> String {
     String::new()
 }
 
-fn default_app_font_size() -> f32 {
-    13.0
-}
-
 fn default_session_font_name() -> String {
     String::new()
 }
 
-fn default_session_font_size() -> f32 {
-    13.0
+fn default_theme_transparency() -> f32 {
+    50.0
 }
 
 fn default_code_font() -> String {
-    "cascadia".into()
+    String::new()
 }
 
 fn default_close_behavior() -> String {
@@ -85,7 +81,7 @@ fn default_notify_on_task_complete() -> bool {
 }
 
 fn default_pet_enabled() -> bool {
-    true
+    false
 }
 
 fn default_pet_always_on_top() -> bool {
@@ -191,16 +187,20 @@ pub struct AppSettings {
     pub color_mode: String,
     #[serde(default = "default_theme", deserialize_with = "deserialize_theme")]
     pub theme: String,
-    /// 应用程序字体（本机字体族名）；空串表示使用默认字体栈。
+    /// 应用程序字体族名；空串表示跟随主题。
     #[serde(default = "default_app_font_name")]
     pub app_font_name: String,
-    #[serde(default = "default_app_font_size")]
-    pub app_font_size: f32,
-    /// 会话窗口字体（对话/终端）；空串表示使用默认字体栈。
+    #[serde(default)]
+    pub app_font_size: Option<f32>,
+    /// 通用主题透明度；兼容读取旧配置字段 glassTransparency。
+    #[serde(default = "default_theme_transparency", alias = "glassTransparency")]
+    pub theme_transparency: f32,
+
+    /// 会话窗口字体族名（对话/终端）；空串表示跟随主题。
     #[serde(default = "default_session_font_name")]
     pub session_font_name: String,
-    #[serde(default = "default_session_font_size")]
-    pub session_font_size: f32,
+    #[serde(default)]
+    pub session_font_size: Option<f32>,
     #[serde(default = "default_code_font")]
     pub code_font: String,
     #[serde(default = "default_close_behavior")]
@@ -275,9 +275,10 @@ impl Default for AppSettings {
             color_mode: default_color_mode(),
             theme: default_theme(),
             app_font_name: default_app_font_name(),
-            app_font_size: default_app_font_size(),
+            app_font_size: None,
+            theme_transparency: default_theme_transparency(),
             session_font_name: default_session_font_name(),
-            session_font_size: default_session_font_size(),
+            session_font_size: None,
             code_font: default_code_font(),
             close_behavior: default_close_behavior(),
             external_editor: None,
@@ -523,9 +524,14 @@ fn validate(settings: &AppSettings) -> Result<(), String> {
         (settings.app_font_size, "appFontSize"),
         (settings.session_font_size, "sessionFontSize"),
     ] {
-        if !size.is_finite() || !(9.0..=32.0).contains(&size) {
+        if size.is_some_and(|value| !value.is_finite() || !(9.0..=32.0).contains(&value)) {
             return Err(format!("{label} must be between 9 and 32"));
         }
+    }
+    if !settings.theme_transparency.is_finite()
+        || !(0.0..=100.0).contains(&settings.theme_transparency)
+    {
+        return Err("themeTransparency must be between 0 and 100".into());
     }
     if !matches!(
         settings.close_behavior.as_str(),
@@ -587,11 +593,15 @@ pub async fn save_settings(app: AppHandle, settings: AppSettings) -> Result<(), 
     tauri::async_runtime::spawn_blocking(move || {
         let store = app.state::<SettingsStore>();
         // 桌宠显隐只在开关真的翻转时动作：否则每次保存别的设置都会把桌宠弹出来。
-        let previous_pet_enabled = store.get().map(|current| current.pet_enabled).ok();
+        let previous_settings = store.get().ok();
+        let previous_pet_enabled = previous_settings
+            .as_ref()
+            .map(|current| current.pet_enabled);
         store.save(settings)?;
         // 保存成功后立即应用：新启动的任务/会话就用新代理；运行中的 DSH/Pi 子进程
         // 走的是地址恒定的回环中继，切换在上游侧即时生效，无需重启它们。
         let saved = store.get()?;
+
         crate::proxy::configure(&saved);
         // OAuth 桥接也走恒定的回环中继；代理变化无需重建长期驻留的桥接进程。
         // 桌宠置顶设置即时生效到已打开的浮窗（未打开则无操作）。
@@ -626,16 +636,33 @@ mod tests {
         .expect("old settings should load");
 
         assert_eq!(settings.color_mode, "system");
-        assert_eq!(settings.code_font, "cascadia");
+        assert_eq!(settings.code_font, "");
         assert_eq!(settings.close_behavior, "ask");
         assert_eq!(settings.pi_environment, "managed");
         assert!(settings.external_editor.is_none());
         assert!(settings.skipped_updates.is_empty());
         assert!(settings.snoozed_updates.is_empty());
         assert_eq!(settings.app_font_name, "");
-        assert_eq!(settings.app_font_size, 13.0);
+        assert_eq!(settings.app_font_size, None);
+        assert_eq!(settings.theme_transparency, 50.0);
+
         assert_eq!(settings.session_font_name, "");
-        assert_eq!(settings.session_font_size, 13.0);
+        assert_eq!(settings.session_font_size, None);
+        assert!(!settings.pet_enabled);
+    }
+
+    #[test]
+    fn pet_visibility_defaults_off_but_respects_explicit_enablement() {
+        assert!(!AppSettings::default().pet_enabled);
+
+        let settings: AppSettings = serde_json::from_value(serde_json::json!({
+            "schemaVersion": 1,
+            "maxConcurrentTasks": 3,
+            "lastProject": null,
+            "petEnabled": true,
+        }))
+        .expect("settings with an explicitly enabled pet should load");
+        assert!(settings.pet_enabled);
     }
 
     #[test]
@@ -752,10 +779,23 @@ mod tests {
         };
         assert!(super::validate(&settings).is_err());
         let settings = AppSettings {
-            session_font_size: 40.0,
+            session_font_size: Some(40.0),
             ..AppSettings::default()
         };
         assert!(super::validate(&settings).is_err());
+    }
+
+    #[test]
+    fn theme_transparency_is_limited_to_the_supported_range() {
+        let mut settings = AppSettings::default();
+        for value in [0.0, 50.0, 100.0] {
+            settings.theme_transparency = value;
+            assert!(super::validate(&settings).is_ok());
+        }
+        for value in [-1.0, 101.0, f32::NAN] {
+            settings.theme_transparency = value;
+            assert!(super::validate(&settings).is_err());
+        }
     }
 
     #[test]
@@ -983,6 +1023,7 @@ mod tests {
                 schema_version: 1,
                 max_concurrent_tasks: 5,
                 last_project: Some("F:/project".into()),
+                theme_transparency: 37.0,
                 ..AppSettings::default()
             })
             .expect("settings should save");
@@ -995,6 +1036,14 @@ mod tests {
                 .max_concurrent_tasks,
             5
         );
+        assert_eq!(
+            reopened
+                .get()
+                .expect("settings should read")
+                .theme_transparency,
+            37.0
+        );
+
         assert_eq!(
             std::fs::read_dir(backups)
                 .expect("backups should list")

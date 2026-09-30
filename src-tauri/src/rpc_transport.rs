@@ -11,8 +11,7 @@ use std::{
     time::Duration,
 };
 
-use crate::diagnostics::{DiagnosticCode, Diagnostics};
-use crate::message::{message_code, msg};
+use crate::message::msg;
 use crate::rpc_history::{history_response_id, HistorySnapshot, MAX_HISTORY_BYTES};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -205,8 +204,6 @@ struct Shared {
     stop: AtomicBool,
     requested_stop: AtomicBool,
     exit: Mutex<Option<RpcExit>>,
-    diagnostics: Arc<Diagnostics>,
-    diagnostic_run: u64,
     exited: Condvar,
 }
 
@@ -218,32 +215,6 @@ impl Shared {
     }
 
     fn receive(&self, mut value: Value) {
-        if value["type"] == "deeppi_transport_diagnostic" {
-            if let Some(failure) = crate::pi_transport::TransportFailure::parse(&value["transport"])
-            {
-                self.diagnostics
-                    .record_transport(self.diagnostic_run, failure);
-            }
-            // Private host diagnostics must not enter conversation history or UI event replay.
-            return;
-        }
-        let diagnostic = match value["type"].as_str() {
-            Some("auto_retry_start") => Some(DiagnosticCode::ModelRetryStart),
-            Some("auto_retry_end") if value["success"] == true => {
-                Some(DiagnosticCode::ModelRetrySucceeded)
-            }
-            Some("auto_retry_end") => Some(DiagnosticCode::ModelRetryExhausted),
-            Some("message_end")
-                if value["message"]["role"] == "assistant"
-                    && value["message"]["errorMessage"] == "terminated" =>
-            {
-                Some(DiagnosticCode::ModelStreamTerminated)
-            }
-            _ => None,
-        };
-        if let Some(code) = diagnostic {
-            self.diagnostics.record(self.diagnostic_run, code, 1, None);
-        }
         if value["type"] == "response" {
             if let Some(id) = value["id"].as_str() {
                 let reply = self
@@ -281,12 +252,6 @@ impl Shared {
                                 }
                             })
                     } else {
-                        self.diagnostics.record(
-                            self.diagnostic_run,
-                            DiagnosticCode::ResponseFailed,
-                            1,
-                            None,
-                        );
                         Err(value["error"]
                             .as_str()
                             .unwrap_or("RPC command failed")
@@ -354,39 +319,15 @@ pub struct RpcTransport {
 }
 
 impl RpcTransport {
-    #[cfg(test)]
     pub fn spawn(
         command: &mut Command,
         on_exit: impl FnOnce(RpcExit) + Send + 'static,
     ) -> Result<Self, String> {
-        Self::spawn_observed(command, Arc::new(Diagnostics::default()), on_exit)
-    }
-
-    pub fn spawn_observed(
-        command: &mut Command,
-        diagnostics: Arc<Diagnostics>,
-        on_exit: impl FnOnce(RpcExit) + Send + 'static,
-    ) -> Result<Self, String> {
-        let diagnostic_run = diagnostics.begin_run();
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let (mut child, tree) =
-            crate::process_runner::spawn_owned_detailed(command).map_err(|failure| {
-                use crate::process_runner::SpawnFailureKind;
-                let code = match failure.kind {
-                    SpawnFailureKind::NotFound => DiagnosticCode::SpawnNotFound,
-                    SpawnFailureKind::PermissionDenied => DiagnosticCode::SpawnDenied,
-                    SpawnFailureKind::Ownership => DiagnosticCode::ProcessOwnershipFailed,
-                    SpawnFailureKind::Resume => DiagnosticCode::ProcessResumeFailed,
-                    SpawnFailureKind::Spawn | SpawnFailureKind::Unsupported => {
-                        DiagnosticCode::SpawnFailed
-                    }
-                };
-                diagnostics.record(diagnostic_run, code, 1, None);
-                failure.message
-            })?;
+        let (mut child, tree) = crate::process_runner::spawn_owned(command)?;
         let mut stdin = child.stdin.take().ok_or("RPC stdin unavailable")?;
         let mut stdout = child.stdout.take().ok_or("RPC stdout unavailable")?;
         let mut stderr = child.stderr.take().ok_or("RPC stderr unavailable")?;
@@ -396,8 +337,6 @@ impl RpcTransport {
             stop: AtomicBool::new(false),
             requested_stop: AtomicBool::new(false),
             exit: Mutex::new(None),
-            diagnostics,
-            diagnostic_run,
             exited: Condvar::new(),
         });
         let (input, receiver) = mpsc::sync_channel::<Vec<u8>>(16);
@@ -407,12 +346,6 @@ impl RpcTransport {
                 match receiver.recv_timeout(Duration::from_millis(100)) {
                     Ok(bytes) => {
                         if stdin.write_all(&bytes).and_then(|_| stdin.flush()).is_err() {
-                            writer_state.diagnostics.record(
-                                writer_state.diagnostic_run,
-                                DiagnosticCode::InputWriteFailed,
-                                1,
-                                None,
-                            );
                             writer_state.stop.store(true, Ordering::Release);
                             break;
                         }
@@ -448,58 +381,23 @@ impl RpcTransport {
             })();
             if let Err(error) = result {
                 if !reader_state.requested_stop.load(Ordering::Acquire) {
-                    let code = match message_code(&error).unwrap_or(error.as_str()) {
-                        "Cannot read RPC output" => DiagnosticCode::OutputReadFailed,
-                        "RPC frame exceeded the size limit" => DiagnosticCode::FrameTooLarge,
-                        "Invalid RPC JSON frame" | "RPC frame must be an object" => {
-                            DiagnosticCode::InvalidJson
-                        }
-                        "RPC exited with an incomplete frame" => DiagnosticCode::IncompleteFrame,
-                        "Cannot spool RPC history"
-                        | "Cannot read spooled RPC history"
-                        | "Cannot read RPC history"
-                        | "rpc.history.response_invalid"
-                        | "rpc.history.response_trailing_content"
-                        | "rpc.history.spool_failed" => DiagnosticCode::HistoryFailed,
-                        _ => DiagnosticCode::OutputInvalid,
-                    };
-                    reader_state
-                        .diagnostics
-                        .record(reader_state.diagnostic_run, code, 1, None);
                     reader_state.publish(json!({"type":"rpc_error","error":error}));
                 }
             }
             reader_state.stop.store(true, Ordering::Release);
             let _ = reader_done.send(());
         });
-        let diagnostic_state = shared.clone();
         // Drain stderr without retaining raw text, which may contain prompts or credentials.
-        let (diagnostic_done, diagnostics_drained) = mpsc::sync_channel(1);
+        let (stderr_done, stderr_drained) = mpsc::sync_channel(1);
         thread::spawn(move || {
             let mut buffer = [0; 8192];
             loop {
                 match stderr.read(&mut buffer) {
-                    Ok(0) => break,
-                    Ok(count) => {
-                        diagnostic_state.diagnostics.record(
-                            diagnostic_state.diagnostic_run,
-                            DiagnosticCode::StderrObserved,
-                            count as u64,
-                            None,
-                        );
-                    }
-                    Err(_) => {
-                        diagnostic_state.diagnostics.record(
-                            diagnostic_state.diagnostic_run,
-                            DiagnosticCode::StderrReadFailed,
-                            1,
-                            None,
-                        );
-                        break;
-                    }
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
                 }
             }
-            let _ = diagnostic_done.send(());
+            let _ = stderr_done.send(());
         });
         let exit_state = shared.clone();
         thread::spawn(move || {
@@ -523,17 +421,11 @@ impl RpcTransport {
                 status = child.wait().ok();
             }
             let _ = drained.recv_timeout(Duration::from_secs(2));
-            let _ = diagnostics_drained.recv_timeout(Duration::from_secs(1));
+            let _ = stderr_drained.recv_timeout(Duration::from_secs(1));
             let exit = RpcExit {
                 code: status.and_then(|status| status.code()),
                 stopped,
             };
-            exit_state.diagnostics.record(
-                exit_state.diagnostic_run,
-                DiagnosticCode::ProcessExit,
-                1,
-                exit.code,
-            );
             if let Ok(mut pending) = exit_state.pending.lock() {
                 for (_, reply) in pending.drain() {
                     let _ = reply.sender.send(Err("RPC process exited".into()));
@@ -609,15 +501,9 @@ impl RpcTransport {
             pending.insert(id.clone(), Reply { sender, history });
         }
         let result = self.notify(command).and_then(|_| {
-            receiver.recv_timeout(timeout).map_err(|_| {
-                self.shared.diagnostics.record(
-                    self.shared.diagnostic_run,
-                    DiagnosticCode::RequestTimeout,
-                    1,
-                    None,
-                );
-                "RPC request timed out".to_owned()
-            })?
+            receiver
+                .recv_timeout(timeout)
+                .map_err(|_| "RPC request timed out".to_owned())?
         });
         if let Ok(mut pending) = self.shared.pending.lock() {
             pending.remove(&id);
@@ -634,15 +520,9 @@ impl RpcTransport {
             return Err("RPC command exceeded the size limit".into());
         }
         bytes.push(b'\n');
-        self.input.try_send(bytes).map_err(|_| {
-            self.shared.diagnostics.record(
-                self.shared.diagnostic_run,
-                DiagnosticCode::InputQueueFull,
-                1,
-                None,
-            );
-            "RPC input queue is full or closed".to_owned()
-        })?;
+        self.input
+            .try_send(bytes)
+            .map_err(|_| "RPC input queue is full or closed".to_owned())?;
         if command["type"] == "extension_ui_response" {
             if let Some(id) = command["id"].as_str() {
                 self.shared
@@ -665,24 +545,10 @@ impl RpcTransport {
             subscriber(event)?;
         }
         journal.subscriber = Some(subscriber);
-        if journal.dropped > 0 {
-            self.shared.diagnostics.record(
-                self.shared.diagnostic_run,
-                DiagnosticCode::ReplayGap,
-                journal.dropped,
-                None,
-            );
-        }
         Ok(journal.dropped)
     }
 
     pub fn shutdown(&self, timeout: Duration) -> Result<(), String> {
-        self.shared.diagnostics.record(
-            self.shared.diagnostic_run,
-            DiagnosticCode::StopRequested,
-            1,
-            None,
-        );
         self.shared.requested_stop.store(true, Ordering::Release);
         self.shared.stop.store(true, Ordering::Release);
         let exit = self
@@ -698,12 +564,6 @@ impl RpcTransport {
         if exit.is_some() {
             Ok(())
         } else {
-            self.shared.diagnostics.record(
-                self.shared.diagnostic_run,
-                DiagnosticCode::StopTimeout,
-                1,
-                None,
-            );
             Err("RPC process did not stop in time".into())
         }
     }

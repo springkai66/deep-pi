@@ -83,10 +83,6 @@ export const EN_SHELL: Record<string, string> = {
   "重启 Pi 任务": "Restart Pi tasks",
   "重启 {count} 个运行中的 Pi 任务吗？会话内容保留，正在切换中的任务将被跳过。":
     "Restart {count} running Pi tasks? Session content is kept, and tasks that are switching modes will be skipped.",
-  "诊断操作正在处理，请完成或取消后再关闭窗口":
-    "A diagnostics operation is in progress. Finish or cancel it before closing the window.",
-  "诊断操作正在处理，请先完成或取消操作":
-    "A diagnostics operation is in progress. Finish or cancel it first.",
   "项目文件正在处理，请完成后再关闭窗口":
     "Project files are being processed. Finish that work before closing the window.",
   "组件操作正在处理，请完成或取消后再关闭窗口":
@@ -95,9 +91,6 @@ export const EN_SHELL: Record<string, string> = {
     "A Git write is in progress. Finish it before closing the window.",
   "任务正在切换模式，请完成后再关闭窗口":
     "A task is switching modes. Finish it before closing the window.",
-  "清空诊断记录": "Clear diagnostics",
-  "清空本次应用运行的 Pi RPC 诊断记录？不会删除任务和会话。":
-    "Clear the Pi RPC diagnostics from this app run? Tasks and sessions will not be deleted.",
   "扩展操作正在处理，请先完成或取消操作":
     "An extension operation is in progress. Finish or cancel it first.",
 

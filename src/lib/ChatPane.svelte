@@ -1692,6 +1692,10 @@
   /// 返回 "blocked" 时保留草稿（错误提示可读、可直接改）。
   async function runSlashCommand(name: string, args: string): Promise<"handled" | "prompt" | "blocked"> {
     const route = slashCommandRoute(name, piCommands);
+    if (route === "blocked") {
+      notice = t("当前命令无法在图形界面执行");
+      return "blocked";
+    }
     if (route === "host") {
       const previousDraft = draft;
       const outcome = await runHostSlash(
@@ -2412,9 +2416,9 @@
   .turn-total { max-width: 900px; margin: -14px auto 24px; padding-left: 2px; color: var(--text-muted); font-size: 11px; font-family: var(--code-font); }
   .message-content { min-width: 0; overflow-wrap: anywhere; line-height: 1.7; color: var(--text); font-family: var(--session-font, var(--text-font)); font-size: var(--session-font-size, 13px); }
   .plain-message { white-space: pre-wrap; }
-  .scroll-actions { height: 0; position: relative; display: flex; justify-content: center; z-index: 1; }
-  .scroll-actions-row { position: absolute; bottom: 10px; display: flex; align-items: center; gap: 8px; }
-  .scroll-actions-row button { display: grid; place-items: center; padding: 0; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--surface); color: var(--text); }
+  .scroll-actions { height: 0; position: relative; display: flex; justify-content: flex-end; z-index: 1; pointer-events: none; }
+  .scroll-actions-row { position: absolute; right: clamp(12px, 3vw, 32px); bottom: 10px; display: flex; align-items: center; gap: 8px; pointer-events: auto; }
+  .scroll-actions-row button { display: grid; place-items: center; padding: 0; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--surface); color: var(--text); box-shadow: 0 4px 14px rgb(0 0 0 / 12%); }
   .scroll-actions-row > button:first-child { width: 30px; height: 30px; flex-shrink: 0; }
   /* 上滚时的实时胶囊：正在执行的工具 + 耗时 + 活跃点，点击回到底部。 */
   .live-chip { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 12px; border-radius: 999px !important; font-size: 11px; font-family: var(--code-font); max-width: min(560px, 80vw); }

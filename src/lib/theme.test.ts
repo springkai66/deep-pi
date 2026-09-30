@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  BUILT_IN_THEMES,
   COMMAND_FLOW_THEME,
   DEFAULT_THEME_ID,
+  DEFAULT_THEME_TRANSPARENCY,
+  FROSTED_GLASS_THEME,
+  GLASS_THEME_ID,
+  clampThemeTransparency,
   parseThemeFile,
   parseThemePack,
   resolveTheme,
@@ -9,6 +14,7 @@ import {
   serializeTheme,
   themeCssVariables,
   themeFileName,
+  themeTransparencyRange,
   type ThemePack,
 } from "./theme";
 
@@ -75,6 +81,55 @@ describe("theme pack parsing", () => {
   });
 });
 
+describe("frosted glass built-in theme", () => {
+  it("is available as a built-in with light and dark palettes", () => {
+    expect(BUILT_IN_THEMES.map((theme) => theme.id)).toContain(GLASS_THEME_ID);
+    expect(resolveTheme(GLASS_THEME_ID)).toBe(FROSTED_GLASS_THEME);
+    expect(resolveThemeColors(FROSTED_GLASS_THEME, "light").pageBg).toBe(FROSTED_GLASS_THEME.light?.pageBg);
+    expect(resolveThemeColors(FROSTED_GLASS_THEME, "dark").pageBg).toBe(FROSTED_GLASS_THEME.colors.pageBg);
+  });
+
+  it("limits transparency to 0–100%, defaults to 50%, and only applies it to glass surfaces", () => {
+    expect(DEFAULT_THEME_TRANSPARENCY).toEqual({ min: 0, max: 100, default: 50 });
+    expect(themeTransparencyRange(FROSTED_GLASS_THEME)).toEqual(DEFAULT_THEME_TRANSPARENCY);
+    expect(clampThemeTransparency(-3)).toBe(0);
+    expect(clampThemeTransparency(140)).toBe(100);
+    expect(clampThemeTransparency(Number.NaN)).toBe(50);
+    expect(themeCssVariables(FROSTED_GLASS_THEME, "dark", 20)["--surface"])
+      .toBe(`color-mix(in srgb, ${FROSTED_GLASS_THEME.colors.surface} 80%, transparent)`);
+    expect(themeCssVariables(FROSTED_GLASS_THEME, "dark", 50)["--theme-transparency"]).toBe("50%");
+    expect(themeCssVariables(FROSTED_GLASS_THEME, "dark", 100)["--surface"])
+      .toBe(`color-mix(in srgb, ${FROSTED_GLASS_THEME.colors.surface} 0%, transparent)`);
+    expect(themeCssVariables(FROSTED_GLASS_THEME, "dark", 0)["--surface"])
+      .toBe(FROSTED_GLASS_THEME.colors.surface);
+    expect(themeCssVariables(COMMAND_FLOW_THEME, "dark", 80)["--surface"])
+      .toBe(COMMAND_FLOW_THEME.colors.surface);
+  });
+
+  it("parses and compiles configurable blur, saturation, ambient positions and material", () => {
+    const result = parseThemePack(validTheme({ effects: {
+      surfaceMaterial: "glass",
+      windowMaterial: "acrylic",
+      transparency: { min: 10, max: 80, default: 35 },
+      backdropBlur: 22,
+      backdropSaturation: 1.7,
+      ambient: { primaryColor: "#abc", primaryOpacity: 18, primaryX: 27, primaryY: 63,
+        secondaryColor: "#def", secondaryOpacity: 9, secondaryX: 76, secondaryY: 81 },
+    } }));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.theme.effects?.backdropSaturation).toBe(1.7);
+    expect(result.theme.effects?.ambient?.primaryX).toBe(27);
+    expect(result.theme.effects?.ambient?.secondaryY).toBe(81);
+    const variables = themeCssVariables(result.theme, "dark", 45);
+    expect(variables["--theme-transparency"]).toBe("45%");
+    expect(variables["--theme-backdrop-blur"]).toBe("22px");
+    expect(variables["--theme-backdrop-saturation"]).toBe("1.7");
+    expect(variables["--theme-glow-primary-x"]).toBe("27%");
+    expect(variables["--theme-glow-secondary-y"]).toBe("81%");
+  });
+});
+
 describe("theme resolution", () => {
   it("prefers built-in themes over imported ones with the same id", () => {
     const impostor: ThemePack = { ...COMMAND_FLOW_THEME, name: "冒名主题" };
@@ -119,6 +174,17 @@ describe("theme serialization", () => {
     if (!parsed.ok) return;
     expect(parsed.theme.colors).toEqual(COMMAND_FLOW_THEME.colors);
     expect(parsed.theme.typography?.codeFont).toBe(COMMAND_FLOW_THEME.typography?.codeFont);
+    expect(parsed.theme.typography?.appFont).toBe(COMMAND_FLOW_THEME.typography?.appFont);
+    expect(parsed.theme.typography?.sessionFont).toBe(COMMAND_FLOW_THEME.typography?.sessionFont);
+    expect(parsed.theme.typography?.appFontSize).toBe(COMMAND_FLOW_THEME.typography?.appFontSize);
+    expect(parsed.theme.typography?.sessionFontSize).toBe(COMMAND_FLOW_THEME.typography?.sessionFontSize);
+  });
+  it("round-trips the glass effects and typography configuration", () => {
+    const parsed = parseThemePack(JSON.parse(serializeTheme(FROSTED_GLASS_THEME)));
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.theme.effects).toEqual(FROSTED_GLASS_THEME.effects);
+    expect(parsed.theme.typography).toEqual(FROSTED_GLASS_THEME.typography);
   });
 
   it("builds a filesystem-safe export file name", () => {

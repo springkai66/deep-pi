@@ -1,5 +1,14 @@
 /** 英文目录（模型设置、DSH 服务、运行时与更新、外部编辑器）。键 = 简体中文原文。 */
 export const EN_SETTINGS: Record<string, string> = {
+  "磨砂玻璃": "Frosted Glass",
+  "磨玻璃透明程度": "Glass transparency",
+  "0% 为不透明，数值越高越透明。": "0% is opaque; higher values are more transparent.",
+  "柔和的蓝紫色磨砂玻璃界面，可调整面板透明程度。": "A soft blue-violet frosted-glass interface with adjustable panel transparency.",
+  "搜索设置": "Search settings",
+  "没有匹配的设置": "No matching settings",
+  "服务与模型": "Service and models",
+  "扩展与能力": "Extensions and capabilities",
+  "运行环境与关于": "Environment and about",
   "订阅模型列表": "Subscription models",
   "搜索订阅模型": "Search subscription models",
   "没有匹配的模型": "No matching models",
@@ -250,6 +259,10 @@ export const EN_SETTINGS: Record<string, string> = {
   "应用更新": "App update",
   "安装更新": "Install update",
   "检查应用更新": "Check for app updates",
+  "应用更新进度": "App update progress",
+  "下载中 {percent}% · {done} / {total}": "Downloading {percent}% · {done} / {total}",
+  "下载中 · 已下载 {done}": "Downloading · {done} downloaded",
+  "安装中 约 {percent}%（按时间估算）": "Installing ~{percent}% (estimated from elapsed time)",
   "未知错误": "Unknown error",
   "无法连接更新服务器：{detail}。请确认系统本身能访问更新服务器；若使用手动代理，请检查代理地址及服务是否可用。":
     "Could not reach the update server: {detail}. Make sure your system can reach it; if using a manual proxy, check its address and that the proxy service is available.",
@@ -311,10 +324,6 @@ export const EN_SETTINGS: Record<string, string> = {
   "测试中…": "Testing…",
   "连接成功（{result}）": "Connected ({result})",
   "连接失败：{error}": "Connection failed: {error}",
-  "代理作用于 Pi / DSH 子进程（含模型请求与 Advisor）、运行时下载、扩展市场与 DeepPi 自身的模型调用；Provider 单独配置的代理优先。跟随系统以 Windows 系统代理设置为准，不把残留的 HTTP_PROXY 当作系统设置；手动设置可覆盖系统代理。已打开的 Pi/DSH 会话无需重启（见下），应用内更新检查需重启应用。系统使用 PAC/自动配置时，Pi/DSH 子进程按目标解析 PAC；DeepPi 自身的出站（更新检查、运行时下载）按操作系统路由。":
-    "The proxy applies to Pi/DSH child processes (including model requests and Advisor), runtime downloads, the extension marketplace, and DeepPi's own model calls; a provider's own proxy takes precedence. Follow system uses the Windows proxy setting, not a leftover HTTP_PROXY variable; Manual can override it. Open Pi/DSH sessions do not need a restart (see below); in-app update checks do need an app restart. With PAC/auto-config, Pi/DSH child processes evaluate PAC per target, while DeepPi's own outbound traffic (update checks, runtime downloads) uses the OS route.",
-  "子进程始终指向本机回环中继，因此切换模式或改变系统代理后，新请求立即走新路径，无需重启已打开的会话；中继按请求目标解析系统设置（含 PAC 与按协议分流）。唯一例外是手动填写 https:// 上游代理：中继只承载 http:// 上游，此时已打开的会话仍需重启任务。":
-    "Child processes always point at a loopback relay, so after switching modes or changing the system proxy, new requests take the new path immediately without restarting open sessions; the relay resolves the system settings per request target (including PAC and per-scheme routing). The only exception is a manual https:// upstream proxy: the relay carries http:// upstreams only, so open sessions still need a task restart.",
   // —— 通知与桌宠 ——
   "通知与桌宠": "Notifications & pet",
   "任务完成通知": "Task completion notifications",

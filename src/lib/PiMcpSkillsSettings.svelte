@@ -16,6 +16,32 @@
     config: Record<string, unknown>;
   }
 
+  interface PiMcpServerStatus {
+    name: string;
+    scope: "global" | "project";
+    enabled: boolean;
+    exposure: string;
+    transport: string;
+    state: string;
+    tools: string[];
+    error?: string | null;
+    resources?: number | null;
+    resourceTemplates?: number | null;
+  }
+
+  interface PiMcpListResult {
+    available: boolean;
+    servers: PiMcpServerStatus[];
+    errors: string[];
+    note: string | null;
+  }
+
+  interface PiCodemodeSettings {
+    enabled: boolean;
+    mode: "on" | "only";
+    inlineBudget: number;
+  }
+
   interface SkillEntry {
     name: string;
     description: string;
@@ -203,6 +229,14 @@
   let scope = $state<"global" | "project">("global");
   let tab = $state<"installed" | "market">("installed");
   let servers = $state<McpServerEntry[]>([]);
+  let piMcpStatus = $state<PiMcpListResult>({ available: false, servers: [], errors: [], note: null });
+  let piMcpStatusLoading = $state(false);
+  let piMcpStatusRequest = 0;
+  let codemodeSettings = $state<PiCodemodeSettings>({ enabled: false, mode: "on", inlineBudget: 3000 });
+  let codemodeLoading = $state(false);
+  let codemodeSaving = $state(false);
+  let codemodeNotice = $state("");
+  let codemodeRequest = 0;
   let skills = $state<SkillEntry[]>([]);
   let loading = $state(false);
   let busy = $state(false);
@@ -287,7 +321,7 @@
     if (!canUseProjectScope && scope === "project") scope = "global";
   });
   const componentBusy = $derived(
-    busy ||
+    busy || codemodeSaving ||
       busyMcpEntry !== null ||
       busySkillEntry !== null ||
       busyWorkflowEntry !== null ||
@@ -400,14 +434,20 @@
   });
 
   async function refresh() {
+    const requestedScope = scope;
+    const requestedProjectPath = projectPath;
     loading = true;
     try {
       if (mode === "mcp") {
-        servers = await invoke<McpServerEntry[]>("list_mcp_servers", { scope, projectPath });
+        servers = await invoke<McpServerEntry[]>("list_mcp_servers", { scope: requestedScope, projectPath: requestedProjectPath });
+        // Reading the config is safe on panel open. Connecting stdio/HTTP servers is explicit via
+        // “Check connections”, since `pi mcp list` starts every enabled server.
+        piMcpStatus = { available: false, servers: [], errors: [], note: null };
+        void refreshCodemodeSettings(requestedScope, requestedProjectPath);
       } else if (mode === "skills") {
-        skills = await invoke<SkillEntry[]>("list_skills", { scope, projectPath });
+        skills = await invoke<SkillEntry[]>("list_skills", { scope: requestedScope, projectPath: requestedProjectPath });
       } else {
-        installedWorkflows = await invoke<InstalledWorkflow[]>("list_installed_workflows", { scope, projectPath });
+        installedWorkflows = await invoke<InstalledWorkflow[]>("list_installed_workflows", { scope: requestedScope, projectPath: requestedProjectPath });
       }
     } catch (error) {
       onError(error);
@@ -415,6 +455,40 @@
       loading = false;
     }
   }
+
+  async function refreshPiMcpStatus(requestedScope: "global" | "project", requestedProjectPath: string | null) {
+    const request = ++piMcpStatusRequest;
+    piMcpStatusLoading = true;
+    try {
+      const result = await invoke<PiMcpListResult>("pi_mcp_list_servers", {
+        request: { scope: requestedScope, projectPath: requestedProjectPath },
+      });
+      if (request === piMcpStatusRequest) piMcpStatus = result;
+    } catch (error) {
+      if (request === piMcpStatusRequest) {
+        piMcpStatus = { available: false, servers: [], errors: [], note: tm(String(error)) };
+      }
+    } finally {
+      if (request === piMcpStatusRequest) piMcpStatusLoading = false;
+    }
+  }
+
+  async function refreshCodemodeSettings(requestedScope: "global" | "project", requestedProjectPath: string | null) {
+    const request = ++codemodeRequest;
+    codemodeLoading = true;
+    try {
+      const result = await invoke<PiCodemodeSettings>("pi_codemode_settings", {
+        scope: requestedScope,
+        projectPath: requestedProjectPath,
+      });
+      if (request === codemodeRequest) codemodeSettings = result;
+    } catch (error) {
+      if (request === codemodeRequest) onError(error);
+    } finally {
+      if (request === codemodeRequest) codemodeLoading = false;
+    }
+  }
+
 
   onMount(() => {
     mountedMode = mode;
@@ -435,6 +509,65 @@
       return args ? `${config.command} ${args}` : String(config.command);
     }
     return t("未配置传输方式");
+  }
+
+  function nativeMcpStatus(entry: McpServerEntry): PiMcpServerStatus | undefined {
+    return piMcpStatus.servers.find((server) => server.name === entry.name && server.scope === scope);
+  }
+
+  function mcpStatusLabel(status: PiMcpServerStatus | undefined): string {
+    if (!status) return piMcpStatusLoading ? t("正在检测连接…") : t("尚未检测");
+    if (!status.enabled || status.state === "disabled") return t("已禁用");
+    if (status.state === "connected") return t("已连接 · {count} 个工具", { count: status.tools.length });
+    if (status.state === "needs-auth") return t("需要登录");
+    if (status.state === "failed") return t("连接失败");
+    return status.state;
+  }
+
+  function mcpCanSignIn(entry: McpServerEntry): boolean {
+    if (typeof entry.config.url !== "string") return false;
+    const headers = entry.config.headers;
+    return !(typeof headers === "object" && headers !== null &&
+      Object.keys(headers).some((key) => key.toLowerCase() === "authorization"));
+  }
+
+  async function runMcpAuthAction(entry: McpServerEntry, action: "login" | "logout") {
+    busy = true;
+    statusMessage = "";
+    try {
+      await invoke(action === "login" ? "pi_mcp_login" : "pi_mcp_logout", {
+        request: { name: entry.name, scope, projectPath },
+      });
+      statusMessage = action === "login"
+        ? t("已完成 MCP 服务 {name} 登录", { name: entry.name })
+        : t("已退出 MCP 服务 {name}", { name: entry.name });
+      await refresh();
+      await refreshPiMcpStatus(scope, projectPath);
+    } catch (error) {
+      onError(error);
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function saveCodemodeSettings() {
+    if (!Number.isInteger(codemodeSettings.inlineBudget) || codemodeSettings.inlineBudget < 0 || codemodeSettings.inlineBudget > 100000) {
+      onError(t("Codemode 工具说明预算必须是 0 到 100000 的整数"));
+      return;
+    }
+    codemodeSaving = true;
+    codemodeNotice = "";
+    try {
+      await invoke("save_pi_codemode_settings", {
+        request: { scope, projectPath, ...codemodeSettings },
+      });
+      codemodeNotice = t("Codemode 设置已保存；已运行的 Pi 任务重启后生效");
+      await refreshCodemodeSettings(scope, projectPath);
+    } catch (error) {
+      onError(error);
+    } finally {
+      codemodeSaving = false;
+    }
   }
 
   async function addServer() {
@@ -1137,13 +1270,52 @@
 
   {#if tab === "installed"}
     {#if mode === "mcp"}
+      <section class="settings-group" aria-label={t("Codemode 设置")}>
+        <div class="group-header"><h3>Codemode</h3></div>
+        <p class="muted">{t("Codemode 让模型编写 JavaScript，在沙箱中组合调用已启用的工具；MCP 默认曝光也可能按需自动启用它。")}</p>
+        {#if scope === "project"}<p class="muted">{t("项目范围 Codemode 设置仅在受信任的项目中生效。")}</p>{/if}
+        {#if codemodeLoading}
+          <p class="muted" role="status">{t("正在读取 Codemode 设置…")}</p>
+        {:else}
+          <label class="codemode-toggle">
+            <input type="checkbox" checked={codemodeSettings.enabled} disabled={codemodeSaving}
+              onchange={(event) => { codemodeSettings.enabled = event.currentTarget.checked; }} />
+            <span>{t("Pi 会话默认启用 Codemode")}</span>
+          </label>
+          <div class="codemode-options">
+            <label>{t("Codemode 模式")}
+              <select bind:value={codemodeSettings.mode} disabled={codemodeSaving}>
+                <option value="on">{t("on · 直接工具仍可调用")}</option>
+                <option value="only">{t("only · 工具只通过 Codemode 调用")}</option>
+              </select>
+            </label>
+            <label>{t("工具描述预算（tokens）")}
+              <input type="number" min="0" max="100000" step="100" value={codemodeSettings.inlineBudget}
+                disabled={codemodeSaving}
+                oninput={(event) => { const value = Number(event.currentTarget.value); if (Number.isFinite(value)) codemodeSettings.inlineBudget = value; }} />
+            </label>
+          </div>
+          <button type="button" class="primary-action" disabled={codemodeSaving} onclick={() => void saveCodemodeSettings()}>
+            {t("保存 Codemode 设置")}
+          </button>
+          {#if codemodeNotice}<p class="status" role="status">{codemodeNotice}</p>{/if}
+        {/if}
+      </section>
       <section class="settings-group">
         <div class="group-header">
           <h3>{t("已安装")} · {t("MCP 服务")}</h3>
           <button type="button" class="icon-action" aria-label={t("刷新 MCP 服务列表")} title={t("刷新")} disabled={loading} onclick={() => void refresh()}>
             <RefreshCw size={14} />
           </button>
+          <button type="button" class="secondary-action compact" aria-label={t("检测 MCP 连接")} disabled={piMcpStatusLoading || servers.length === 0}
+            onclick={() => void refreshPiMcpStatus(scope, projectPath)}>
+            {piMcpStatusLoading ? t("正在检测连接…") : t("检测连接")}
+          </button>
         </div>
+        {#if piMcpStatus.note}<p class="muted" role="status">{piMcpStatus.note}</p>{/if}
+        {#each piMcpStatus.errors as error, index (index)}
+          <p class="muted mcp-status-error" role="status">{error}</p>
+        {/each}
         {#if loading}
           <p class="muted" role="status">{t("正在读取 MCP 服务…")}</p>
         {:else if servers.length === 0}
@@ -1151,11 +1323,19 @@
         {:else}
           <ul class="entry-list">
             {#each servers as entry (entry.name)}
+              {@const nativeStatus = piMcpStatus.servers.find((server) => server.name === entry.name && server.scope === scope)}
               <li>
                 <div class="entry-main">
                   <strong>{entry.name}</strong>
                   <small>{serverSummary(entry.config)}</small>
+                  <small class="mcp-native-status">{mcpStatusLabel(nativeStatus)}</small>
+                  {#if nativeStatus?.error}<small class="mcp-status-error" title={nativeStatus.error}>{nativeStatus.error}</small>{/if}
                 </div>
+                {#if nativeStatus?.state === "needs-auth"}
+                  <button type="button" class="secondary-action compact" disabled={busy} onclick={() => void runMcpAuthAction(entry, "login")}>{t("登录")}</button>
+                {:else if nativeStatus?.state === "connected" && mcpCanSignIn(entry)}
+                  <button type="button" class="secondary-action compact" disabled={busy} onclick={() => void runMcpAuthAction(entry, "logout")}>{t("退出登录")}</button>
+                {/if}
                 <button type="button" class="danger-action" aria-label={t("删除 MCP 服务 {name}", { name: entry.name })} title={t("删除")} disabled={busy} onclick={() => void removeServer(entry)}>
                   <Trash2 size={14} />
                 </button>
@@ -1612,11 +1792,19 @@
 <style>
   .mcp-skills-page { display: grid; gap: 16px; }
   .page-controls { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
-  .scope-switch { display: inline-flex; gap: 2px; justify-self: start; padding: 2px; border: 1px solid var(--border-strong); border-radius: 5px; background: var(--page-bg); }
-  .scope-switch button { min-width: 68px; padding: 6px 12px; border: 0; border-radius: 3px; color: var(--text-muted); background: transparent; font-size: 13px; cursor: pointer; }
-  .scope-switch button.active { color: var(--accent-ink); background: var(--accent); font-weight: 700; }
+  .scope-switch { display: inline-flex; gap: 3px; justify-self: start; padding: 3px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--surface); box-shadow: inset 0 1px 2px rgb(0 0 0 / 12%); }
+  .scope-switch button { min-width: 68px; min-height: 32px; padding: 6px 12px; border: 0; border-radius: 5px; color: var(--text-muted); background: transparent; font-size: 13px; cursor: pointer; transition: color .15s ease, background .15s ease, box-shadow .15s ease; }
+  .scope-switch button:hover:not(:disabled) { color: var(--text); background: var(--surface-hover); }
+  .scope-switch button.active { color: var(--accent); background: var(--surface-raised); box-shadow: inset 0 -2px var(--accent); font-weight: 700; }
   .scope-switch button:disabled { opacity: .4; cursor: default; }
   .group-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .codemode-toggle { display: flex; align-items: center; gap: 8px; min-height: 32px; color: var(--text); font-size: 13px; }
+  .codemode-toggle input { accent-color: var(--accent); }
+  .codemode-options { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); gap: 10px; }
+  .codemode-options label { display: grid; gap: 4px; min-width: 0; font-size: 11px; color: var(--text-muted); }
+  .codemode-options input, .codemode-options select { width: 100%; min-width: 0; min-height: 32px; padding: 5px 8px; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--surface); color: var(--text); font: inherit; }
+  .mcp-native-status { color: var(--accent); }
+  .mcp-status-error { overflow-wrap: anywhere; color: #d88989; }
   h3 { margin: 0; font-size: 14px; font-weight: 650; color: var(--text-strong); }
   .icon-action, .danger-action { display: grid; place-items: center; width: 32px; height: 32px; border: 1px solid transparent; border-radius: 4px; background: transparent; color: var(--text-muted); cursor: pointer; }
   .icon-action:hover:not(:disabled) { border-color: var(--border-strong); color: var(--text); background: var(--surface-hover); }
@@ -1670,7 +1858,7 @@
   .category-chip { flex-shrink: 0; display: inline-flex; align-items: center; padding: 3px 8px; border: 1px solid var(--border-strong); border-radius: 4px; color: var(--text-muted); font-family: var(--code-font); font-size: 12px; }
   button.category-chip { background: transparent; cursor: pointer; }
   button.category-chip:hover { border-color: var(--accent); color: var(--text-strong); }
-  .category-chip[aria-pressed="true"] { border-color: var(--accent); background: var(--accent); color: var(--accent-ink); font-weight: 700; }
+  .category-chip[aria-pressed="true"] { border-color: var(--accent); background: var(--surface-raised); color: var(--accent); font-weight: 700; }
   .category-filter { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; min-width: 0; max-width: 100%; overflow-x: auto; }
   .market-source { flex-shrink: 0; padding: 3px 7px; border: 1px solid var(--border); border-radius: 4px; color: var(--text-muted); font-size: 12px; }
   .tag { padding: 1px 5px; border-radius: 3px; background: var(--surface-hover); color: var(--text-muted); font-size: 10px; }

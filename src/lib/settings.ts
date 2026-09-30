@@ -1,5 +1,5 @@
 import { DEFAULT_LOCALE, type Locale } from "./locale";
-import { DEFAULT_THEME_ID, type ThemePack } from "./theme";
+import { DEFAULT_THEME_ID, DEFAULT_THEME_TRANSPARENCY, type ThemePack } from "./theme";
 
 export type ColorMode = "system" | "light" | "dark";
 /** 主题 id：内置（command-flow）或导入主题的标识。 */
@@ -35,12 +35,14 @@ export interface AppSettings {
   lastProject: string | null;
   colorMode: ColorMode;
   theme: Theme;
-  /** 应用程序字体（本机字体族名）；空串表示使用默认字体栈。 */
+  /** 通用主题表面的透明度百分比；仅主题配置了玻璃材质时应用。 */
+  themeTransparency: number;
+  /** 应用程序字体族名；空串表示跟随主题。 */
   appFontName: string;
-  appFontSize: number;
-  /** 会话窗口字体（对话/终端）；空串表示使用默认字体栈。 */
+  appFontSize: number | null;
+  /** 会话窗口字体（对话/终端）；空串表示跟随主题。 */
   sessionFontName: string;
-  sessionFontSize: number;
+  sessionFontSize: number | null;
   codeFont: CodeFont;
   closeBehavior: CloseBehavior;
   skippedUpdates: Record<string, string>;
@@ -82,10 +84,11 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   colorMode: "system",
   theme: DEFAULT_THEME_ID,
   appFontName: "",
-  appFontSize: 13,
+  appFontSize: null,
+  themeTransparency: DEFAULT_THEME_TRANSPARENCY.default,
   sessionFontName: "",
-  sessionFontSize: 13,
-  codeFont: "cascadia",
+  sessionFontSize: null,
+  codeFont: "",
   closeBehavior: "ask",
   skippedUpdates: {},
   snoozedUpdates: {},
@@ -101,7 +104,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   codexTransport: "sse",
   codexSelectedModels: null,
   notifyOnTaskComplete: true,
-  petEnabled: true,
+  petEnabled: false,
   petAlwaysOnTop: true,
   petTaskRingRadius: 100,
 };

@@ -151,6 +151,7 @@
     font: inherit; cursor: pointer; text-align: left;
   }
   .font-trigger:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .font-trigger:focus-visible { border-color: var(--accent); background: var(--surface-alt); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent); outline: 0; }
   .font-preview { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .font-list {
     position: fixed; z-index: 60; margin: 0; padding: 4px; list-style: none;

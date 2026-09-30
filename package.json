@@ -17,7 +17,7 @@
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
     "test:web": "vitest run",
-    "test:transport": "node --test scripts/pi-transport-observer.node-test.mjs scripts/pi-codex-transport.node-test.mjs scripts/pi-websocket-recovery.node-test.mjs",
+    "test:transport": "node --test scripts/pi-codex-transport.node-test.mjs scripts/pi-websocket-recovery.node-test.mjs",
     "test:subscription-models": "node --test scripts/pi-subscription-models.node-test.mjs",
     "security:audit": "pnpm audit --prod --audit-level high",
     "licenses:check": "node scripts/check-licenses.mjs",

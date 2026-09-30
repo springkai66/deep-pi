@@ -29,6 +29,8 @@
     Wrench,
     Settings2,
     Globe,
+    Download,
+    X,
     GitBranch,
   } from "@lucide/svelte";
   import { onMount, tick } from "svelte";
@@ -46,8 +48,9 @@
   import { SplitSquareHorizontal, SplitSquareVertical } from "@lucide/svelte";
   import AppDialog from "$lib/AppDialog.svelte";
   import AppToasts from "$lib/AppToasts.svelte";
+  import AppUpdateProgressBar from "$lib/AppUpdateProgressBar.svelte";
   import { notices } from "$lib/notices.svelte";
-  import { checkAppUpdate, describeUpdateError, installAppUpdate, type AppUpdateState, type Update } from "$lib/app-update";
+  import { checkAppUpdate, describeUpdateError, installAppUpdate, type AppUpdateProgress, type AppUpdateState, type Update } from "$lib/app-update";
   import type { DialogRequest, DialogValue } from "$lib/dialog";
   import type { Project } from "$lib/project";
   import PiMarketplace from "$lib/PiMarketplace.svelte";
@@ -69,6 +72,7 @@
     type CloseBehavior,
   } from "$lib/settings";
   import { applyAppearance } from "$lib/appearance";
+  import { resolveTheme } from "$lib/theme";
   import { t, tm } from "$lib/i18n.svelte";
   import { BOARD_ACTION_EVENT, type BoardActionRequest } from "$lib/board-actions";
   import { createPetTaskActionHandler, isPetTaskRequest, PET_TASK_ACTION_EVENT, PET_TASK_RESULT_EVENT } from "$lib/pet-task-actions";
@@ -120,7 +124,13 @@
     error: null,
   });
   let pendingAppUpdate: Update | null = null;
+  /// 应用更新进度：下载阶段是真实百分比，安装阶段是按时间估算的百分比。
+  let appUpdateProgress = $state<AppUpdateProgress | null>(null);
+  /// 用户手动关掉更新浮层后不再重复弹出（下次检查或有进度时重置）。
+  let appUpdateDismissed = $state(false);
   let settings = $state<AppSettings>({ ...DEFAULT_APP_SETTINGS });
+  const activeTheme = $derived(resolveTheme(settings.theme, settings.customThemes ?? []));
+  const effectiveSessionFontSize = $derived(settings.sessionFontSize ?? activeTheme.typography?.sessionFontSize ?? 13);
   /// 任务完成系统通知：后台（最小化/失焦）也弹系统级提示，文案按当前语言渲染。
   const taskNotifier = createTaskExitNotifier({
     fetchTasks: () => invoke<Task[]>("list_tasks"),
@@ -151,9 +161,9 @@
   let settingsOpen = $state(false);
   let shellOpen = $state(false);
   let settingsDialog = $state<HTMLElement>();
+  let settingsReturnFocus: HTMLElement | null = null;
   let settingsCategory = $state<SettingsCategory>("general");
   let loginRequest = $state<{ provider: string; serial: number } | null>(null);
-  let diagnosticsBusy = $state(false);
   let dshBusy = $state(false);
   let settingsPackageBusy = $state(false);
   let activeAgent = $state<"pi" | "dsh">("pi");
@@ -330,6 +340,7 @@
 
   function handleSettingsKeydown(event: KeyboardEvent) {
     if (event.key === "Escape") {
+      if ([...settingsDialog?.querySelectorAll(".editor-backdrop") ?? []].some((backdrop) => !backdrop.closest("[hidden]"))) return;
       event.preventDefault();
       closeSettings();
     }
@@ -426,7 +437,7 @@
     return {
       pi: activeAgent === "pi", workspace: view === "workspace", rpc: activeTask?.interactionMode === "rpc",
       fileOpen: !!openedFile, fileReady: !!fileEditor && !!fileId && fileDocuments.some((doc) => doc.id === fileId && !!doc.state),
-      fileBusy: fileSaving, navigationLocked: settingsOpen && (settingsPackageBusy || diagnosticsBusy),
+      fileBusy: fileSaving, navigationLocked: settingsOpen && settingsPackageBusy,
       modal: !!dialogRequest, recovery: !!recoveryProject, closing: closingWindow,
     };
   }
@@ -539,7 +550,7 @@
       task.interactionMode === "rpc" && paneTaskIds.includes(task.id)),
   );
   const standaloneSessionTabs = $derived(
-    !!selectedProject && terminalTasks.length > 0 && !inlineSessionTabs &&
+    activeAgent === "pi" && !!selectedProject && terminalTasks.length > 0 && !inlineSessionTabs &&
     view === "workspace" && !(boardView && activeAgent === "pi"),
   );
   $effect(() => {
@@ -575,6 +586,9 @@
   async function checkDeepPiUpdate() {
     if (appUpdate.status === "checking" || appUpdate.status === "installing") return;
     appUpdate = { status: "checking", version: null, notes: null, error: null };
+    // 上一轮的进度与“已关闭”状态不能留下来：重新检查意味着新的下载/安装周期。
+    appUpdateProgress = null;
+    appUpdateDismissed = false;
     try {
       pendingAppUpdate = await checkAppUpdate();
       appUpdate = pendingAppUpdate
@@ -599,10 +613,19 @@
   async function installDeepPiUpdate() {
     if (!pendingAppUpdate) return;
     appUpdate = { ...appUpdate, status: "installing", error: null };
+    appUpdateProgress = null;
+    appUpdateDismissed = false;
     try {
-      await installAppUpdate(pendingAppUpdate);
+      // 右下角浮层是唯一的更新界面：下载是真实百分比，安装是按时间估算。
+      await installAppUpdate(pendingAppUpdate, {
+        onProgress: (progress) => { appUpdateProgress = progress; },
+      });
     } catch (error) {
-      appUpdate = { ...appUpdate, status: "error", error: describeUpdateError(error) };
+      // 设置里已没有应用更新入口，失败必须用提示条说清楚，而不是静默消失。
+      appUpdateProgress = null;
+      const message = describeUpdateError(error);
+      appUpdate = { ...appUpdate, status: "error", error: message };
+      notices.push(message, "error");
     }
   }
 
@@ -749,8 +772,8 @@
     const requestWindowClose = createWindowCloseHandler({
       // 托盘菜单的退出是显式退出，不受「关闭窗口行为」影响。
       behavior: (source) => (source === "tray" || !nativeReady ? "exit" : settings.closeBehavior),
-      blocked: () => diagnosticsBusy || recoveryBusy || fileWorkspace.busy() || switchingTasks.size > 0 || gitIndexBusy || settingsPackageBusy || busyRuntime !== null,
-      blockedReason: () => diagnosticsBusy ? t("诊断操作正在处理，请完成或取消后再关闭窗口") : recoveryBusy || fileWorkspace.busy() ? t("项目文件正在处理，请完成后再关闭窗口") : settingsPackageBusy || busyRuntime !== null ? t("组件操作正在处理，请完成或取消后再关闭窗口") : gitIndexBusy ? t("Git 写入正在处理，请完成后再关闭窗口") : t("任务正在切换模式，请完成后再关闭窗口"),
+      blocked: () => recoveryBusy || fileWorkspace.busy() || switchingTasks.size > 0 || gitIndexBusy || settingsPackageBusy || busyRuntime !== null,
+      blockedReason: () => recoveryBusy || fileWorkspace.busy() ? t("项目文件正在处理，请完成后再关闭窗口") : settingsPackageBusy || busyRuntime !== null ? t("组件操作正在处理，请完成或取消后再关闭窗口") : gitIndexBusy ? t("Git 写入正在处理，请完成后再关闭窗口") : t("任务正在切换模式，请完成后再关闭窗口"),
       hasActiveTasks: () => tasks.some((task) => ["running", "waiting"].includes(task.status)),
       choose: closeChoiceDialog,
       confirm: () => confirmDialog(t("退出 DeepPi"), t("仍有活动任务，停止任务并退出吗？")),
@@ -773,7 +796,7 @@
     // 托盘菜单的「退出」：复用既有关闭流程（活动任务确认、设置落盘、任务清理）。
     // 需要弹确认框或提示时，先把可能隐藏着的主窗口亮出来，否则用户看不到对话框。
     const trayQuitListener = listen("tray-quit", async () => {
-      const needsVisibleWindow = diagnosticsBusy || recoveryBusy || fileWorkspace.busy()
+      const needsVisibleWindow = recoveryBusy || fileWorkspace.busy()
         || switchingTasks.size > 0 || gitIndexBusy || settingsPackageBusy || busyRuntime !== null
         || tasks.some((task) => ["running", "waiting"].includes(task.status));
       if (needsVisibleWindow) {
@@ -781,6 +804,9 @@
         await appWindow.setFocus();
       }
       await requestWindowClose({ preventDefault() {} }, "tray");
+    });
+    const trayRuntimeListener = listen<"pi" | "dsh">("tray-runtime-update", ({ payload }) => {
+      if (payload === "pi" || payload === "dsh") openSettingsCategory(payload);
     });
     const dshTaskListener = listen<Task[]>("dsh-tasks", ({ payload }) => {
       tasks = [...tasks.filter((task) => task.agent !== "dsh"), ...payload];
@@ -844,6 +870,7 @@
       systemTheme.removeEventListener("change", handleSystemThemeChange);
       void closeListener.then((unlisten) => unlisten());
       void trayQuitListener.then((unlisten) => unlisten());
+      void trayRuntimeListener.then((unlisten) => unlisten());
       void dshTaskListener.then((unlisten) => unlisten());
       void dshStatusListener.then((unlisten) => unlisten());
       void statusListener.then((unlisten) => unlisten());
@@ -1146,6 +1173,7 @@
   }
 
   function openSettings() {
+    if (!settingsOpen && document.activeElement instanceof HTMLElement) settingsReturnFocus = document.activeElement;
     settingsOpen = true;
     void dshWebview?.hide();
   }
@@ -1153,16 +1181,16 @@
   function closeSettings() {
     if (!canLeaveSettings()) return;
     settingsOpen = false;
-    if (activeAgent === "dsh") {
-      void tick().then(() => dshVisibility.then(() => dshWebview?.setFocus()));
-    }
+    const returnFocus = settingsReturnFocus;
+    settingsReturnFocus = null;
+    void tick().then(() => {
+      if (returnFocus?.isConnected && returnFocus !== document.body && returnFocus !== document.documentElement && !returnFocus.closest("[inert]")) returnFocus.focus();
+      else if (activeAgent === "dsh") void dshVisibility.then(() => dshWebview?.setFocus());
+      else document.getElementById("open-settings")?.focus();
+    });
   }
 
   function canLeaveSettings() {
-    if (settingsOpen && diagnosticsBusy) {
-      showError(t("诊断操作正在处理，请先完成或取消操作"));
-      return false;
-    }
     if (settingsOpen && dshBusy) {
       showError(t("DSH 检测/修复操作正在处理，请先完成或取消操作"));
       return false;
@@ -1469,27 +1497,6 @@
     }
   }
 
-  async function restartAllPiTasks() {
-    if (restartBusy || busyRuntime) return;
-    const candidates = tasks.filter((task) => task.agent === "pi" && ["running", "waiting"].includes(task.status));
-    if (candidates.length === 0) return;
-    const confirmed = await confirmDialog(
-      t("重启 Pi 任务"),
-      t("重启 {count} 个运行中的 Pi 任务吗？会话内容保留，正在切换中的任务将被跳过。", { count: candidates.length }),
-      t("重启"),
-    );
-    if (!confirmed) return;
-    restartBusy = "pi";
-    try {
-      for (const task of candidates) {
-        if (modeSwitcher.isBusy(task.id)) continue;
-        await restartTask(task);
-      }
-    } finally {
-      restartBusy = null;
-    }
-  }
-
   async function restartDsh() {
     if (restartBusy || busyRuntime || isDshStarting) return;
     restartBusy = "dsh";
@@ -1617,7 +1624,7 @@
         onclick={() => void openBoardWindow()}><Kanban size={16} /></button>
       <button type="button" aria-label={t("四象限清单")} title={t("四象限清单")}
         onclick={() => void openChecklistWindow()}><ClipboardList size={16} /></button>
-      <button type="button" aria-label={t("打开应用设置")} aria-keyshortcuts={shortcutAria("settings")}
+      <button id="open-settings" type="button" aria-label={t("打开应用设置")} aria-keyshortcuts={shortcutAria("settings")}
         title={`${t("设置")} (${shortcutLabel("settings")})`} onclick={openSettings}><Settings2 size={16} /></button>
     </div>
   </header>
@@ -1775,8 +1782,9 @@
                   title={task.title}
                   status={task.status}
                   codeFont={settings.codeFont}
+                  themeCodeFont={activeTheme.typography?.codeFont}
                   sessionFontName={settings.sessionFontName}
-                  sessionFontSize={settings.sessionFontSize}
+                  sessionFontSize={effectiveSessionFontSize}
                   colorMode={settings.colorMode}
                   visible={activeAgent === "pi" && view === "workspace" && !inspectingFile && task.projectId === selectedProjectId && paneTaskIds.includes(task.id)}
                   active={task.id === activeTaskId}
@@ -1822,8 +1830,9 @@
           projectId={selectedProject.id}
           shell={settings.terminalShell}
           codeFont={settings.codeFont}
+          themeCodeFont={activeTheme.typography?.codeFont}
           sessionFontName={settings.sessionFontName}
-          sessionFontSize={settings.sessionFontSize}
+          sessionFontSize={effectiveSessionFontSize}
           colorMode={settings.colorMode}
           onClose={closeShell}
         />
@@ -1872,15 +1881,31 @@
   </div>
 <AppDialog request={dialogRequest} onResolve={resolveDialog} />
 <AppToasts />
+{#if appUpdateProgress || (appUpdate.status === "available" && !appUpdateDismissed)}
+  <div class="app-update-float" role="region" aria-label={t("应用更新")}>
+    <div class="app-update-float-head">
+      <strong>{t("应用更新")}{appUpdate.version ? ` · v${appUpdate.version}` : ""}</strong>
+      {#if !appUpdateProgress}
+        <button type="button" class="app-update-float-close" aria-label={t("关闭提示")} title={t("关闭提示")}
+          onclick={() => { appUpdateDismissed = true; }}><X size={12} /></button>
+      {/if}
+    </div>
+    {#if appUpdateProgress}
+      <AppUpdateProgressBar progress={appUpdateProgress} />
+    {:else}
+      <button type="button" class="quiet-button" onclick={() => void installDeepPiUpdate()}>
+        <Download size={14} />{t("安装更新")}
+      </button>
+    {/if}
+  </div>
+{/if}
 {#if settingsOpen}
   <div class="settings-overlay" role="presentation">
     <div class="settings-modal" role="dialog" aria-modal="true" aria-label={t("设置")} tabindex="-1"
       bind:this={settingsDialog} onkeydown={handleSettingsKeydown}>
       <PiSettings
         saving={settingsSaving}
-        closeBlocked={settingsPackageBusy || diagnosticsBusy || dshBusy}
-        onDiagnosticsBusy={(busy) => { diagnosticsBusy = busy; }}
-        confirmDiagnosticsClear={() => confirmDialog(t("清空诊断记录"), t("清空本次应用运行的 Pi RPC 诊断记录？不会删除任务和会话。"))}
+        closeBlocked={settingsPackageBusy || dshBusy}
         category={settingsCategory}
         onCategoryChange={(category) => { settingsCategory = category; }}
         settings={settings}
@@ -1891,17 +1916,11 @@
         {runtimeOperation}
         {runtimeProgress}
         onCancelRuntime={() => void cancelRuntime()}
-        {appUpdate}
         onChangeSettings={updateSettings}
         onEditorSaved={(externalEditor) => { settings = { ...settings, externalEditor }; }}
         onCheckUpdates={() => void checkUpdates(true)}
-        onCheckAppUpdate={() => void checkDeepPiUpdate()}
-        onInstallAppUpdate={() => void installDeepPiUpdate()}
         onUpdateRuntime={(update) => void installRuntime(update)}
         onUninstallRuntime={(runtime) => void uninstallRuntime(runtime)}
-        onRestartPi={() => void restartAllPiTasks()}
-        onRestartDsh={() => void restartDsh()}
-        {restartBusy}
         {runningPiCount}
         {dshRunning}
         onClose={closeSettings}
@@ -1920,13 +1939,7 @@
           <PiMcpSkillsSettings mode="skills" confirm={confirmDialog} onError={showError} projectPath={selectedProject?.path ?? null} onBusyChange={(busy) => { settingsPackageBusy = busy; }} />
         {/snippet}
         {#snippet dsh()}
-          <DshSettings
-            {dshRunning}
-            {restartBusy}
-            {busyRuntime}
-            onRestartDsh={() => void restartDsh()}
-            onError={showError}
-          />
+          <DshSettings {dshRunning} />
         {/snippet}
       </PiSettings>
     </div>
@@ -1934,11 +1947,18 @@
 {/if}
 
 <style>
-  .settings-overlay { position: fixed; inset: 0; z-index: 18; display: grid; place-items: center; padding: 36px; background: rgb(3 6 4 / 46%); }
+  .settings-overlay { position: fixed; inset: 0; z-index: 18; display: grid; place-items: center; padding: 36px; background: transparent; }
   .shell-overlay { position: absolute; inset: 8px; z-index: 12; min-width: 0; min-height: 0; overflow: hidden; border-radius: 6px; box-shadow: 0 18px 50px rgb(0 0 0 / 38%); }
   .settings-modal { width: min(1100px, calc(100vw - 72px)); height: min(760px, calc(100vh - 72px)); min-width: 0; min-height: 0; overflow: hidden; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--page-bg); box-shadow: 0 24px 70px rgb(0 0 0 / 34%); outline: none; }
   .settings-modal :global(.settings-page) { min-width: 0; }
   .settings-modal :global(.settings-layout) { min-width: 0; min-height: 0; }
+  /* 应用更新进度浮层：设置面板关闭后也留在右下角，直到更新流程结束。 */
+  .app-update-float { position: fixed; z-index: 39; right: 16px; bottom: 16px; display: grid; gap: 4px; width: min(320px, calc(100vw - 32px)); padding: 10px 12px; border: 1px solid var(--border-strong); border-radius: 8px; color: var(--text); background: var(--surface); box-shadow: 0 12px 34px rgb(0 0 0 / 26%); font-family: var(--text-font); font-size: 12px; }
+  .app-update-float :global(.app-update-progress) { margin-top: 0; }
+  .app-update-float-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .app-update-float-close { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; margin: -2px -2px 0 0; padding: 0; border: 1px solid transparent; border-radius: 4px; color: var(--text-muted); background: transparent; cursor: pointer; }
+  .app-update-float-close:hover { border-color: var(--border-strong); color: var(--text-strong); background: var(--surface-hover); }
+  .app-update-float :global(.quiet-button) { justify-self: start; }
   @media (max-width: 760px), (max-height: 560px) {
     .settings-overlay { padding: 12px; }
     .settings-modal { width: 100%; height: 100%; border-radius: 8px; }

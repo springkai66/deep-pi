@@ -6,6 +6,8 @@
  * 保证两个窗口的主题、语言、字体观感一致。
  */
 import { setLocale } from "./i18n.svelte";
+import { invoke, isTauri } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   cssAppFontFamily,
   cssCodeFontFamily,
@@ -14,21 +16,34 @@ import {
   type AppSettings,
 } from "./settings";
 import { resolveTheme, themeCssVariables } from "./theme";
+let lastNativeWindowMaterial: string | undefined;
+
 
 /** 把设置里的外观项写入 document 根节点；不读取也不修改业务状态。 */
 export function applyAppearance(next: AppSettings): void {
   if (typeof document === "undefined") return;
   const root = document.documentElement;
   const scheme = isLightColorMode(next.colorMode) ? "light" : "dark";
+  const theme = resolveTheme(next.theme, next.customThemes ?? []);
+  const isMainWindows = isTauri() && getCurrentWindow().label === "main" &&
+    typeof navigator !== "undefined" && /windows/i.test(navigator.userAgent);
+  const windowMaterial = isMainWindows ? theme.effects?.windowMaterial ?? "none" : "none";
   root.dataset.colorMode = next.colorMode;
   root.dataset.colorScheme = scheme;
   root.dataset.theme = next.theme;
+  root.dataset.surfaceMaterial = theme.effects?.surfaceMaterial ?? "solid";
+  root.dataset.windowMaterial = windowMaterial;
   setLocale(next.language);
   // 同步 <html lang>：影响无障碍朗读、字体选择与 :lang() 选择器。
   root.lang = next.language;
-  // 主题包 → 颜色令牌；字体在主题默认值之上叠加用户自定义（用户设置优先）。
-  const theme = resolveTheme(next.theme, next.customThemes ?? []);
-  for (const [name, value] of Object.entries(themeCssVariables(theme, scheme))) {
+  if (isMainWindows && windowMaterial !== lastNativeWindowMaterial) {
+    lastNativeWindowMaterial = windowMaterial;
+    void invoke("set_main_window_material", { material: windowMaterial }).catch(() => {
+      if (lastNativeWindowMaterial === windowMaterial) lastNativeWindowMaterial = undefined;
+    });
+  }
+  // 主题包令牌与效果参数；字体设置在主题默认值之上叠加用户自定义（用户设置优先）。
+  for (const [name, value] of Object.entries(themeCssVariables(theme, scheme, next.themeTransparency))) {
     root.style.setProperty(name, value);
   }
   const appFont = cssAppFontFamily(next.appFontName, theme.typography?.appFont);
@@ -36,6 +51,6 @@ export function applyAppearance(next: AppSettings): void {
   root.style.setProperty("--text-font", appFont);
   root.style.setProperty("--session-font", cssSessionFontFamily(next.sessionFontName, theme.typography?.sessionFont));
   root.style.setProperty("--code-font", cssCodeFontFamily(next.codeFont, theme.typography?.codeFont));
-  root.style.setProperty("--app-font-size", `${next.appFontSize}px`);
-  root.style.setProperty("--session-font-size", `${next.sessionFontSize}px`);
+  root.style.setProperty("--app-font-size", `${next.appFontSize ?? theme.typography?.appFontSize ?? 13}px`);
+  root.style.setProperty("--session-font-size", `${next.sessionFontSize ?? theme.typography?.sessionFontSize ?? 13}px`);
 }

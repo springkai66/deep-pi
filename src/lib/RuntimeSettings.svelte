@@ -1,6 +1,5 @@
 <script module lang="ts">
   import type { AppSettings } from "./settings";
-  import type { AppUpdateState } from "./app-update";
   import type { RuntimeComponent, RuntimeUpdate } from "./runtime";
   import { updateSuppressed } from "./runtime";
   import type { OperationState } from "./operation";
@@ -8,7 +7,7 @@
     phase: string;
     percent: number | null;
   }
-  export type RuntimeSettingsView = "app" | "pi" | "dsh";
+  export type RuntimeSettingsView = "pi" | "dsh";
   export interface RuntimeSettingsProps {
     view: RuntimeSettingsView;
     settings: AppSettings;
@@ -19,25 +18,20 @@
     runtimeOperation: OperationState | null;
     runtimeProgress: RuntimeProgress | null;
     onCancelRuntime: () => void;
-    appUpdate: AppUpdateState;
     onCheckUpdates: () => void;
-    onCheckAppUpdate: () => void;
-    onInstallAppUpdate: () => void;
     onUpdateRuntime: (update: RuntimeUpdate) => void;
     onUninstallRuntime: (runtime: RuntimeComponent) => void;
-    onRestartPi: () => void;
-    restartBusy: string | null;
     runningPiCount: number;
     dshRunning: boolean;
   }
 </script>
 
 <script lang="ts">
-  import { Download, RefreshCw, RotateCcw, Trash2, X } from "@lucide/svelte";
+  import { Download, RefreshCw, Trash2, X } from "@lucide/svelte";
   import { t, tm } from "$lib/i18n.svelte";
   let { view, settings, runtimes, updates, isCheckingUpdates, busyRuntime, runtimeOperation, runtimeProgress, onCancelRuntime,
-    appUpdate, onCheckUpdates, onCheckAppUpdate, onInstallAppUpdate, onUpdateRuntime, onUninstallRuntime,
-    onRestartPi, restartBusy, runningPiCount, dshRunning }: RuntimeSettingsProps = $props();
+    onCheckUpdates, onUpdateRuntime, onUninstallRuntime,
+    runningPiCount, dshRunning }: RuntimeSettingsProps = $props();
   const visibleRuntimes = $derived(runtimes.filter((runtime) => view === "pi" ? runtime.id === "node" || runtime.id === "pi" : runtime.id === "dsh" || runtime.id === "dshmarket"));
   const sourceLabels = $derived({
     managed: t("托管"),
@@ -46,49 +40,7 @@
   });
 </script>
 
-{#if view === "app"}
-<section class="settings-group" aria-labelledby="app-update-heading">
-  <div class="settings-group-header">
-    <h3 id="app-update-heading">DeepPi</h3>
-    <span class="muted" role="status">{appUpdate.status === "checking" ? t("检查中") : appUpdate.status === "installing" ? t("安装中") : appUpdate.status === "available" ? t("可更新 · {version}", { version: appUpdate.version ?? "" }) : appUpdate.status === "current" ? t("已是最新") : appUpdate.status === "error" ? t("不可用") : t("未检查")}</span>
-  </div>
-  <div class="setting-control">
-    <strong>{t("应用更新")}</strong>
-    <div class="runtime-actions">
-      {#if appUpdate.status === "available"}
-        <button type="button" class="quiet-button" onclick={onInstallAppUpdate}><Download size={14} />{t("安装更新")}</button>
-      {:else}
-        <button type="button" class="quiet-button" disabled={appUpdate.status === "checking" || appUpdate.status === "installing"} onclick={onCheckAppUpdate}>
-          <RefreshCw size={14} />{t("检查应用更新")}
-        </button>
-      {/if}
-    </div>
-  </div>
-  {#if appUpdate.notes}<p class="release-notes">{tm(appUpdate.notes)}</p>{/if}
-  {#if appUpdate.error}<p role="alert">{tm(appUpdate.error)}</p>{/if}
-</section>
-{/if}
-
-{#if view === "pi"}
-<section class="settings-group" aria-labelledby="service-restart-heading">
-  <div class="settings-group-header">
-    <h3 id="service-restart-heading">{t("运行服务")}</h3>
-  </div>
-  <div class="setting-control">
-    <span class="setting-copy"><strong>Pi Coding Agent</strong><small>{runningPiCount > 0 ? t("{count} 个任务运行中", { count: runningPiCount }) : t("没有运行中的任务")}</small></span>
-    <div class="runtime-actions">
-      {#if restartBusy === "pi"}<span role="status" class="muted">{t("正在逐个重启任务…")}</span>{/if}
-      <button type="button" class="quiet-button" disabled={restartBusy !== null || busyRuntime !== null || runningPiCount === 0} onclick={onRestartPi}>
-        <RotateCcw size={14} />{t("重启全部任务")}
-      </button>
-    </div>
-  </div>
-  <p class="muted" role="status">{t("重启 Pi 会逐个重启所有运行中的任务（会话内容保留）。")}</p>
-</section>
-{/if}
-
-{#if view !== "app"}
-<section class="settings-group" aria-labelledby="runtime-settings-heading">
+<section class="settings-group runtime-settings" aria-labelledby="runtime-settings-heading">
   <div class="settings-group-header">
     <h3 id="runtime-settings-heading">{t("组件")}</h3>
     <button type="button" class="quiet-button" disabled={isCheckingUpdates} onclick={onCheckUpdates}><RefreshCw size={14} />{t("检查组件更新")}</button>
@@ -140,18 +92,29 @@
     {/each}
   {/if}
 </section>
-{/if}
 
 <style>
-  .runtime-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px; min-width: 0; }
-  .release-notes { white-space: pre-wrap; }
-  .runtime-progress { display: grid; gap: 4px; margin-top: 6px; }
-  .runtime-progress-bar { height: 4px; border-radius: 2px; background: var(--surface-hover); overflow: hidden; }
-  .runtime-progress-fill { height: 100%; border-radius: 2px; background: var(--accent); transition: width .3s ease; }
-  .runtime-progress-fill.indeterminate { width: 40%; animation: runtime-progress-slide 1.2s ease-in-out infinite; }
-  @keyframes runtime-progress-slide {
-    0% { margin-left: -40%; }
-    100% { margin-left: 100%; }
+  .runtime-settings { display: grid; gap: 0; }
+  .runtime-settings .settings-group-header { min-height: 42px; padding: 0 0 12px; border-bottom: 1px solid var(--border); }
+  .runtime-settings .settings-group-header h3 { color: var(--text-strong); }
+  .runtime-settings .setting-control {
+    display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 18px;
+    min-height: 64px; padding: 12px 0; border-bottom: 1px solid var(--border);
   }
+  .runtime-settings .setting-copy { display: grid; gap: 4px; min-width: 0; }
+  .runtime-settings .setting-copy strong { color: var(--text-strong); font-weight: 600; }
+  .runtime-settings .runtime-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 7px; min-width: 0; }
+  .runtime-settings .runtime-actions > .muted { min-width: 96px; color: var(--text-muted); text-align: right; white-space: nowrap; }
+  .runtime-settings > p[role="alert"], .runtime-settings > p[role="status"] { margin: 8px 0 0; }
+  .runtime-progress { display: grid; gap: 4px; margin: 0 0 10px; }
+  .runtime-progress-bar { height: 4px; border-radius: 999px; background: var(--surface-hover); overflow: hidden; }
+  .runtime-progress-fill { height: 100%; border-radius: 999px; background: var(--accent); transition: width .3s ease; }
+  .runtime-progress-fill.indeterminate { width: 40%; animation: runtime-progress-slide 1.2s ease-in-out infinite; }
+  @keyframes runtime-progress-slide { 0% { margin-left: -40%; } 100% { margin-left: 100%; } }
   .runtime-progress-text { font-size: 11px; color: var(--text-muted); }
+  @media (max-width: 620px) {
+    .runtime-settings .setting-control { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+    .runtime-settings .runtime-actions { justify-content: flex-start; }
+    .runtime-settings .runtime-actions > .muted { min-width: 0; text-align: left; }
+  }
 </style>

@@ -6,7 +6,6 @@ import http from 'node:http';
 import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { createInterface } from 'node:readline';
 
 const cli = process.env.PI_RPC_TEST_CLI;
@@ -58,10 +57,9 @@ for (const scenario of ['handshake-rejected', 'stream-interrupted']) {
       api: 'openai-codex-responses', apiKey: token, baseUrl: `http://127.0.0.1:${server.address().port}`,
       models: [{ id: 'fixture', name: 'Fixture', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 32000, maxTokens: 1000 }],
     } } }));
-    const env = { ...process.env, PI_CODING_AGENT_DIR: home, PI_CODING_AGENT_SESSION_DIR: join(home, 'sessions'), PI_TELEMETRY: '0', DEEPPI_TRANSPORT_DIAGNOSTICS: '1', NO_PROXY: proxy ? '' : '127.0.0.1', no_proxy: proxy ? '' : '127.0.0.1' };
+    const env = { ...process.env, PI_CODING_AGENT_DIR: home, PI_CODING_AGENT_SESSION_DIR: join(home, 'sessions'), PI_TELEMETRY: '0', NO_PROXY: proxy ? '' : '127.0.0.1', no_proxy: proxy ? '' : '127.0.0.1' };
     for (const key of ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'ALL_PROXY', 'all_proxy']) { delete env[key]; }
     if (proxy) Object.assign(env, { HTTP_PROXY: proxy, HTTPS_PROXY: proxy, NODE_USE_ENV_PROXY: '1' });
-    const args = ['--import', pathToFileURL(resolve('src-tauri/resources/pi-transport-observer.mjs')).href, resolve(cli), '--mode', 'rpc', '--offline', '--no-extensions', '--no-skills', '--no-context-files', '--no-prompt-templates', '--no-themes', '--provider', 'openai-codex', '--model', 'fixture'];
     if (extension) {
       args.push('--extension', resolve('src-tauri/resources/pi-codex-transport.mjs'));
       env.DEEPPI_CODEX_API_MODULE = pathToFileURL(join(dirname(dirname(dirname(resolve(cli)))), 'node_modules/@earendil-works/pi-ai/dist/api/openai-codex-responses.js')).href;

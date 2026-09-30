@@ -2,9 +2,9 @@
 
 本文件锁定 DeepPi「Pi RPC 工作区」已验证的 Pi 版本、协议子集与宿主行为。终端兼容模式（TUI）不受本表限制。
 
-- 基线版本：Pi 0.84.4（DeepPi 托管运行时，`@earendil-works/pi-coding-agent`）；已验证向上兼容 **Pi 0.85.1**（见“流式增量”一节）
-- 官方文档：随包分发 `docs/rpc.md`（Pi 0.84.4），本文只声明该版本上验证过的子集
-- DSH 基线：0.1.5-rc.2（dshmarket 最低要求 0.1.1-rc.2），DSH 使用原生 Web UI，不经过本协议
+- 基线版本：Pi 0.99.1（DeepPi 托管运行时；真实 CLI/RPC 集成测试见“升级审计”）
+- 官方文档：随包分发 `docs/rpc.md`（Pi 0.99.1），本文声明宿主支持的协议子集
+- DSH 基线：0.2.0-rc.2；它使用原生 Web UI，不经过本协议。DSH 主机启动成功不代表 profile 插件兼容。
 
 ## 传输与分帧
 
@@ -68,6 +68,15 @@ Pi 0.85 起，助手文本不再每次重发整条消息，而是发 `message_up
 - 恢复：`--session <file>`，读取前校验会话 ID、项目目录与文件身份；新会话使用 `--session-id`；标题使用 `--name`。
 - 历史读取只经 `get_messages` 快照；不复制或改写原生会话文件。
 - 只启动托管环境（`PI_CODING_AGENT_DIR` 指向任务绑定的托管目录）。
+
+## 升级审计（2026-09-30）
+
+- Pi 从 0.85.1 升至 0.99.1 后，真实 CLI 参数、必要 `get_state` 字段及 `get_commands` 已验证；内置命令新增 `/bug`，避免在 GUI 误发给模型。Pi 0.99.0 新增官方内置 MCP/Codemode/tool-search；DeepPi 通过托管 Pi 的 `pi mcp add/remove/list/login/logout` 管理 MCP，并用 `pi mcp list --json` 显示实际连接状态和工具。Codemode 写入 Pi `settings.json` 的 `defaultTools`、`codemode.mode`、`codemode.inlineBudget`。
+- 隔离端到端：DeepPi 的 Rust 桥经托管 Node/Pi 执行 `pi mcp add/list/remove`，本地 stdio fixture 被报告为 `connected` 且列出 `fixture_echo`；Codemode 全局/项目设置写入与合并规则有单测及设置页 smoke 覆盖。
+- DSH 从 0.1.5-rc.2 升级到 0.2.0-rc.2 后，按宿主参数可启动并打印带 token 的回环 URL；跟随 HTTP 跳转的探测最终得到 401。因此只证明进程启动与监听，不证明浏览器 cookie、会话同步或 Host API 交互兼容。
+- 真实 DSH profile 中，`dshmarket@1.52.0`、`dsh-codex-subscription@2.1.4`、`@mars-sea/dsh-commandcode-provider@0.11.8`、`dsh-better-sidebar@0.22.1` 因 peerDependencies 不接受 DSH 0.2.0-rc.2 而被跳过。此前尝试升级 dshmarket@1.66.5 遇到 npm `ERESOLVE`。不得把主机启动报告为插件兼容。
+- 升级前两个 DSH 0.1.5-rc.2 目录缺少 `package.json` 和 `lib/bin.js`；虽然保留了 previous 指针，但旧运行时回滚未验证可用。
+- 托盘仅提示在线、非 stale、无错误且高于上述基线的 Pi/DSH **稳定版**；DSH rc 仍可在设置里手动检查、安装，不主动弹出提示。通知不限制手动安装，不静默升级。
 
 ## 覆盖测试
 

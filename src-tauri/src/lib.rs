@@ -9,7 +9,6 @@ mod bridge;
 mod checklist;
 mod credentials;
 mod desktop_hook;
-mod diagnostics;
 mod dialog_text;
 mod dsh;
 mod dsh_api;
@@ -27,6 +26,7 @@ mod git_status;
 mod git_sync;
 #[cfg(all(test, windows))]
 mod git_test_support;
+mod glass_window;
 mod market;
 pub mod message;
 mod native_pi;
@@ -34,6 +34,8 @@ mod operation;
 mod package;
 mod pet;
 mod pi_auth;
+mod pi_codemode;
+mod pi_mcp;
 mod pi_model_selection;
 mod pi_model_settings;
 mod pi_slash;
@@ -230,9 +232,6 @@ pub fn run() {
             }
             let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
                 startup::await_startup,
-                diagnostics::diagnostics_snapshot,
-                diagnostics::diagnostics_clear,
-                diagnostics::diagnostics_export,
                 board::open_board_window,
                 pet::open_pet_window,
                 pet::save_pet_position,
@@ -365,6 +364,11 @@ pub fn run() {
                 shell::resize_shell,
                 shell::stop_shell,
                 runtime::runtime_status,
+                pi_mcp::pi_mcp_list_servers,
+                pi_mcp::pi_mcp_login,
+                pi_mcp::pi_mcp_logout,
+                pi_codemode::pi_codemode_settings,
+                pi_codemode::save_pi_codemode_settings,
                 runtime::check_runtime_updates,
                 runtime::clear_runtime_update_cache,
                 runtime::install_runtime,
@@ -375,6 +379,7 @@ pub fn run() {
                 prompt_enhance::enhance_prompt,
                 agentic_translate::translate_agentic_texts,
                 settings::get_settings,
+                glass_window::set_main_window_material,
                 settings::save_settings,
                 proxy::proxy_test,
                 theme::theme_export,

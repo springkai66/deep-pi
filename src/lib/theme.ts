@@ -39,6 +39,36 @@ export interface ThemeTypography {
   sessionFontSize?: number;
 }
 
+export type ThemeSurfaceMaterial = "solid" | "glass";
+export type ThemeWindowMaterial = "none" | "acrylic";
+
+export interface ThemeTransparencyRange {
+  min: number;
+  max: number;
+  default: number;
+}
+
+/** Visual behavior is data so new themes can reuse the existing surface and window treatments. */
+export interface ThemeEffects {
+  surfaceMaterial?: ThemeSurfaceMaterial;
+  transparency?: ThemeTransparencyRange;
+  backdropBlur?: number;
+  backdropSaturation?: number;
+  windowMaterial?: ThemeWindowMaterial;
+  ambient?: {
+    primaryColor?: string;
+    primaryOpacity?: number;
+    primarySpread?: number;
+    primaryX?: number;
+    primaryY?: number;
+    secondaryColor?: string;
+    secondaryOpacity?: number;
+    secondaryX?: number;
+    secondaryY?: number;
+    secondarySpread?: number;
+  };
+}
+
 export interface ThemePack {
   $schema?: string;
   id: string;
@@ -51,6 +81,7 @@ export interface ThemePack {
   /** 同一主题的浅色变体；缺失时浅色模式复用 colors。 */
   light?: Partial<ThemeColors>;
   typography?: ThemeTypography;
+  effects?: ThemeEffects;
 }
 
 export const THEME_SCHEMA_URL = "https://deeppi.dev/schemas/theme.v1.json";
@@ -77,6 +108,84 @@ export const THEME_TOKENS: Record<keyof ThemeColors, string> = {
 };
 
 export const THEME_COLOR_KEYS = Object.keys(THEME_TOKENS) as Array<keyof ThemeColors>;
+
+export const GLASS_THEME_ID = "frosted-glass";
+export const DEFAULT_THEME_TRANSPARENCY: ThemeTransparencyRange = { min: 0, max: 100, default: 50 };
+
+/** 磨砂玻璃主题：调色、字体与表面效果均由主题包参数驱动。 */
+export const FROSTED_GLASS_THEME: ThemePack = {
+  $schema: THEME_SCHEMA_URL,
+  id: GLASS_THEME_ID,
+  name: "磨砂玻璃",
+  author: "DeepPi",
+  version: "1.0.0",
+  description: "柔和的蓝紫色磨砂玻璃界面，可调整面板透明程度。",
+  colorScheme: "dark",
+  colors: {
+    pageBg: "#111723",
+    surface: "#202b3c",
+    surfaceAlt: "#192435",
+    surfaceRaised: "#28374a",
+    surfaceHover: "#32445a",
+    border: "rgba(225, 238, 255, 0.14)",
+    borderStrong: "rgba(225, 238, 255, 0.24)",
+    text: "#e4edf8",
+    textStrong: "#f5f9ff",
+    textMuted: "#9eafc4",
+    textSubtle: "#8194aa",
+    accent: "#8bd5f5",
+    accentInk: "#132433",
+    statusWaiting: "#f0cf87",
+    statusRunning: "#8bd5f5",
+    statusFailed: "#ff8585",
+    statusDone: "#8baeff",
+  },
+  light: {
+    pageBg: "#e9eff7",
+    surface: "#f8fbff",
+    surfaceAlt: "#eef4fb",
+    surfaceRaised: "#ffffff",
+    surfaceHover: "#e4eef9",
+    border: "rgba(60, 82, 112, 0.16)",
+    borderStrong: "rgba(60, 82, 112, 0.28)",
+    text: "#26364a",
+    textStrong: "#17263a",
+    textMuted: "#53677f",
+    textSubtle: "#687c94",
+    accent: "#167ba8",
+    accentInk: "#ffffff",
+    statusWaiting: "#99630b",
+    statusRunning: "#167ba8",
+    statusFailed: "#b33434",
+    statusDone: "#315fc0",
+  },
+  typography: {
+    appFont: `"Aptos", "Segoe UI Variable", "Microsoft YaHei UI", sans-serif`,
+    sessionFont: `"Aptos", "Segoe UI Variable", "Microsoft YaHei UI", sans-serif`,
+    codeFont: `"JetBrains Mono", "Cascadia Code", Consolas, monospace`,
+    appFontSize: 13,
+    sessionFontSize: 13,
+  },
+  effects: {
+    surfaceMaterial: "glass",
+    transparency: DEFAULT_THEME_TRANSPARENCY,
+    backdropBlur: 16,
+    backdropSaturation: 1.2,
+    windowMaterial: "acrylic",
+    ambient: {
+      primaryColor: "#8bd5f5",
+      primaryOpacity: 16,
+      primarySpread: 38,
+      primaryX: 18,
+      primaryY: 8,
+      secondaryColor: "#9a8cff",
+      secondaryOpacity: 12,
+      secondarySpread: 42,
+      secondaryX: 82,
+      secondaryY: 84,
+    },
+  },
+};
 
 /** 方案 A「Command Flow」精密流式主题：深空黑 + 翠绿强调色。 */
 export const COMMAND_FLOW_THEME: ThemePack = {
@@ -134,7 +243,7 @@ export const COMMAND_FLOW_THEME: ThemePack = {
   },
 };
 
-export const BUILT_IN_THEMES: ThemePack[] = [COMMAND_FLOW_THEME];
+export const BUILT_IN_THEMES: ThemePack[] = [COMMAND_FLOW_THEME, FROSTED_GLASS_THEME];
 
 export const DEFAULT_THEME_ID = COMMAND_FLOW_THEME.id;
 
@@ -177,12 +286,63 @@ export interface ThemeApplication {
  * 把主题 + 配色模式编译成 CSS 变量表。
  * 字体设置由调用方（applyAppearance）叠加用户自定义后写入，这里只给出主题默认值。
  */
-export function themeCssVariables(theme: ThemePack, scheme: ThemeColorScheme): Record<string, string> {
+export function themeTransparencyRange(theme: ThemePack): ThemeTransparencyRange {
+  return theme.effects?.transparency ?? DEFAULT_THEME_TRANSPARENCY;
+}
+
+export function clampThemeTransparency(value: unknown, range: ThemeTransparencyRange = DEFAULT_THEME_TRANSPARENCY): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return range.default;
+  return Math.round(Math.min(range.max, Math.max(range.min, value)));
+}
+function clampEffectNumber(value: unknown, min: number, max: number, fallback: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(min, value));
+}
+
+function setAmbientVariables(variables: Record<string, string>, ambient?: ThemeEffects["ambient"]): void {
+  const defaults = ambient
+    ? { primaryOpacity: 16, primarySpread: 38, primaryX: 18, primaryY: 8, secondaryOpacity: 12, secondarySpread: 42, secondaryX: 82, secondaryY: 84 }
+    : { primaryOpacity: 0, primarySpread: 38, primaryX: 18, primaryY: 8, secondaryOpacity: 0, secondarySpread: 42, secondaryX: 82, secondaryY: 84 };
+  for (const [key, color, opacity, spread, x, y, defaultOpacity, defaultSpread, defaultX, defaultY] of [
+    ["primary", ambient?.primaryColor, ambient?.primaryOpacity, ambient?.primarySpread, ambient?.primaryX, ambient?.primaryY, defaults.primaryOpacity, defaults.primarySpread, defaults.primaryX, defaults.primaryY],
+    ["secondary", ambient?.secondaryColor, ambient?.secondaryOpacity, ambient?.secondarySpread, ambient?.secondaryX, ambient?.secondaryY, defaults.secondaryOpacity, defaults.secondarySpread, defaults.secondaryX, defaults.secondaryY],
+  ] as const) {
+    variables[`--theme-glow-${key}`] = isSafeColor(color) ? color.trim() : "transparent";
+    variables[`--theme-glow-${key}-opacity`] = `${clampEffectNumber(opacity, 0, 100, defaultOpacity)}%`;
+    variables[`--theme-glow-${key}-spread`] = `${clampEffectNumber(spread, 0, 100, defaultSpread)}%`;
+    variables[`--theme-glow-${key}-x`] = `${clampEffectNumber(x, 0, 100, defaultX)}%`;
+    variables[`--theme-glow-${key}-y`] = `${clampEffectNumber(y, 0, 100, defaultY)}%`;
+  }
+}
+
+
+/** Compile one theme's colors and effect parameters into root CSS variables. */
+export function themeCssVariables(
+  theme: ThemePack,
+  scheme: ThemeColorScheme,
+  themeTransparency?: number,
+): Record<string, string> {
   const colors = resolveThemeColors(theme, scheme);
   const variables: Record<string, string> = {};
+  const effects = theme.effects;
+  const range = themeTransparencyRange(theme);
+  const transparency = clampThemeTransparency(themeTransparency ?? range.default, range);
+  if (effects?.surfaceMaterial === "glass") {
+    variables["--theme-transparency"] = `${transparency}%`;
+    variables["--theme-backdrop-blur"] = `${clampEffectNumber(effects.backdropBlur, 0, 40, 16)}px`;
+    variables["--theme-backdrop-saturation"] = `${clampEffectNumber(effects.backdropSaturation, 0, 3, 1.2)}`;
+    setAmbientVariables(variables, effects.ambient);
+  } else if (effects?.windowMaterial === "acrylic") {
+    setAmbientVariables(variables, effects.ambient);
+  }
   for (const key of THEME_COLOR_KEYS) {
     const value = colors[key];
-    if (typeof value === "string" && value.trim()) variables[THEME_TOKENS[key]] = value.trim();
+    if (typeof value !== "string" || !value.trim()) continue;
+    const translucentSurface = effects?.surfaceMaterial === "glass" &&
+      ["surface", "surfaceAlt", "surfaceRaised", "surfaceHover"].includes(key);
+    variables[THEME_TOKENS[key]] = translucentSurface && transparency > 0
+      ? `color-mix(in srgb, ${value.trim()} ${100 - transparency}%, transparent)`
+      : value.trim();
   }
   return variables;
 }
@@ -210,6 +370,56 @@ function clampFontSize(value: unknown): number | undefined {
   const rounded = Math.round(value);
   if (rounded < 9 || rounded > 32) return undefined;
   return rounded;
+}
+
+function parseThemeEffects(raw: unknown): ThemeEffects | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const source = raw as Record<string, unknown>;
+  const effects: ThemeEffects = {};
+
+  if (source.surfaceMaterial === "solid" || source.surfaceMaterial === "glass") {
+    effects.surfaceMaterial = source.surfaceMaterial;
+  }
+  if (source.windowMaterial === "none" || source.windowMaterial === "acrylic") {
+    effects.windowMaterial = source.windowMaterial;
+  }
+  if (typeof source.backdropBlur === "number" && Number.isFinite(source.backdropBlur)) {
+    effects.backdropBlur = clampEffectNumber(source.backdropBlur, 0, 40, 16);
+  }
+  if (typeof source.backdropSaturation === "number" && Number.isFinite(source.backdropSaturation)) {
+    effects.backdropSaturation = clampEffectNumber(source.backdropSaturation, 0, 3, 1.2);
+  }
+  if (source.transparency && typeof source.transparency === "object" && !Array.isArray(source.transparency)) {
+    const range = source.transparency as Record<string, unknown>;
+    const min = range.min;
+    const max = range.max;
+    const defaultValue = range.default;
+    if (typeof min === "number" && Number.isFinite(min) &&
+      typeof max === "number" && Number.isFinite(max) &&
+      typeof defaultValue === "number" && Number.isFinite(defaultValue)) {
+      const parsed = { min: Math.round(min), max: Math.round(max), default: Math.round(defaultValue) };
+      if (parsed.min >= 0 && parsed.max <= 100 && parsed.min <= parsed.default && parsed.default <= parsed.max) {
+        effects.transparency = parsed;
+      }
+    }
+  }
+  if (source.ambient && typeof source.ambient === "object" && !Array.isArray(source.ambient)) {
+    const ambientSource = source.ambient as Record<string, unknown>;
+    const ambient: NonNullable<ThemeEffects["ambient"]> = {};
+    for (const key of ["primaryColor", "secondaryColor"] as const) {
+      if (isSafeColor(ambientSource[key])) ambient[key] = ambientSource[key].trim();
+    }
+    for (const key of [
+      "primaryOpacity", "secondaryOpacity", "primarySpread", "secondarySpread",
+      "primaryX", "primaryY", "secondaryX", "secondaryY",
+    ] as const) {
+      const value = ambientSource[key];
+      if (typeof value === "number" && Number.isFinite(value)) ambient[key] = clampEffectNumber(value, 0, 100, 0);
+    }
+    if (Object.keys(ambient).length) effects.ambient = ambient;
+  }
+
+  return Object.keys(effects).length ? effects : undefined;
 }
 
 export type ThemeParseResult =
@@ -265,9 +475,9 @@ export function parseThemePack(raw: unknown): ThemeParseResult {
   if (source.typography && typeof source.typography === "object" && !Array.isArray(source.typography)) {
     const typeSource = source.typography as Record<string, unknown>;
     const parsed: ThemeTypography = {};
-    if (isSafeFontStack(typeSource.appFont)) parsed.appFont = typeSource.appFont;
-    if (isSafeFontStack(typeSource.sessionFont)) parsed.sessionFont = typeSource.sessionFont;
-    if (isSafeFontStack(typeSource.codeFont)) parsed.codeFont = typeSource.codeFont;
+    if (isSafeFontStack(typeSource.appFont)) parsed.appFont = typeSource.appFont.trim();
+    if (isSafeFontStack(typeSource.sessionFont)) parsed.sessionFont = typeSource.sessionFont.trim();
+    if (isSafeFontStack(typeSource.codeFont)) parsed.codeFont = typeSource.codeFont.trim();
     const appSize = clampFontSize(typeSource.appFontSize);
     if (appSize) parsed.appFontSize = appSize;
     const sessionSize = clampFontSize(typeSource.sessionFontSize);
@@ -275,6 +485,7 @@ export function parseThemePack(raw: unknown): ThemeParseResult {
     if (Object.keys(parsed).length) typography = parsed;
   }
 
+  const effects = parseThemeEffects(source.effects);
   const theme: ThemePack = {
     $schema: THEME_SCHEMA_URL,
     id,
@@ -289,6 +500,7 @@ export function parseThemePack(raw: unknown): ThemeParseResult {
   }
   if (light) theme.light = light;
   if (typography) theme.typography = typography;
+  if (effects) theme.effects = effects;
   return { ok: true, theme };
 }
 
@@ -315,6 +527,7 @@ export function serializeTheme(theme: ThemePack): string {
   if (theme.description) ordered.description = theme.description;
   ordered.colorScheme = theme.colorScheme;
   ordered.typography = theme.typography ?? {};
+  if (theme.effects) ordered.effects = theme.effects;
   ordered.colors = theme.colors;
   if (theme.light) ordered.light = theme.light;
   return `${JSON.stringify(ordered, null, 2)}\n`;

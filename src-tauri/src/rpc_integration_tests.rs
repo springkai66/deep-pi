@@ -337,12 +337,10 @@ fn real_pi_executes_a_tool_and_restores_the_same_session() {
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut tool_finished = false;
     let mut final_text = false;
-    let mut diagnostics = Vec::new();
     loop {
         let event = events
             .recv_timeout(deadline.saturating_duration_since(Instant::now()))
             .expect("Pi did not settle");
-        diagnostics.push(json!({"type":event["type"],"error":event["message"]["errorMessage"],"stop":event["message"]["stopReason"]}));
         if event["type"] == "tool_execution_end" {
             assert_eq!(event["isError"], false, "{event}");
             assert!(event["result"]
@@ -364,7 +362,7 @@ fn real_pi_executes_a_tool_and_restores_the_same_session() {
     let served = model.finish();
     assert!(
         tool_finished && final_text,
-        "Model fixture: {served:?}; Pi events: {diagnostics:?}"
+        "Model fixture: {served:?}"
     );
     let before = transport
         .request(json!({"type":"get_messages"}), Duration::from_secs(5))

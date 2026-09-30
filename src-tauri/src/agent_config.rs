@@ -268,7 +268,7 @@ pub async fn save_mcp_server(
 ) -> Result<(), String> {
     let paths = paths.inner().clone();
     run_blocking(move || {
-        save_mcp_server_config(
+        crate::pi_mcp::save_server_config(
             &paths,
             request.scope.unwrap_or(ConfigScope::Global),
             request.project_path.as_deref(),
@@ -279,6 +279,24 @@ pub async fn save_mcp_server(
     .await
 }
 
+pub(crate) fn delete_mcp_server_config(
+    paths: &AppPaths,
+    scope: ConfigScope,
+    project_path: Option<&str>,
+    name: &str,
+) -> Result<(), String> {
+    let name = name.trim();
+    validate_entry_name(name)?;
+    let path = mcp_file(paths, scope, project_path)?;
+    let mut value = read_json_file(&path)?;
+    let Some(mut servers) = value.get("mcpServers").and_then(Value::as_object).cloned() else {
+        return Ok(());
+    };
+    servers.remove(name);
+    value["mcpServers"] = Value::Object(servers);
+    write_json_file(&path, &value)
+}
+
 #[tauri::command]
 pub async fn delete_mcp_server(
     paths: State<'_, AppPaths>,
@@ -286,20 +304,12 @@ pub async fn delete_mcp_server(
 ) -> Result<(), String> {
     let paths = paths.inner().clone();
     run_blocking(move || {
-        let name = request.name.trim();
-        validate_entry_name(name)?;
-        let path = mcp_file(
+        crate::pi_mcp::remove_server(
             &paths,
             request.scope.unwrap_or(ConfigScope::Global),
             request.project_path.as_deref(),
-        )?;
-        let mut value = read_json_file(&path)?;
-        let Some(mut servers) = value.get("mcpServers").and_then(Value::as_object).cloned() else {
-            return Ok(());
-        };
-        servers.remove(name);
-        value["mcpServers"] = Value::Object(servers);
-        write_json_file(&path, &value)
+            &request.name,
+        )
     })
     .await
 }

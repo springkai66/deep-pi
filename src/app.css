@@ -163,18 +163,20 @@ body.panel-resizing { cursor: col-resize; user-select: none; }
 aside.project-sidebar, aside.file-panel, aside.git-sidebar { position: relative; }
 
 /* 面板折叠按钮：骑在侧栏与中间窗口的分界线上（左右各压一半）。 */
+/* 面板切换按钮保持在各自边框内，避免视觉上悬浮在分隔线外。 */
 .panel-toggle {
   position: absolute;
   z-index: 7;
   display: grid;
   place-items: center;
-  width: 26px;
-  height: 26px;
+  width: 30px;
+  height: 30px;
   padding: 0;
   border: 1px solid var(--border-strong);
-  border-radius: 5px;
+  border-radius: 8px;
   color: var(--text-muted);
-  background: var(--surface-raised);
+  background: var(--surface);
+  box-shadow: 0 2px 8px rgb(0 0 0 / 10%);
   cursor: pointer;
 }
 
@@ -183,15 +185,15 @@ aside.project-sidebar, aside.file-panel, aside.git-sidebar { position: relative;
   background: var(--surface-hover);
 }
 
-.project-sidebar > .panel-toggle { top: 12px; right: -13px; }
-.file-panel > .panel-toggle { top: 8px; left: -13px; }
+.project-sidebar > .panel-toggle { top: 10px; right: 10px; }
+.file-panel > .panel-toggle { top: 10px; left: 10px; }
 
-/* 展开按钮：该侧已收起，没有分界线只有窗口边缘，因此贴窗口边摆放；垂直位置与折叠按钮一致，切换时不跳动。 */
-.workspace > .panel-toggle.sidebar-toggle { top: 12px; left: 3px; }
-.workspace > .panel-toggle.files-toggle { top: 8px; right: 3px; }
+/* 展开按钮同样留在工作区边缘以内，避免像浮在分隔线外。 */
+.workspace > .panel-toggle.sidebar-toggle { top: 10px; left: 10px; }
+.workspace > .panel-toggle.files-toggle { top: 10px; right: 10px; }
 
-/* 为压线/贴边按钮预留位置，避免压住搜索框与标签。 */
-.app-shell .project-sidebar .task-search { margin-right: 24px; }
+/* 侧栏按钮已在面板内部，不再为边界外按钮额外让出搜索宽度。 */
+.app-shell .project-sidebar .task-search { margin-right: 12px; }
 /* 文件栏标题避开骑在左边界上的收起按钮。 */
 .app-shell .file-panel .file-sidebar > header { padding-left: 30px; }
 .app-shell.sidebar-hidden .workspace .task-tabs-shell,
@@ -937,4 +939,247 @@ aside.project-sidebar, aside.file-panel, aside.git-sidebar { position: relative;
   border-color: #d38b84 !important;
   color: #7f2925 !important;
   background: #fbe8e5 !important;
+}
+
+
+/* —— 主工作区：简洁清爽视觉覆盖 —— */
+:root { --topbar-h: 34px; }
+.app-shell { background: var(--page-bg); }
+.topbar { min-height: 34px; padding: 0 12px; gap: 10px; background: var(--surface); }
+.workspace-switcher { gap: 4px; padding: 0; border: 0; border-radius: 0; background: transparent; }
+.workspace-switcher button {
+  justify-content: center; width: 30px; height: 30px; padding: 0; border-radius: 8px;
+  color: var(--text-muted); transition: color .15s ease, background .15s ease, box-shadow .15s ease;
+}
+.workspace-switcher button:hover:not(.selected) { color: var(--text); background: var(--surface-alt); }
+.workspace-switcher button.selected {
+  color: var(--accent) !important; background: var(--surface-raised) !important;
+  box-shadow: inset 0 -2px var(--accent); font-weight: 650;
+}
+.stage-crumbs { gap: 6px; padding-left: 2px; }
+.crumb-project { padding: 4px 6px; border: 0; background: transparent; font-weight: 650; }
+.toolbar { gap: 2px; }
+.toolbar button { width: 30px; height: 30px; border-radius: 8px; color: var(--text-muted); }
+.toolbar button:hover, .toolbar button.active, .task-actions button:hover {
+  border-color: var(--border); color: var(--text-strong); background: var(--surface-hover);
+}
+.toolbar button.primary { color: var(--accent); background: var(--surface-raised); }
+.project-sidebar, .file-panel, .task-sidebar { background: var(--surface); }
+.project-sidebar, .file-panel { border-color: var(--border); }
+.app-shell .project-sidebar .task-search { margin: 12px 52px 10px 12px; min-height: 34px; padding: 5px 10px; border-radius: 9px; background: var(--surface-alt); }
+.projects-section { padding: 10px 12px 4px; }
+.projects-header { min-height: 32px; padding: 0 2px; color: var(--text-muted); letter-spacing: .04em; }
+.project-group { margin-top: 4px; padding: 2px; border: 1px solid transparent; border-radius: 10px; }
+.project-group.selected { border-color: var(--border) !important; background: var(--surface-alt) !important; box-shadow: inset 2px 0 var(--accent); }
+.project-header, .project-open { min-height: 42px; }
+.project-open { padding: 5px 8px; }
+.project-task-section { padding-left: 12px; }
+.project-task-section > header { padding-right: 10px; color: var(--text-subtle); }
+.task-row { min-height: 40px; padding: 4px 8px; border-radius: 8px; }
+.task-row.selected { background: var(--surface-raised) !important; box-shadow: inset 2px 0 var(--accent); }
+.task-row:hover { background: var(--surface-alt); }
+.app-shell .file-panel .file-sidebar > header { padding: 10px 12px 10px 30px; }
+.app-shell .file-panel .file-search { margin: 0 12px 10px; min-height: 34px; padding: 5px 9px; border-radius: 9px; background: var(--surface-alt); }
+.app-shell .file-panel .search-modes { margin: 0 12px 8px; gap: 3px; }
+.app-shell .file-panel .search-modes button { min-height: 27px; border-radius: 6px; }
+.app-shell .file-panel .file-tree button { height: 30px; padding-right: 12px; }
+.app-shell .file-panel .file-tree button:hover, .app-shell .file-panel .file-tree button.active { background: var(--surface-alt); }
+.app-shell .file-panel footer { padding: 9px 12px; border-color: var(--border); }
+.workspace-content { padding: 12px; }
+.empty-state { gap: 0; padding-bottom: 6%; color: var(--text-muted); }
+.empty-state svg { color: var(--text-subtle); }
+.empty-state h1 { margin: 10px 0 16px; color: var(--text-strong) !important; font-size: 15px; font-weight: 650; }
+.start-button {
+  height: 36px; padding: 0 14px; border: 1px solid var(--border-strong) !important; border-radius: 8px;
+  color: var(--text-strong) !important; background: var(--surface) !important; box-shadow: 0 1px 2px rgb(0 0 0 / 6%);
+  font-weight: 600; transition: border-color .15s ease, background .15s ease, color .15s ease, transform .15s ease;
+}
+.start-button:hover:not(:disabled) { border-color: var(--accent) !important; color: var(--accent) !important; background: var(--surface-hover) !important; transform: translateY(-1px); }
+.start-button:active:not(:disabled) { transform: translateY(0); }
+@media (max-width: 760px) {
+  .topbar { padding: 0 8px; }
+  .stage-crumbs { padding-left: 0; }
+  .workspace-content { padding: 8px; }
+}
+
+/* 内侧栏按钮的安全区：按钮固定在边框内，内容避开其 30px 区域。 */
+.app-shell .file-panel .file-sidebar > header { padding-left: 52px; }
+.app-shell.sidebar-hidden .workspace .task-tabs-shell { padding-left: 50px; }
+.app-shell.files-hidden .workspace .task-tabs-shell { padding-right: 50px; }
+
+/* 侧栏切换按钮：统一基线与内缩，不再以独立方块浮在内容上。 */
+.panel-toggle {
+  top: 12px;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  box-shadow: none;
+}
+.panel-toggle:hover { color: var(--text-strong); background: var(--surface-alt); }
+.project-sidebar > .panel-toggle { top: 12px; right: 12px; }
+.file-panel > .panel-toggle { top: 12px; left: 12px; }
+.workspace > .panel-toggle.sidebar-toggle { top: 12px; left: 12px; }
+.workspace > .panel-toggle.files-toggle { top: 12px; right: 12px; }
+.app-shell .project-sidebar .task-search { margin-right: 48px; }
+.app-shell .file-panel .file-sidebar > header { padding-left: 48px; }
+.app-shell.sidebar-hidden .workspace .task-tabs-shell { padding-left: 44px; }
+.app-shell.files-hidden .workspace .task-tabs-shell { padding-right: 44px; }
+
+/* Theme effects are consumed through generic material attributes and variables. */
+:root {
+  --theme-transparency: 0%;
+  --theme-backdrop-blur: 0px;
+  --theme-backdrop-saturation: 1;
+  --theme-glow-primary: transparent;
+  --theme-glow-primary-opacity: 0%;
+  --theme-glow-primary-spread: 38%;
+  --theme-glow-primary-x: 18%;
+  --theme-glow-primary-y: 8%;
+  --theme-glow-secondary: transparent;
+  --theme-glow-secondary-opacity: 0%;
+  --theme-glow-secondary-spread: 42%;
+  --theme-glow-secondary-x: 82%;
+  --theme-glow-secondary-y: 84%;
+}
+
+:root[data-surface-material="glass"] .app-shell {
+  background:
+    radial-gradient(ellipse at var(--theme-glow-primary-x) var(--theme-glow-primary-y), color-mix(in srgb, var(--theme-glow-primary) var(--theme-glow-primary-opacity), transparent), transparent var(--theme-glow-primary-spread)),
+    radial-gradient(ellipse at var(--theme-glow-secondary-x) var(--theme-glow-secondary-y), color-mix(in srgb, var(--theme-glow-secondary) var(--theme-glow-secondary-opacity), transparent), transparent var(--theme-glow-secondary-spread)),
+    var(--page-bg) !important;
+}
+
+:root[data-surface-material="glass"] :is(
+  .topbar,
+  .project-sidebar,
+  .file-panel,
+  .git-sidebar,
+  .task-sidebar,
+  .task-tabs-shell,
+  .task-tabs,
+  .workspace-switcher,
+  .chat-pane,
+  .chat-pane > header,
+  .settings-modal,
+  .settings-header,
+  .settings-navigation,
+  .settings-group,
+  .embedded-panel,
+  .provider-page,
+  .market-page,
+  .editor-modal,
+  .editor-backdrop,
+  .provider-editor,
+  .catalog-panel,
+  .app-dialog,
+  .context-menu,
+  .stats-panel,
+  .turn-panel,
+  .slash-menu,
+  .file-preview-layer,
+  .shell-overlay,
+  .app-update-float,
+  .toast,
+  .board-header,
+  .board-column,
+  .dialog-backdrop,
+  .board-titlebar,
+  .board-body,
+  .checklist-titlebar,
+  .checklist-body,
+  .quadrant,
+  .quadrant-header,
+  .font-list,
+  .recovery-panel,
+  .file-sidebar,
+  .task-section > header
+) {
+  -webkit-backdrop-filter: blur(var(--theme-backdrop-blur)) saturate(var(--theme-backdrop-saturation));
+  backdrop-filter: blur(var(--theme-backdrop-blur)) saturate(var(--theme-backdrop-saturation));
+}
+
+:root[data-surface-material="glass"] :is(.settings-page, .workspace, .settings-modal, .project-sidebar .task-sidebar) {
+  background: transparent !important;
+}
+
+:root[data-surface-material="glass"] :is(.board-window, .checklist-window) {
+  background: var(--surface) !important;
+}
+
+:root[data-surface-material="glass"] .terminal-pane {
+  border-color: var(--border-strong) !important;
+  background: var(--surface-alt) !important;
+}
+
+:root[data-surface-material="glass"] .terminal-pane .terminal {
+  background: var(--surface-alt) !important;
+}
+
+:root[data-surface-material="glass"] .chat-pane {
+  background: var(--surface) !important;
+}
+
+:root[data-surface-material="glass"] .chat-pane .message-content {
+  color: var(--text-strong) !important;
+  font-weight: 500;
+  text-shadow: 0 1px 1px color-mix(in srgb, var(--page-bg) 55%, transparent);
+}
+
+:root[data-surface-material="glass"] .chat-pane .tool-call-live-output {
+  background: var(--surface-alt) !important;
+}
+
+/* Acrylic is a native main-window material; auxiliary webviews never set this attribute. */
+:root[data-window-material="acrylic"] body {
+  background: transparent !important;
+}
+
+:root[data-window-material="acrylic"] .app-shell {
+  background:
+    radial-gradient(ellipse at var(--theme-glow-primary-x) var(--theme-glow-primary-y), color-mix(in srgb, var(--theme-glow-primary) var(--theme-glow-primary-opacity), transparent), transparent var(--theme-glow-primary-spread)),
+    radial-gradient(ellipse at var(--theme-glow-secondary-x) var(--theme-glow-secondary-y), color-mix(in srgb, var(--theme-glow-secondary) var(--theme-glow-secondary-opacity), transparent), transparent var(--theme-glow-secondary-spread)),
+    transparent !important;
+}
+
+/* Only the exit confirmation keeps a scrim; settings stay as a centered window. */
+:root[data-surface-material="glass"] .settings-overlay {
+  background: transparent !important;
+}
+
+:root[data-surface-material="glass"] .dialog-backdrop {
+  background: color-mix(in srgb, var(--page-bg) calc(100% - var(--theme-transparency)), transparent) !important;
+}
+
+:root[data-surface-material="glass"] .app-dialog {
+  border-color: var(--border-strong) !important;
+  color: var(--text) !important;
+  background: var(--surface) !important;
+}
+
+:root[data-surface-material="glass"] .app-dialog::backdrop {
+  background: transparent !important;
+}
+
+:root[data-surface-material="glass"] .app-dialog h2 { color: var(--text-strong) !important; }
+:root[data-surface-material="glass"] .app-dialog p { color: var(--text-muted) !important; }
+
+:root[data-surface-material="glass"] .app-dialog .dialog-input {
+  border-color: var(--border-strong) !important;
+  color: var(--text) !important;
+  background: var(--surface-alt) !important;
+}
+
+:root[data-surface-material="glass"] .app-dialog .choice-button,
+:root[data-surface-material="glass"] .app-dialog .secondary-button {
+  border-color: var(--border-strong) !important;
+  color: var(--text) !important;
+  background: var(--surface-raised) !important;
+}
+
+:root[data-surface-material="glass"] .app-dialog .primary-button {
+  border-color: var(--accent) !important;
+  color: var(--accent-ink) !important;
+  background: var(--accent) !important;
 }

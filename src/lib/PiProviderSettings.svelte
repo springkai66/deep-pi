@@ -510,14 +510,14 @@
 
   function handleEditorKeydown(event: KeyboardEvent) {
     if (event.isComposing) return;
-    if (event.key !== "Escape") return;
+    if (event.key !== "Escape" || (!createOpen && !editorOpen)) return;
+    event.preventDefault();
     if (createOpen) {
       closeCreate();
       return;
     }
-    if (editorOpen) closeProviderEditor();
+    closeProviderEditor();
   }
-
   function applyProviderPreset(value: string) {
     if (selectionSaving) return;
     providerPreset = value;
@@ -1473,8 +1473,8 @@
   h1 { font-size: 16px; font-weight: 650; }
   .header-actions, .section-actions { gap: 6px; }
   .provider-groups { min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 14px; }
-  .detail-panel, .provider-group { border: 1px solid var(--border); border-radius: 6px; background: var(--surface); padding: 12px 14px; }
-  .section-heading { min-height: 28px; color: var(--text-muted); font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+  .detail-panel, .provider-group { padding: 0 0 16px; border: 0; border-bottom: 1px solid var(--border); border-radius: 0; background: transparent; }
+  .section-heading { min-height: 28px; color: var(--text-strong); font-size: 12px; font-weight: 600; letter-spacing: 0; }
   .group-title { display: inline-flex; align-items: center; gap: 8px; }
   .group-count { min-width: 14px; padding: 0 7px; border-radius: 9px; background: var(--surface-raised); color: var(--accent); font-size: 10px; font-weight: 700; line-height: 17px; text-align: center; }
   .provider-rows { display: grid; gap: 6px; margin-top: 10px; }

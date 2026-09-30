@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { CHAT_DETAIL_LEVELS, DEFAULT_APP_SETTINGS, cssCodeFontFamily, cssTerminalFontFamily } from "./settings";
+import { DEFAULT_THEME_TRANSPARENCY, FROSTED_GLASS_THEME, themeTransparencyRange } from "./theme";
 
 describe("managed workspace defaults", () => {
   it("uses only the DeepPi environment for new tasks", () => {
@@ -11,6 +12,10 @@ describe("managed workspace defaults", () => {
     expect(DEFAULT_APP_SETTINGS.proxyUrl).toBe("");
     expect(DEFAULT_APP_SETTINGS.proxyNoProxy).toBe("");
   });
+
+  it("keeps the desktop pet hidden in fallback settings", () => {
+    expect(DEFAULT_APP_SETTINGS.petEnabled).toBe(false);
+  });
 });
 describe("Pi conversation display choices", () => {
   it("offers only concise and full, defaulting new settings to concise", () => {
@@ -21,6 +26,22 @@ describe("Pi conversation display choices", () => {
     expect(DEFAULT_APP_SETTINGS.chatDetailLevel).toBe("concise");
   });
 });
+describe("theme transparency setting", () => {
+  it("defaults to 50% and uses the configured theme range", () => {
+    expect(DEFAULT_APP_SETTINGS.themeTransparency).toBe(DEFAULT_THEME_TRANSPARENCY.default);
+    expect(themeTransparencyRange(FROSTED_GLASS_THEME)).toEqual(DEFAULT_THEME_TRANSPARENCY);
+  });
+});
+describe("theme typography defaults", () => {
+  it("leaves font overrides unset so each theme can provide its typography", () => {
+    expect(DEFAULT_APP_SETTINGS.appFontName).toBe("");
+    expect(DEFAULT_APP_SETTINGS.sessionFontName).toBe("");
+    expect(DEFAULT_APP_SETTINGS.codeFont).toBe("");
+    expect(DEFAULT_APP_SETTINGS.appFontSize).toBeNull();
+    expect(DEFAULT_APP_SETTINGS.sessionFontSize).toBeNull();
+  });
+});
+
 
 describe("terminal font stacks", () => {
   it("keeps the native TUI on a monospace fallback stack", () => {

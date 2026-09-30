@@ -793,6 +793,7 @@ dependencies = [
  "tempfile",
  "ureq",
  "uuid",
+ "window-vibrancy",
  "windows",
  "windows-core 0.61.2",
  "windows-sys 0.61.2",

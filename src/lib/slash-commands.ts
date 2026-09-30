@@ -17,7 +17,7 @@ export interface SlashCommand {
   available: boolean;
 }
 
-/** Pi 0.85.1 内置命令（对齐托管包的 core/slash-commands.js）。 */
+/** Pi 0.99.1 内置命令（对齐托管包的 core/slash-commands.js）。 */
 export const BUILTIN_SLASH_COMMANDS: SlashCommand[] = [
   { name: "compact", description: "手动压缩会话上下文", source: "builtin", available: true },
   { name: "model", description: "选择本会话使用的模型", argumentHint: "[provider/model]", source: "builtin", available: true },
@@ -42,14 +42,16 @@ export const BUILTIN_SLASH_COMMANDS: SlashCommand[] = [
   { name: "logout", description: "移除 Provider 登录", source: "builtin", available: true },
   { name: "reload", description: "重新加载扩展/技能/提示词", source: "builtin", available: true },
   { name: "quit", description: "退出应用", source: "builtin", available: true },
+  { name: "bug", description: "报告 Pi 的问题", source: "builtin", available: false },
 ];
 export const HOST_SLASH_COMMANDS = new Set([
   "new", "settings", "login", "logout", "reload", "quit", "resume", "scoped-models",
   "changelog", "hotkeys", "import", "share", "trust",
 ]);
-
-export function slashCommandRoute(name: string, piCommands: PiCommand[]): "host" | "rpc" | "prompt" | "unknown" {
-  if (BUILTIN_SLASH_COMMANDS.some((command) => command.name === name)) {
+export function slashCommandRoute(name: string, piCommands: PiCommand[]): "host" | "rpc" | "prompt" | "blocked" | "unknown" {
+  const builtin = BUILTIN_SLASH_COMMANDS.find((command) => command.name === name);
+  if (builtin) {
+    if (!builtin.available) return "blocked";
     return HOST_SLASH_COMMANDS.has(name) ? "host" : "rpc";
   }
   return piCommands.some((command) => command.name === name) ? "prompt" : "unknown";

@@ -40,13 +40,14 @@
     projectId: string;
     shell: TerminalShell;
     codeFont: CodeFont;
+    themeCodeFont?: string;
     sessionFontName: string;
     sessionFontSize: number;
     colorMode: ColorMode;
     onClose: () => void;
   }
 
-  let { projectId, shell, codeFont, sessionFontName, sessionFontSize, colorMode, onClose }: Props = $props();
+  let { projectId, shell, codeFont, themeCodeFont, sessionFontName, sessionFontSize, colorMode, onClose }: Props = $props();
   let container: HTMLDivElement;
   let terminal: Terminal | undefined;
   let sessionId = $state<string | null>(null);
@@ -85,7 +86,7 @@
 
   $effect(() => {
     if (!terminal) return;
-    terminal.options.fontFamily = cssTerminalFontFamily(sessionFontName, codeFont);
+    terminal.options.fontFamily = cssTerminalFontFamily(sessionFontName, codeFont, themeCodeFont);
     terminal.options.fontSize = Math.round(Math.min(FONT_SIZE_RANGE.max, Math.max(FONT_SIZE_RANGE.min, sessionFontSize)));
     terminal.options.theme = terminalTheme(isLightColorMode(colorMode));
     requestAnimationFrame(() => {
@@ -111,7 +112,7 @@
       convertEol: false,
       cursorBlink: true,
       cursorStyle: "bar",
-      fontFamily: cssTerminalFontFamily(sessionFontName, codeFont),
+      fontFamily: cssTerminalFontFamily(sessionFontName, codeFont, themeCodeFont),
       fontSize: Math.round(Math.min(FONT_SIZE_RANGE.max, Math.max(FONT_SIZE_RANGE.min, sessionFontSize))),
       lineHeight: 1.2,
       letterSpacing: 0,

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ArrowLeft, Monitor, Palette, Server, Download, PackageOpen, Puzzle, Sparkles, Workflow, Wrench, Globe, Network, Upload, Trash2 } from "@lucide/svelte";
+  import { ArrowLeft, Search, Monitor, Palette, Server, Download, PackageOpen, Puzzle, Sparkles, Workflow, Wrench, Globe, Network, Upload, Trash2 } from "@lucide/svelte";
   import type { Snippet } from "svelte";
   import { onMount } from "svelte";
   import { invoke as nativeInvoke } from "@tauri-apps/api/core";
@@ -15,12 +15,12 @@
     resolveTheme,
     serializeTheme,
     themeFileName,
+    themeTransparencyRange,
   } from "./theme";
   import RuntimeSettings, { type RuntimeSettingsProps } from "./RuntimeSettings.svelte";
-  import { SETTINGS_CATEGORIES, nextSettingsCategory, parseTaskLimit, settingsGroups, type SettingsCategory } from "./settings-navigation";
+  import { SETTINGS_CATEGORIES, filterSettingsCategories, nextSettingsCategory, parseTaskLimit, settingsGroups, type SettingsCategory } from "./settings-navigation";
   import ExternalEditorSettings from "./ExternalEditorSettings.svelte";
   import { RING_RADIUS_RANGE } from "./pet-task-ring";
-  import DiagnosticsPanel from "./DiagnosticsPanel.svelte";
   import PiMcpSkillsSettings from "./PiMcpSkillsSettings.svelte";
   import { t, tm, getLocale } from "$lib/i18n.svelte";
   import { appMessageText } from "./app-messages";
@@ -28,7 +28,6 @@
   import "./settings-controls.css";
 
   interface Props extends Omit<RuntimeSettingsProps, "view"> {
-    onRestartDsh: () => void;
     category: SettingsCategory;
     onCategoryChange: (category: SettingsCategory) => void;
     onChangeSettings: (settings: AppSettings) => void;
@@ -43,18 +42,16 @@
     dsh: Snippet;
     closeBlocked?: boolean;
     saving?: boolean;
-    onDiagnosticsBusy: (busy: boolean) => void;
-    confirmDiagnosticsClear: () => Promise<boolean>;
   }
-  let { category, onCategoryChange, onChangeSettings, onEditorSaved, onClose, models, extensions, mcp, skills, workflows, dsh, closeBlocked = false, saving = false, onDiagnosticsBusy, confirmDiagnosticsClear, ...runtime }: Props = $props();
-  const icons = { general: Monitor, appearance: Palette, pi: Server, models: Server, extensions: PackageOpen, mcp: Puzzle, skills: Sparkles, workflows: Workflow, dsh: Globe, runtime: Download, network: Network, advanced: Wrench };
+  let { category, onCategoryChange, onChangeSettings, onEditorSaved, onClose, models, extensions, mcp, skills, workflows, dsh, closeBlocked = false, saving = false, ...runtime }: Props = $props();
+  const icons = { general: Monitor, appearance: Palette, pi: Server, models: Server, extensions: PackageOpen, mcp: Puzzle, skills: Sparkles, workflows: Workflow, dsh: Globe, network: Network, advanced: Wrench };
+  let search = $state("");
   let modelsVisited = $state(false);
   let extensionsVisited = $state(false);
   let mcpVisited = $state(false);
   let skillsVisited = $state(false);
   let workflowsVisited = $state(false);
   let dshVisited = $state(false);
-  let advancedVisited = $state(false);
   /** 工作流市场的 busy 与错误：面板在本组件内兜底渲染时的本地状态。 */
   let workflowsBusy = $state(false);
   let workflowsError = $state("");
@@ -92,10 +89,12 @@
   });
 
   const activeTheme = $derived(resolveTheme(runtime.settings.theme, runtime.settings.customThemes ?? []));
+  const effectiveAppFontSize = $derived(runtime.settings.appFontSize ?? activeTheme.typography?.appFontSize ?? 13);
+  const effectiveSessionFontSize = $derived(runtime.settings.sessionFontSize ?? activeTheme.typography?.sessionFontSize ?? 13);
   const themeOptions = $derived([...BUILT_IN_THEMES, ...(runtime.settings.customThemes ?? [])]);
   /** 字体选项：每个选项带预览字体栈，下拉里以对应字体渲染（原生 select 做不到）。 */
   const appFontOptions = $derived([
-    { value: "", label: t("系统默认"), previewFamily: cssAppFontFamily("", activeTheme.typography?.appFont) },
+    { value: "", label: t("跟随主题"), previewFamily: cssAppFontFamily("", activeTheme.typography?.appFont) },
     ...systemFonts.map((font) => ({ value: font, label: font, previewFamily: appFontPreviewStack(font) })),
   ]);
   const codeFontOptions = $derived.by(() => {
@@ -108,6 +107,7 @@
   });
   /** 下拉中当前选中的主题；旧配置里的未知 id 由 resolveTheme 回落到默认主题。 */
   const selectedTheme = $derived(themeOptions.find((option) => option.id === runtime.settings.theme) ?? activeTheme);
+  const transparencyRange = $derived(themeTransparencyRange(selectedTheme));
   /** 选中的主题若是用户导入的，则允许删除。 */
   const selectedCustomTheme = $derived((runtime.settings.customThemes ?? []).find((theme) => theme.id === runtime.settings.theme));
   let themeBusy = $state(false);
@@ -120,7 +120,13 @@
   function selectTheme(id: string) {
     themeNotice = "";
     themeError = "";
-    updateSettings({ theme: id });
+    const selected = resolveTheme(id, runtime.settings.customThemes ?? []);
+    updateSettings({
+      theme: id,
+      themeTransparency: selected.effects?.surfaceMaterial === "glass"
+        ? themeTransparencyRange(selected).default
+        : runtime.settings.themeTransparency,
+    });
   }
 
   async function exportTheme() {
@@ -170,7 +176,13 @@
         themeError = t("导入主题已达上限（{limit} 个），请先删除不再使用的主题", { limit: MAX_CUSTOM_THEMES });
         return;
       }
-      updateSettings({ customThemes: [...others, theme], theme: theme.id });
+      updateSettings({
+        customThemes: [...others, theme],
+        theme: theme.id,
+        themeTransparency: theme.effects?.surfaceMaterial === "glass"
+          ? themeTransparencyRange(theme).default
+          : runtime.settings.themeTransparency,
+      });
       themeNotice = t("已导入并应用主题「{name}」", { name: theme.name });
     } catch (error) {
       themeError = tm(String(error));
@@ -201,9 +213,9 @@
     if (category === "skills") skillsVisited = true;
     if (category === "workflows") workflowsVisited = true;
     if (category === "dsh") dshVisited = true;
-    if (category === "advanced") advancedVisited = true;
   });
-  const groups = $derived(settingsGroups());
+  const matches = $derived(filterSettingsCategories(search, t));
+  const groups = $derived(settingsGroups(SETTINGS_CATEGORIES.filter((item) => matches.includes(item.id))));
   const title = $derived(t(SETTINGS_CATEGORIES.find((item) => item.id === category)?.label ?? "设置"));
 
   function updateSettings(patch: Partial<AppSettings>) { onChangeSettings({ ...runtime.settings, ...patch }); }
@@ -261,7 +273,7 @@
 
   function navigate(event: KeyboardEvent, current: SettingsCategory) {
     if (event.isComposing || event.altKey || event.ctrlKey || event.metaKey) return;
-    const next = nextSettingsCategory(current, event.key);
+    const next = nextSettingsCategory(current, event.key, matches);
     if (!next) return;
     event.preventDefault();
     onCategoryChange(next);
@@ -277,10 +289,27 @@
   </header>
   <div class="settings-layout">
     <nav class="settings-navigation" aria-label={t("设置分类")}>
+      <div class="settings-search">
+        <Search size={15} aria-hidden="true" />
+        <input type="search" bind:value={search} aria-label={t("搜索设置")}
+          placeholder={t("搜索设置")}
+          onkeydown={(event) => {
+            if (event.key === "Escape" && search) {
+              event.stopPropagation();
+              search = "";
+            } else if (event.key === "ArrowDown" && matches.length) {
+              event.preventDefault();
+              document.getElementById(`settings-nav-${matches[0]}`)?.focus();
+            }
+          }} />
+      </div>
       {#each groups as group (group.label)}
         <div class="settings-nav-group">
-          <div class="settings-group-label" aria-hidden="true">{t(group.label)}</div>
-          {#each group.categories as item (item.id)}
+          <div class="settings-group-label">{t(group.label)}</div>
+          {#each group.categories as item, index (item.id)}
+            {#if item.subgroup && item.subgroup !== group.categories[index - 1]?.subgroup}
+              <div class="settings-subgroup-label">{t(item.subgroup)}</div>
+            {/if}
             {@const Icon = icons[item.id]}
             <button id={`settings-nav-${item.id}`} type="button" aria-current={category === item.id ? "page" : undefined}
               class:active={category === item.id} onclick={() => onCategoryChange(item.id)} onkeydown={(event) => navigate(event, item.id)}>
@@ -289,10 +318,11 @@
           {/each}
         </div>
       {/each}
+      {#if search && matches.length === 0}<p class="settings-no-results" role="status">{t("没有匹配的设置")}</p>{/if}
     </nav>
-    <div class="settings-body">
-      <h2>{title}</h2>
-      <div class="settings-panel" hidden={category !== "general"}>
+    <div class="settings-body" class:has-embedded={category === "models" || category === "extensions" || category === "mcp" || category === "skills" || category === "dsh" || category === "workflows"}>
+      <h2 id="settings-panel-title">{title}</h2>
+      <div class="settings-panel" role="region" aria-labelledby="settings-panel-title" hidden={category !== "general"}>
         <section class="settings-group" aria-labelledby="language-heading">
           <h3 id="language-heading">{t("语言")}</h3>
           <label class="setting-control"><strong>{t("界面语言")}</strong>
@@ -334,6 +364,7 @@
           </label>
           <p class="muted">{t("只影响之后打开的命令终端；Pi 终端仍用于 Pi TUI 会话。")}</p>
         </section>
+        <ExternalEditorSettings editor={runtime.settings.externalEditor} onSaved={onEditorSaved} />
         <section class="settings-group" aria-labelledby="notification-heading">
           <h3 id="notification-heading">{t("通知与桌宠")}</h3>
           <label class="setting-control setting-check">
@@ -378,12 +409,8 @@
             {#if petNotice}<p class="pet-notice" role="alert">{petNotice}</p>{/if}
           </div>
         </section>
-        <section class="settings-group" aria-labelledby="about-heading">
-          <h3 id="about-heading">{t("关于")}</h3>
-          <p class="muted">DeepPi {appVersion}</p>
-        </section>
       </div>
-      <div class="settings-panel" hidden={category !== "appearance"}>
+      <div class="settings-panel" role="region" aria-labelledby="settings-panel-title" hidden={category !== "appearance"}>
         <section class="settings-group" aria-labelledby="theme-heading">
           <div class="settings-group-header">
             <h3 id="theme-heading">{t("主题")}</h3>
@@ -397,6 +424,11 @@
             </div>
           </div>
           <p class="muted">{t("主题以 ")}<code>.deeppi-theme.json</code>{t(" 文件分发，包含配色与字体令牌；可导出分享，也可导入他人的主题。")}</p>
+          <label class="setting-control"><strong>{t("颜色模式")}</strong>
+            <select value={runtime.settings.colorMode} aria-label={t("颜色模式")} onchange={(event) => updateSettings({ colorMode: event.currentTarget.value as AppSettings["colorMode"] })}>
+              <option value="system">{t("跟随系统")}</option><option value="light">{t("浅色")}</option><option value="dark">{t("深色")}</option>
+            </select>
+          </label>
           <label class="setting-control"><strong>{t("主题")}</strong>
             <select value={runtime.settings.theme} aria-label={t("主题")} onchange={(event) => selectTheme(event.currentTarget.value)}>
               {#each themeOptions as option (option.id)}
@@ -421,21 +453,31 @@
           </div>
           {#if themeNotice}<p class="theme-status" role="status">{themeNotice}</p>{/if}
           {#if themeError}<p class="theme-error" role="alert">{tm(themeError)}</p>{/if}
+
+          {#if selectedTheme.effects?.surfaceMaterial === "glass"}
+            <label class="setting-control theme-transparency-control">
+              <span class="setting-copy">
+                <strong>{t("主题透明度")}</strong>
+                <small>{t("0% 为不透明，数值越高越透明。")}</small>
+              </span>
+              <span class="theme-transparency-slider">
+                <input type="range" min={transparencyRange.min} max={transparencyRange.max} step="1"
+                  value={runtime.settings.themeTransparency} aria-label={t("主题透明度")}
+                  oninput={(event) => updateSettings({ themeTransparency: Number(event.currentTarget.value) })} />
+                <output>{runtime.settings.themeTransparency}%</output>
+              </span>
+            </label>
+          {/if}
         </section>
         <section class="settings-group" aria-labelledby="appearance-heading">
           <h3 id="appearance-heading">{t("字体")}</h3>
-          <label class="setting-control"><strong>{t("颜色模式")}</strong>
-            <select value={runtime.settings.colorMode} aria-label={t("颜色模式")} onchange={(event) => updateSettings({ colorMode: event.currentTarget.value as AppSettings["colorMode"] })}>
-              <option value="system">{t("跟随系统")}</option><option value="light">{t("浅色")}</option><option value="dark">{t("深色")}</option>
-            </select>
-          </label>
           <div class="setting-control"><strong>{t("应用程序字体")}</strong>
             <FontSelect value={runtime.settings.appFontName} ariaLabel={t("应用程序字体")}
               options={appFontOptions} onchange={(value) => updateSettings({ appFontName: value })} />
           </div>
           <label class="setting-control"><strong>{t("应用字体大小（px）")}</strong>
             <input type="number" min={FONT_SIZE_RANGE.min} max={FONT_SIZE_RANGE.max} step="1" aria-label={t("应用字体大小")}
-              value={runtime.settings.appFontSize}
+              value={effectiveAppFontSize}
               oninput={(event) => setFontSize("appFontSize", event.currentTarget.value)} />
           </label>
           <div class="setting-control"><strong>{t("会话窗口字体")}</strong>
@@ -444,7 +486,7 @@
           </div>
           <label class="setting-control"><strong>{t("会话字体大小（px）")}</strong>
             <input type="number" min={FONT_SIZE_RANGE.min} max={FONT_SIZE_RANGE.max} step="1" aria-label={t("会话字体大小")}
-              value={runtime.settings.sessionFontSize}
+              value={effectiveSessionFontSize}
               oninput={(event) => setFontSize("sessionFontSize", event.currentTarget.value)} />
           </label>
           <div class="setting-control"><strong>{t("代码字体")}</strong>
@@ -463,14 +505,13 @@
           <p class="muted">{t("简洁模式显示回复和必要运行状态；完整模式显示思考、工具调用及输出等过程内容。")}</p>
         </section>
       </div>
-      <div class="settings-panel embedded-panel" hidden={category !== "models"}>{#if modelsVisited}{@render models()}{/if}</div>
-      <div class="settings-panel" hidden={category !== "pi"}><RuntimeSettings {...runtime} view="pi" /></div>
-      <div class="settings-panel" hidden={category !== "runtime"}><RuntimeSettings {...runtime} view="app" /></div>
-      <div class="settings-panel embedded-panel" hidden={category !== "extensions"}>{#if extensionsVisited}{@render extensions()}{/if}</div>
-      <div class="settings-panel embedded-panel" hidden={category !== "mcp"}>{#if mcpVisited}{@render mcp()}{/if}</div>
-      <div class="settings-panel embedded-panel" hidden={category !== "skills"}>{#if skillsVisited}{@render skills()}{/if}</div>
-      <div class="settings-panel embedded-panel" hidden={category !== "dsh"}>{#if dshVisited}<RuntimeSettings {...runtime} view="dsh" />{@render dsh()}{/if}</div>
-      <div class="settings-panel embedded-panel" hidden={category !== "workflows"}>
+      <div class="settings-panel embedded-panel" role="region" aria-labelledby="settings-panel-title" hidden={category !== "models"}>{#if modelsVisited}{@render models()}{/if}</div>
+      <div class="settings-panel" role="region" aria-labelledby="settings-panel-title" hidden={category !== "pi"}><RuntimeSettings {...runtime} view="pi" /></div>
+      <div class="settings-panel embedded-panel" role="region" aria-labelledby="settings-panel-title" hidden={category !== "extensions"}>{#if extensionsVisited}{@render extensions()}{/if}</div>
+      <div class="settings-panel embedded-panel" role="region" aria-labelledby="settings-panel-title" hidden={category !== "mcp"}>{#if mcpVisited}{@render mcp()}{/if}</div>
+      <div class="settings-panel embedded-panel" role="region" aria-labelledby="settings-panel-title" hidden={category !== "skills"}>{#if skillsVisited}{@render skills()}{/if}</div>
+      <div class="settings-panel embedded-panel" role="region" aria-labelledby="settings-panel-title" hidden={category !== "dsh"}>{#if dshVisited}<RuntimeSettings {...runtime} view="dsh" />{@render dsh()}{/if}</div>
+      <div class="settings-panel embedded-panel" role="region" aria-labelledby="settings-panel-title" hidden={category !== "workflows"}>
         {#if workflowsVisited}
           {#if workflows}
             {@render workflows()}
@@ -485,7 +526,7 @@
           {/if}
         {/if}
       </div>
-      <div class="settings-panel" hidden={category !== "network"}>
+      <div class="settings-panel" role="region" aria-labelledby="settings-panel-title" hidden={category !== "network"}>
         <section class="settings-group" aria-labelledby="proxy-heading">
           <h3 id="proxy-heading">{t("网络代理")}</h3>
           <label class="setting-control"><strong>{t("代理模式")}</strong>
@@ -517,15 +558,11 @@
               {#if proxyTestResult}<span class="proxy-state" role="status">{proxyTestResult}</span>{/if}
             </div>
           </div>
-          <p class="muted">{t("代理作用于 Pi / DSH 子进程（含模型请求与 Advisor）、运行时下载、扩展市场与 DeepPi 自身的模型调用；Provider 单独配置的代理优先。跟随系统以 Windows 系统代理设置为准，不把残留的 HTTP_PROXY 当作系统设置；手动设置可覆盖系统代理。已打开的 Pi/DSH 会话无需重启（见下），应用内更新检查需重启应用。系统使用 PAC/自动配置时，Pi/DSH 子进程按目标解析 PAC；DeepPi 自身的出站（更新检查、运行时下载）按操作系统路由。")}</p>
-          <p class="muted">{t("子进程始终指向本机回环中继，因此切换模式或改变系统代理后，新请求立即走新路径，无需重启已打开的会话；中继按请求目标解析系统设置（含 PAC 与按协议分流）。唯一例外是手动填写 https:// 上游代理：中继只承载 http:// 上游，此时已打开的会话仍需重启任务。")}</p>
         </section>
       </div>
-      <div class="settings-panel" hidden={category !== "advanced"}>
-        <ExternalEditorSettings editor={runtime.settings.externalEditor} onSaved={onEditorSaved} />
-        {#if advancedVisited}<DiagnosticsPanel onBusyChange={onDiagnosticsBusy} confirmClear={confirmDiagnosticsClear} />{/if}
-        <section class="settings-group" aria-labelledby="diagnostics-heading">
-          <h3 id="diagnostics-heading">{t("运行环境")}</h3>
+      <div class="settings-panel" role="region" aria-labelledby="settings-panel-title" hidden={category !== "advanced"}>
+        <section class="settings-group" aria-labelledby="runtime-about-heading">
+          <h3 id="runtime-about-heading">{t("运行环境与关于")}</h3>
           {#if runtime.runtimes.length === 0}<p class="muted" role="status">{t("尚未读取运行环境")}</p>
           {:else}
             <dl class="environment">
@@ -534,8 +571,8 @@
               {/each}
             </dl>
           {/if}
-          {#if runtime.appUpdate.error}<p role="alert">{tm(runtime.appUpdate.error)}</p>{/if}
           {#each runtime.updates.filter((update) => update.error) as update (update.id)}<p role="alert">{update.name}: {tm(update.error ?? "")}</p>{/each}
+          <p class="muted">DeepPi {appVersion}</p>
         </section>
       </div>
     </div>
@@ -543,55 +580,115 @@
 </section>
 
 <style>
-  .settings-page { height: 100%; min-height: 0; display: flex; flex-direction: column; color: var(--text); font-family: var(--text-font); }
-  .settings-header { min-height: 52px; flex-shrink: 0; display: flex; align-items: center; gap: 12px; padding: 8px 16px; border-bottom: 1px solid var(--border); }
-  h1 { margin: 0; font-size: 16px; font-weight: 650; color: var(--text-strong); }
-  h2 { margin: 0; padding: 0 0 16px; font-size: 18px; font-weight: 600; color: var(--text-strong); }
-  .settings-layout { display: grid; grid-template-columns: 180px minmax(0, 1fr); flex: 1; min-height: 0; }
-  .settings-navigation { padding: 12px 8px; border-right: 1px solid var(--border); background: var(--surface-alt); overflow-y: auto; display: grid; gap: 2px; align-content: start; }
-  .settings-group-label { padding: 10px 10px 4px; font-size: 10px; font-weight: 700; letter-spacing: .04em; color: var(--text-muted); opacity: .75; user-select: none; }
-  .settings-navigation button { display: flex; align-items: center; gap: 10px; min-height: 36px; width: 100%; padding: 8px 10px; border: 0; border-radius: 4px; background: transparent; color: var(--text-muted); text-align: left; cursor: pointer; }
+  .settings-page {
+    height: 100%; min-height: 0; display: flex; flex-direction: column;
+    color: var(--text); font-family: var(--text-font);
+    background: var(--page-bg);
+  }
+  .settings-header {
+    min-height: 64px; flex-shrink: 0; display: flex; align-items: center; gap: 12px;
+    padding: 12px 22px; border-bottom: 1px solid var(--border);
+    background: color-mix(in srgb, var(--surface) 92%, transparent);
+    box-shadow: 0 1px 0 rgb(255 255 255 / 2%); backdrop-filter: blur(14px);
+  }
+  .settings-header h1 { margin: 0; color: var(--text-strong); font-size: 17px; font-weight: 700; letter-spacing: -.018em; }
+  .settings-header .muted {
+    display: inline-flex; align-items: center; min-height: 24px; margin-left: 2px; padding: 3px 9px;
+    border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border)); border-radius: 999px;
+    color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); font-size: 11px;
+  }
+  h2 {
+    display: flex; align-items: center; gap: 14px; margin: 0; padding: 0 0 20px;
+    color: var(--text-strong); font-size: 22px; font-weight: 700; letter-spacing: -.025em;
+  }
+  h2::after { content: ""; flex: 1; height: 1px; background: linear-gradient(90deg, var(--border-strong), transparent); }
+  .settings-layout { display: grid; grid-template-columns: 224px minmax(0, 1fr); flex: 1; min-height: 0; }
+  .settings-navigation {
+    padding: 14px 10px 18px; border-right: 1px solid var(--border);
+    background: color-mix(in srgb, var(--surface-alt) 86%, var(--page-bg));
+    overflow-y: auto; display: grid; gap: 3px; align-content: start;
+  }
+  .settings-search {
+    display: flex; align-items: center; gap: 8px; margin: 2px 3px 12px; padding: 0 10px; min-height: 38px;
+    border: 1px solid var(--border-strong); border-radius: 9px; background: var(--surface);
+    color: var(--text-muted); box-shadow: 0 5px 16px rgb(0 0 0 / 8%); transition: border-color .15s ease, box-shadow .15s ease;
+  }
+  .settings-search:focus-within { border-color: color-mix(in srgb, var(--accent) 64%, var(--border-strong)); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent), 0 5px 16px rgb(0 0 0 / 8%); outline: 0; }
+  .settings-search input { width: 100%; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--text); font: inherit; font-size: 12px; }
+  .settings-group-label { padding: 13px 10px 5px; color: var(--text-muted); font-size: 10px; font-weight: 750; letter-spacing: .085em; user-select: none; }
+  .settings-subgroup-label { padding: 11px 10px 4px 21px; color: var(--text-subtle); font-size: 11px; font-weight: 650; }
+  .settings-no-results { margin: 4px 3px; padding: 10px; border: 1px dashed var(--border-strong); border-radius: 8px; color: var(--text-muted); background: color-mix(in srgb, var(--surface) 65%, transparent); font-size: 12px; }
+  .settings-navigation button {
+    display: flex; align-items: center; gap: 10px; min-height: 39px; width: 100%; padding: 8px 11px;
+    border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--text-muted);
+    text-align: left; cursor: pointer; transition: color .15s ease, background .15s ease, border-color .15s ease, transform .15s ease;
+  }
   .settings-navigation button span { min-width: 0; overflow-wrap: anywhere; }
-  .settings-navigation button:hover { background: var(--surface-hover); color: var(--text); }
-  .settings-navigation button.active { color: var(--text-strong); background: var(--surface-raised); box-shadow: inset 2px 0 var(--accent); }
-  .settings-body { min-width: 0; min-height: 0; overflow: auto; padding: 24px; container-type: inline-size; }
-  .settings-panel { max-width: 920px; }
-  .embedded-panel { max-width: none; min-height: 500px; height: calc(100% - 40px); }
-  .settings-panel[hidden] { display: none; }
+  .settings-navigation button:hover { border-color: var(--border); background: var(--surface-hover); color: var(--text); transform: translateX(1px); }
+  .settings-navigation button.active {
+    border-color: color-mix(in srgb, var(--accent) 28%, var(--border)); color: var(--text-strong);
+    background: var(--surface-raised);
+    box-shadow: inset 3px 0 var(--accent), 0 4px 12px rgb(0 0 0 / 8%);
+  }
+  .settings-navigation button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .settings-body {
+    display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: auto;
+    padding: 28px clamp(18px, 4vw, 48px); container-type: inline-size; scrollbar-gutter: stable;
+  }
+  .settings-panel { width: min(100%, 960px); max-width: 960px; }
+  .settings-body > .settings-panel:not(.embedded-panel) > .settings-group {
+    margin: 0 0 20px; padding: 0 0 16px; border: 0; border-radius: 0;
+    background: transparent; box-shadow: none;
+  }
+  .settings-body > .settings-panel:not(.embedded-panel) > .settings-group:last-child { margin-bottom: 0; }
+  .settings-body.has-embedded { overflow: hidden; }
+  .embedded-panel {
+    flex: 1; min-height: 0; max-width: none; overflow: auto; padding: 0 0 20px;
+    border: 0; border-radius: 0; background: transparent; box-shadow: none;
+  }
   .environment { margin: 0; }
-  .environment div { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; padding: 12px 0; border-bottom: 1px solid var(--border); }
-  dt { font-weight: 600; }
+  .environment div { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; padding: 13px 0; border-bottom: 1px solid var(--border); }
+  .embedded-panel :global(.settings-group) { margin-bottom: 20px; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
+  dt { color: var(--text-strong); font-weight: 650; }
   dd { margin: 0; color: var(--text-muted); overflow-wrap: anywhere; }
   @media (max-width: 760px) {
-    .settings-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
-    .settings-navigation { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; border-right: 0; border-bottom: 1px solid var(--border); }
-    .settings-navigation button { font-size: 12px; gap: 6px; padding: 8px; }
-    .settings-body { padding: 16px; }
+    .settings-header { min-height: 58px; padding: 10px 14px; }
+    .settings-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, auto) minmax(0, 1fr); }
+    .settings-navigation { display: block; max-height: min(38vh, 260px); padding: 10px 8px 12px; border-right: 0; border-bottom: 1px solid var(--border); }
+    .settings-nav-group { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; }
+    .settings-group-label, .settings-subgroup-label { grid-column: 1 / -1; }
+    .settings-navigation button { min-height: 40px; font-size: 12px; gap: 6px; padding: 8px; }
+    .settings-body { padding: 20px 14px; }
+    h2 { padding-bottom: 16px; font-size: 20px; }
+    .settings-body > .settings-panel:not(.embedded-panel) > .settings-group { padding: 0 0 12px; border-radius: 0; }
   }
-  @media (max-width: 400px) { .settings-navigation { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-  .theme-actions { display: flex; flex-wrap: wrap; gap: 6px; }
-  .theme-preview { display: flex; align-items: center; gap: 10px; margin-top: 8px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); }
-  .theme-swatches { display: flex; flex-shrink: 0; border-radius: 5px; overflow: hidden; border: 1px solid var(--border-strong); }
-  .theme-swatches span { width: 14px; height: 26px; }
-  .theme-copy { flex: 1; min-width: 0; display: grid; gap: 2px; }
+  @media (max-width: 400px) { .settings-nav-group { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  .theme-actions { display: flex; flex-wrap: wrap; gap: 7px; }
+  .theme-preview { display: flex; align-items: center; gap: 12px; margin-top: 10px; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-alt); }
+  .theme-swatches { display: flex; flex-shrink: 0; border-radius: 7px; overflow: hidden; border: 1px solid var(--border-strong); box-shadow: 0 3px 10px rgb(0 0 0 / 12%); }
+  .theme-swatches span { width: 17px; height: 32px; }
+  .theme-copy { flex: 1; min-width: 0; display: grid; gap: 3px; }
   .theme-copy strong { font-size: 12px; color: var(--text-strong); }
   .theme-copy small { font-size: 11px; color: var(--text-muted); overflow-wrap: anywhere; }
-  .theme-status { margin: 8px 0 0; font-size: 12px; color: var(--accent); overflow-wrap: anywhere; }
-  .theme-error { margin: 8px 0 0; font-size: 12px; color: var(--status-failed); overflow-wrap: anywhere; }
-  .panel-error { margin: 8px 0 0; font-size: 12px; color: var(--status-failed); overflow-wrap: anywhere; }
+  .theme-status { margin: 10px 0 0; font-size: 12px; color: var(--accent); overflow-wrap: anywhere; }
+  .theme-error { margin: 10px 0 0; font-size: 12px; color: var(--status-failed); overflow-wrap: anywhere; }
+  .panel-error { margin: 10px 0 0; font-size: 12px; color: var(--status-failed); overflow-wrap: anywhere; }
   .proxy-test { display: flex; align-items: center; justify-content: flex-end; gap: 10px; min-width: 0; }
   .proxy-state { min-width: 0; overflow-wrap: anywhere; color: var(--text-muted); font-size: 12px; }
   /* —— 通知与桌宠 —— */
-  .setting-check { display: flex; align-items: center; gap: 8px; }
-  .setting-check input[type="checkbox"] { width: 14px; height: 14px; flex-shrink: 0; accent-color: var(--accent); cursor: pointer; }
-  .pet-preview-row { display: flex; align-items: center; gap: 12px; margin: 8px 0; }
+  .setting-check { display: flex; align-items: center; justify-content: flex-start; gap: 9px; }
+  .setting-check input[type="checkbox"] { width: 15px; height: 15px; flex-shrink: 0; accent-color: var(--accent); cursor: pointer; }
+  .pet-preview-row { display: flex; align-items: center; gap: 12px; margin: 10px 0; }
   .pet-preview {
     display: inline-flex; align-items: center; justify-content: center;
-    width: 64px; height: 64px; flex-shrink: 0;
-    border: 1px dashed var(--border-strong); border-radius: 10px;
-    overflow: hidden; background: var(--surface);
+    width: 68px; height: 68px; flex-shrink: 0; border: 1px dashed var(--border-strong);
+    border-radius: 12px; overflow: hidden; background: var(--surface-alt); box-shadow: inset 0 0 0 4px color-mix(in srgb, var(--surface) 65%, transparent);
   }
   .pet-preview img { width: 100%; height: 100%; object-fit: contain; }
-  .pet-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+  .pet-actions { display: flex; flex-wrap: wrap; gap: 7px; }
   .pet-notice { color: var(--status-failed); font-size: 12px; margin: 6px 0 0; }
+  .theme-transparency-control { align-items: center; }
+  .theme-transparency-slider { display: flex; align-items: center; gap: 10px; width: min(280px, 100%); }
+  .theme-transparency-slider input { flex: 1; min-width: 100px; accent-color: var(--accent); cursor: pointer; }
+  .theme-transparency-slider output { min-width: 40px; color: var(--text-muted); font-variant-numeric: tabular-nums; text-align: right; }
 </style>

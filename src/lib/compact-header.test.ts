@@ -15,8 +15,9 @@ describe("compact session header invariants", () => {
     expect(page).not.toContain('class="crumb-task" title={activeTask?.title');
   });
 
-  it("keeps fallback tabs out of the board and above the native DSH surface", () => {
+  it("keeps fallback tabs out of the board and DSH workspace", () => {
     expect(page).toContain('view === "workspace" && !(boardView && activeAgent === "pi")');
+    expect(page).toContain('activeAgent === "pi" && !!selectedProject && terminalTasks.length > 0 && !inlineSessionTabs &&');
     expect(page).toContain('{#if standaloneSessionTabs}');
     expect(page).toContain('style:grid-row={standaloneSessionTabs ? "2" : "1 / -1"}');
     expect(page.match(/workspace.querySelector\("\.dsh-placeholder"\)/g)).toHaveLength(2);

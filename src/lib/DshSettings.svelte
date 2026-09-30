@@ -1,30 +1,17 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
-  import { RotateCcw, Square } from "@lucide/svelte";
+  /**
+   * DSH 服务设置。
+   *
+   * 只显示运行状态：启动/重启/停止入口在工作区页面（DSH 视图的「重启 DSH」），
+   * 设置里不再提供按钮。
+   */
   import { t } from "$lib/i18n.svelte";
 
   interface Props {
     dshRunning: boolean;
-    restartBusy: string | null;
-    busyRuntime: string | null;
-    onRestartDsh: () => void;
-    onError: (error: unknown) => void;
   }
 
-  let { dshRunning, restartBusy, busyRuntime, onRestartDsh, onError }: Props = $props();
-  let stopping = $state(false);
-
-  async function stopDsh() {
-    if (stopping) return;
-    stopping = true;
-    try {
-      await invoke("stop_dsh");
-    } catch (error) {
-      onError(error);
-    } finally {
-      stopping = false;
-    }
-  }
+  let { dshRunning }: Props = $props();
 </script>
 
 <section class="settings-group" aria-labelledby="dsh-service-heading">
@@ -36,19 +23,5 @@
       <strong>DSH (DeepSeek Harness)</strong>
       <small>{dshRunning ? t("运行中") : t("未运行")}</small>
     </span>
-    <div class="dsh-actions">
-      {#if restartBusy === "dsh"}<span role="status" class="muted">{t("正在重启…")}</span>{/if}
-      <button type="button" class="quiet-button" disabled={stopping || restartBusy !== null || busyRuntime !== null} onclick={onRestartDsh}>
-        <RotateCcw size={14} />{dshRunning ? t("重启") : t("启动")}
-      </button>
-      <button type="button" class="quiet-button" disabled={stopping || !dshRunning || restartBusy !== null} onclick={() => void stopDsh()}>
-        <Square size={13} />{t("停止")}
-      </button>
-    </div>
   </div>
-  <p class="muted" role="status">{t("启动/重启会停止并重新拉起 DSH 服务与界面；停止只结束 DSH 进程。")}</p>
 </section>
-
-<style>
-  .dsh-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px; min-width: 0; }
-</style>

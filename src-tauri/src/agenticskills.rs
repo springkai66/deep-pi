@@ -2692,7 +2692,7 @@ fn install_mcp(
     // `market.agentic_mcp_config_unparsed`），写入前必须拿到可用的最新配置。
     let config = config_from_snippets(&mcp_install_snippets(paths, cache, &slug)?)?;
     let name = mcp_server_name(&slug, request.name.as_deref())?;
-    agent_config::save_mcp_server_config(
+    crate::pi_mcp::save_server_config(
         paths,
         request.scope,
         request.project_path.as_deref(),

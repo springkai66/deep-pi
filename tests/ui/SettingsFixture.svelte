@@ -41,6 +41,7 @@
   const fixtureProjectPath = new URLSearchParams(location.search).has("project") ? "F:/fixture-project" : null;
   let installedPackages = $state([{ source: "npm:pi-demo@1.0.0", autoload: true, environment: "managed" as const }]);
   let installedServers = $state<Array<{ name: string; config: Record<string, unknown> }>>([{ name: "local-mcp", config: { url: "https://example.com/mcp" } }]);
+  let codemodeSettings = $state({ enabled: false, mode: "on" as "on" | "only", inlineBudget: 3000 });
   let installedSkills = $state([{ name: "local-skill", description: "Project helper", path: "skills/local-skill/SKILL.md" }]);
   const catalogModels: PiOfficialModel[] = [
     { id: "fixture-reasoning", name: "Reasoning model", contextWindow: 128000, maxTokens: 8192, reasoning: true, thinkingLevels: ["off", "low", "high"], input: ["text"], inputCost: null, outputCost: null },
@@ -86,6 +87,24 @@
       return undefined as T;
     }
     if (name === "list_mcp_servers") return installedServers as T;
+    if (name === "pi_mcp_list_servers") {
+      const { scope } = (args as { request: { scope: "global" | "project" } }).request;
+      return {
+        available: true,
+        servers: installedServers.map((server) => ({
+          name: server.name, scope, source: scope === "global" ? "global mcp.json" : ".pi/mcp.json",
+          enabled: true, exposure: "codemode", transport: String(server.config.url ?? server.config.command ?? "stdio"),
+          state: "connected", tools: ["fixture_tool"], error: null,
+        })),
+        errors: [], note: null,
+      } as T;
+    }
+    if (name === "pi_codemode_settings") return codemodeSettings as T;
+    if (name === "save_pi_codemode_settings") {
+      codemodeSettings = (args as { request: typeof codemodeSettings }).request;
+      action = name;
+      return undefined as T;
+    }
     if (name === "list_skills") return installedSkills as T;
     if (name === "list_installed_workflows") return [{ slug: "fullstack-saas", name: "Full-Stack SaaS", category: "Developer Tools", skillCount: 5, mcpCount: 4, installedAt: "2026-09-29" }] as T;
     if (name === "save_mcp_server") {
@@ -98,6 +117,10 @@
       const request = (args as { request: { name: string } }).request;
       installedServers = installedServers.filter((server) => server.name !== request.name);
       action = "delete_mcp_server";
+      return undefined as T;
+    }
+    if (name === "pi_mcp_login" || name === "pi_mcp_logout") {
+      action = name;
       return undefined as T;
     }
     if (name === "delete_skill") {
@@ -206,22 +229,15 @@
 </nav>
 <main class="workspace settings-view">
   <PiSettings {category} {settings} onCategoryChange={(next) => { category = next; }}
-    onDiagnosticsBusy={() => {}} confirmDiagnosticsClear={async () => false}
     onChangeSettings={(next) => { settings = next; changes++; }}
     onEditorSaved={() => {}} onClose={() => { action = "返回工作区"; }}
     runtimes={[{ id: "pi", name: "Pi", currentVersion: "1.0.0", source: "managed", available: true, installed: true }, { id: "dsh", name: "DSH", currentVersion: null, source: "managed", available: false, installed: false }]}
     updates={[{ id: "pi", name: "Pi", currentVersion: "1.0.0", latestVersion: "1.1.0", updateAvailable: true, installable: true, canRollback: true, stale: false, error: null, note: null }]}
     busyRuntime={null} runtimeOperation={null} runtimeProgress={null} isCheckingUpdates={false}
-    appUpdate={{ status: "available", version: "2.0.0", notes: "Fixture release notes", error: null }}
     onCancelRuntime={() => { action = "取消组件操作"; }}
     onCheckUpdates={() => { action = "检查组件更新"; }}
-    onCheckAppUpdate={() => { action = "检查应用更新"; }}
-    onInstallAppUpdate={() => { action = "安装应用更新"; }}
     onUpdateRuntime={() => { action = "安装组件"; }}
     onUninstallRuntime={() => { action = "卸载组件"; }}
-    onRestartPi={() => { action = "重启 Pi 任务"; }}
-    onRestartDsh={() => { action = "重启 DSH"; }}
-    restartBusy={null}
     runningPiCount={1}
     dshRunning={true}
   >

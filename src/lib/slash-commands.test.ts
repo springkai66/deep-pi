@@ -53,13 +53,15 @@ describe("slash command filtering", () => {
 });
 
 describe("managed Pi slash dispatch", () => {
-  it("routes every 0.85.1 builtin to a GUI action rather than a model prompt", () => {
+  it("routes every 0.99.1 builtin without sending it to the model", () => {
     const host = "new settings resume scoped-models import share changelog hotkeys trust login logout reload quit".split(" ");
     const rpc = "compact model thinking name copy session export tree fork clone".split(" ");
-    expect(BUILTIN_SLASH_COMMANDS.map((command) => command.name).sort()).toEqual([...host, ...rpc].sort());
+    expect(BUILTIN_SLASH_COMMANDS.map((command) => command.name).sort()).toEqual([...host, ...rpc, "bug"].sort());
     for (const name of host) expect(slashCommandRoute(name, [])).toBe("host");
     for (const name of rpc) expect(slashCommandRoute(name, [])).toBe("rpc");
-    expect(BUILTIN_SLASH_COMMANDS.every((command) => command.available)).toBe(true);
+    expect(BUILTIN_SLASH_COMMANDS.filter((command) => !command.available).map((command) => command.name)).toEqual(["bug"]);
+    expect(slashCommandRoute("bug", [])).toBe("blocked");
+    expect(filterSlashCommands("bug", []).map((command) => command.available)).toEqual([false]);
   });
 
   it("keeps extensions, skills and prompt templates on the Pi prompt path", () => {

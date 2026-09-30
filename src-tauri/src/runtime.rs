@@ -38,6 +38,9 @@ const COMPONENT_DSHMARKET: &str = "dshmarket";
 /// DeepPi 托管的 Node 版本。Pi、DSH、dshmarket 均由它执行；
 /// 不使用电脑上安装的 Node/npm。版本变更需与兼容矩阵一起验证。
 const MANAGED_NODE_VERSION: &str = "24.13.0";
+// 托盘主动提示的兼容验证基线；不限制用户手动安装较新版本。
+const VERIFIED_PI_VERSION: &str = "0.99.1";
+const VERIFIED_DSH_VERSION: &str = "0.2.0-rc.2";
 const NODE_DIST_BASE: &str = "https://nodejs.org/dist";
 
 #[derive(Clone, Debug, Serialize)]
@@ -209,6 +212,24 @@ pub struct RuntimeUpdate {
     pub error: Option<String>,
     /// 版本说明（例如上游有更新但尚未通过兼容验证）。
     pub note: Option<String>,
+}
+fn unverified_stable_updates(updates: &[RuntimeUpdate]) -> Vec<(String, String)> {
+    updates
+        .iter()
+        .filter_map(|update| {
+            let verified = match update.id.as_str() {
+                COMPONENT_PI => VERIFIED_PI_VERSION,
+                COMPONENT_DSH => VERIFIED_DSH_VERSION,
+                _ => return None,
+            };
+            let latest = update.latest_version.as_deref()?;
+            (!update.stale
+                && update.error.is_none()
+                && !latest.contains('-')
+                && version_is_newer(verified, latest))
+            .then(|| (update.id.clone(), latest.to_owned()))
+        })
+        .collect()
 }
 
 #[derive(Default)]
@@ -1853,11 +1874,17 @@ fn rollback_runtime_inner(
 
 #[tauri::command]
 pub async fn check_runtime_updates(app: AppHandle) -> Result<Vec<RuntimeUpdate>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        check_runtime_updates_inner(app.state(), app.state())
+    let worker_app = app.clone();
+    let updates = tauri::async_runtime::spawn_blocking(move || {
+        check_runtime_updates_inner(worker_app.state(), worker_app.state())
     })
     .await
-    .map_err(|error| format!("runtime update worker failed: {error}"))?
+    .map_err(|error| format!("runtime update worker failed: {error}"))??;
+    let notices = unverified_stable_updates(&updates);
+    let _ = app
+        .clone()
+        .run_on_main_thread(move || crate::tray::apply_runtime_updates(&app, notices));
+    Ok(updates)
 }
 
 fn check_runtime_updates_inner(
@@ -2157,7 +2184,8 @@ mod tests {
     use super::{
         component_installable, extract_version, merge_offline_updates, package_version_from_json,
         parse_sha256, require_latest_version, runtime_cli_path, runtime_installable,
-        update_available, valid_package_version, version_is_newer, RuntimeUpdate,
+        unverified_stable_updates, update_available, valid_package_version, version_is_newer,
+        RuntimeUpdate,
     };
 
     #[test]
@@ -2342,6 +2370,38 @@ mod tests {
         assert!(merged[1].stale);
         assert_eq!(merged[1].error.as_deref(), Some("offline"));
         assert!(!merged[1].installable);
+    }
+    #[test]
+    fn tray_only_prompts_for_online_unverified_stable_releases() {
+        let record = |id: &str, version: &str, stale: bool, error: Option<&str>| RuntimeUpdate {
+            id: id.into(),
+            name: id.into(),
+            current_version: None,
+            latest_version: Some(version.into()),
+            update_available: true,
+            installable: true,
+            can_rollback: false,
+            stale,
+            error: error.map(str::to_owned),
+            note: None,
+        };
+        let updates = vec![
+            record("pi", "0.99.1", false, None),
+            record("pi", "0.99.2", true, None),
+            record("pi", "0.99.3", false, Some("offline")),
+            record("pi", "1.0.0-rc.1", false, None),
+            record("dsh", "0.3.0-rc.1", false, None),
+            record("dsh", "0.2.0", false, None),
+            record("dshmarket", "2.0.0", false, None),
+        ];
+        assert_eq!(
+            unverified_stable_updates(&updates),
+            vec![("dsh".into(), "0.2.0".into())]
+        );
+        assert_eq!(
+            unverified_stable_updates(&[record("pi", "1.0.0", false, None)]),
+            vec![("pi".into(), "1.0.0".into())]
+        );
     }
 
     #[test]

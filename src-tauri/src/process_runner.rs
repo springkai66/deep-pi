@@ -36,6 +36,7 @@ impl ProcessOutput {
 
 fn capture(
     mut reader: impl Read + Send + 'static,
+    capture_limit: usize,
 ) -> mpsc::Receiver<Result<(Vec<u8>, bool), String>> {
     let (sender, receiver) = mpsc::sync_channel(1);
     thread::spawn(move || {
@@ -50,7 +51,7 @@ fn capture(
                 if read == 0 {
                     break;
                 }
-                let keep = read.min(MAX_CAPTURE_BYTES.saturating_sub(data.len()));
+                let keep = read.min(capture_limit.saturating_sub(data.len()));
                 data.extend_from_slice(&buffer[..keep]);
                 truncated |= keep < read;
             }
@@ -71,6 +72,15 @@ pub fn run_cancellable(
     timeout: Duration,
     cancellation: Option<&crate::operation::Cancellation>,
 ) -> Result<ProcessOutput, String> {
+    run_cancellable_with_capture_limit(command, timeout, cancellation, MAX_CAPTURE_BYTES)
+}
+
+pub fn run_cancellable_with_capture_limit(
+    command: &mut Command,
+    timeout: Duration,
+    cancellation: Option<&crate::operation::Cancellation>,
+    capture_limit: usize,
+) -> Result<ProcessOutput, String> {
     if let Some(token) = cancellation {
         token.check()?;
     }
@@ -82,8 +92,14 @@ pub fn run_cancellable(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let (mut child, tree) = spawn_owned(command)?;
-    let stdout = capture(child.stdout.take().ok_or("command stdout is unavailable")?);
-    let stderr = capture(child.stderr.take().ok_or("command stderr is unavailable")?);
+    let stdout = capture(
+        child.stdout.take().ok_or("command stdout is unavailable")?,
+        capture_limit,
+    );
+    let stderr = capture(
+        child.stderr.take().ok_or("command stderr is unavailable")?,
+        capture_limit,
+    );
     let started = Instant::now();
     let result = loop {
         if let Some(token) = cancellation {
@@ -120,54 +136,23 @@ pub fn run_cancellable(
 }
 
 pub(crate) fn spawn_owned(command: &mut Command) -> Result<(Child, ProcessTree), String> {
-    spawn_owned_detailed(command).map_err(|failure| failure.message)
-}
-
-pub(crate) enum SpawnFailureKind {
-    NotFound,
-    PermissionDenied,
-    Spawn,
-    Ownership,
-    Resume,
-    Unsupported,
-}
-
-pub(crate) struct SpawnFailure {
-    pub kind: SpawnFailureKind,
-    pub message: String,
-}
-
-pub(crate) fn spawn_owned_detailed(
-    command: &mut Command,
-) -> Result<(Child, ProcessTree), SpawnFailure> {
     if !cfg!(windows) {
-        return Err(SpawnFailure {
-            kind: SpawnFailureKind::Unsupported,
-            message: "owned command execution currently requires Windows".into(),
-        });
+        return Err("owned command execution currently requires Windows".into());
     }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         command.creation_flags(WINDOWS_HIDDEN_SUSPENDED_FLAGS);
     }
-    let mut child = command.spawn().map_err(|error| SpawnFailure {
-        kind: match error.kind() {
-            std::io::ErrorKind::NotFound => SpawnFailureKind::NotFound,
-            std::io::ErrorKind::PermissionDenied => SpawnFailureKind::PermissionDenied,
-            _ => SpawnFailureKind::Spawn,
-        },
-        message: format!("failed to start command: {error}"),
-    })?;
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("failed to start command: {error}"))?;
     let tree = match ProcessTree::attach(&child) {
         Ok(tree) => tree,
         Err(error) => {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(SpawnFailure {
-                kind: SpawnFailureKind::Ownership,
-                message: error,
-            });
+            return Err(error);
         }
     };
     #[cfg(windows)]
@@ -175,10 +160,7 @@ pub(crate) fn spawn_owned_detailed(
         drop(tree);
         let _ = child.kill();
         let _ = child.wait();
-        return Err(SpawnFailure {
-            kind: SpawnFailureKind::Resume,
-            message: error,
-        });
+        return Err(error);
     }
     Ok((child, tree))
 }
@@ -320,6 +302,23 @@ mod tests {
         assert!(output.status.success());
         assert!(output.stdout.len() <= MAX_CAPTURE_BYTES);
         assert!(output.stderr.len() <= MAX_CAPTURE_BYTES);
+        assert!(output.truncated);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn configurable_capture_limit_is_applied_to_both_streams() {
+        let limit = 128 * 1024;
+        let output = run_cancellable_with_capture_limit(
+            &mut shell("[Console]::Out.Write('x' * 200000); [Console]::Error.Write('y' * 200000)"),
+            Duration::from_secs(60),
+            None,
+            limit,
+        )
+        .unwrap();
+        assert!(output.status.success());
+        assert!(output.stdout.len() <= limit);
+        assert!(output.stderr.len() <= limit);
         assert!(output.truncated);
     }
 

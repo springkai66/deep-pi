@@ -27,6 +27,7 @@
     active: boolean;
     transitioning: boolean;
     codeFont: CodeFont;
+    themeCodeFont?: string;
     sessionFontName: string;
     sessionFontSize: number;
     colorMode: ColorMode;
@@ -34,7 +35,7 @@
     onUseConversation: () => void;
   }
 
-  let { taskId, runId = null, title, status, visible, active, transitioning, codeFont, sessionFontName, sessionFontSize, colorMode, onExit, onUseConversation }: Props = $props();
+  let { taskId, runId = null, title, status, visible, active, transitioning, codeFont, themeCodeFont, sessionFontName, sessionFontSize, colorMode, onExit, onUseConversation }: Props = $props();
   let container: HTMLDivElement;
   let terminal: Terminal | undefined;
   let session = $state<ReturnType<typeof createTerminalSession> | null>(null);
@@ -105,7 +106,7 @@
 
   $effect(() => {
     if (!terminal) return;
-    terminal.options.fontFamily = cssTerminalFontFamily(sessionFontName, codeFont);
+    terminal.options.fontFamily = cssTerminalFontFamily(sessionFontName, codeFont, themeCodeFont);
     terminal.options.fontSize = Math.round(Math.min(FONT_SIZE_RANGE.max, Math.max(FONT_SIZE_RANGE.min, sessionFontSize)));
     terminal.options.theme = terminalTheme(isLightColorMode(colorMode));
     const refreshLayout = () => {
@@ -129,7 +130,7 @@
       convertEol: false,
       cursorBlink: true,
       cursorStyle: "bar",
-      fontFamily: cssTerminalFontFamily(sessionFontName, codeFont),
+      fontFamily: cssTerminalFontFamily(sessionFontName, codeFont, themeCodeFont),
       fontSize: Math.round(Math.min(FONT_SIZE_RANGE.max, Math.max(FONT_SIZE_RANGE.min, sessionFontSize))),
       lineHeight: 1.2,
       letterSpacing: 0,

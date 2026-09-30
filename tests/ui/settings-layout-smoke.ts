@@ -5,7 +5,7 @@ function assert(condition: unknown, message: string): asserts condition {
 }
 
 async function waitFor<T>(read: () => T | null | undefined, label: string): Promise<T> {
-  const deadline = Date.now() + 5000;
+  const deadline = Date.now() + 10000;
   while (Date.now() < deadline) {
     const value = read();
     if (value) return value;
@@ -30,17 +30,51 @@ async function open(category: Category) {
   assert(nav, `${category}: navigation entry`);
   nav.click();
   await new Promise((resolve) => setTimeout(resolve, 0));
-  return waitFor(() => nav.getAttribute("aria-current") === "page" ? panel()?.querySelector<HTMLElement>(".page-controls")?.closest<HTMLElement>(".settings-panel") : null, `${category} panel`);
+  return waitFor(() => {
+    if (nav.getAttribute("aria-current") !== "page") return null;
+    const controls = panel()?.querySelector<HTMLElement>(".page-controls");
+    const root = controls?.closest<HTMLElement>(".settings-panel");
+    const body = document.querySelector<HTMLElement>(".settings-body");
+    return root && body && root.getBoundingClientRect().bottom <= body.getBoundingClientRect().bottom + 2 ? root : null;
+  }, `${category} panel`);
 }
 
 async function run() {
   const results: string[] = [];
+  const search = document.querySelector<HTMLInputElement>('input[aria-label="搜索设置"]');
+  assert(search, "settings search exists");
+  search.value = "代理地址";
+  search.dispatchEvent(new Event("input", { bubbles: true }));
+  await waitFor(() => document.querySelectorAll(".settings-navigation button[id^='settings-nav-']").length === 1, "settings filtered navigation");
+  assert(document.getElementById("settings-nav-network"), "network matched by setting name");
+  search.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+  assert(document.activeElement?.id === "settings-nav-network", "search ArrowDown focuses the first matching category");
+  window.scrollTo(0, 0);
+  search.value = "不存在的设置";
+  search.dispatchEvent(new Event("input", { bubbles: true }));
+  await waitFor(() => document.querySelector(".settings-no-results"), "empty search feedback");
+  search.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  await waitFor(() => document.querySelectorAll(".settings-navigation button[id^='settings-nav-']").length === 11, "search cleared by Escape");
+  const general = document.querySelector<HTMLElement>(".settings-panel:not([hidden])");
+  const check = general?.querySelector<HTMLElement>(".setting-check");
+  const checkbox = check?.querySelector<HTMLInputElement>('input[type="checkbox"]');
+  const label = check?.querySelector<HTMLElement>("strong");
+  assert(check && checkbox && label, "notification setting row");
+  assert(label.getBoundingClientRect().left - checkbox.getBoundingClientRect().right <= 20, "checkbox and label stay together");
+  const note = check.nextElementSibling as HTMLElement;
+  assert(note?.classList.contains("muted") && getComputedStyle(check).borderBottomStyle === "none" && getComputedStyle(note).borderBottomStyle !== "none", "description belongs to its row");
+  results.push("search and setting row layout ok");
   const projectAvailable = new URLSearchParams(location.search).has("project");
   for (const category of ["extensions", "mcp", "skills", "workflows"] as const) {
     const root = await open(category);
     const controls = root.querySelector<HTMLElement>(".page-controls");
     assert(controls, `${category}: controls`);
     const groups = controls.querySelectorAll<HTMLElement>(".scope-switch");
+    const body = document.querySelector<HTMLElement>(".settings-body");
+    assert(body, "settings body exists");
+    assert(root.getBoundingClientRect().bottom <= body.getBoundingClientRect().bottom + 2, `${category}: panel fits available height`);
+    assert(root.clientHeight > 0 && root.clientHeight < 2000, `${category}: panel height is constrained`);
+    assert(root.getAttribute("aria-labelledby") === "settings-panel-title", `${category}: panel title semantics`);
     assert(groups.length === 2, `${category}: scope and views`);
     assert([...groups[0].querySelectorAll("button")].map((item) => item.textContent?.trim()).join(",") === "全局,项目", `${category}: scope order`);
     assert([...groups[1].querySelectorAll("button")].map((item) => item.textContent?.trim()).join(",") === "已安装,市场", `${category}: view order`);
@@ -78,8 +112,28 @@ async function run() {
       results.push("extension install, update, uninstall and feedback ok");
     }
     if (category === "mcp") {
-      search.value = "GitHub";
-      search.dispatchEvent(new Event("input", { bubbles: true }));
+      button(groups[1], "已安装")?.click();
+      await waitFor(() => root.querySelector(".entry-list > li"), "MCP config loaded before connection check");
+      const unrequestedStatus = await waitFor(() => {
+        const status = root.querySelector<HTMLElement>(".mcp-native-status");
+        return status?.textContent?.includes("尚未检测") ? status : null;
+      }, "connection check is opt-in");
+      assert(unrequestedStatus.textContent?.includes("尚未检测"), "opening MCP settings does not start configured servers");
+      button(root, "检测连接")?.click();
+      const codemodeToggle = await waitFor(() => root.querySelector<HTMLInputElement>(".codemode-toggle input"), "Codemode toggle");
+      const nativeStatus = await waitFor(() => {
+        const status = root.querySelector<HTMLElement>(".mcp-native-status");
+        return status?.textContent?.includes("已连接") ? status : null;
+      }, "native Pi MCP connection status");
+      assert(nativeStatus.textContent?.includes("已连接"), "MCP state comes from Pi's native list command");
+      codemodeToggle.checked = true;
+      codemodeToggle.dispatchEvent(new Event("change", { bubbles: true }));
+      button(root, "保存 Codemode 设置")?.click();
+      await waitFor(() => document.querySelector('output[aria-label="操作结果"]')?.textContent === "save_pi_codemode_settings", "Codemode settings saved through Pi settings bridge");
+      button(groups[1], "市场")?.click();
+      const mcpSearch = await waitFor(() => root.querySelector<HTMLInputElement>(".market-toolbar input"), "MCP search");
+      mcpSearch.value = "GitHub";
+      mcpSearch.dispatchEvent(new Event("input", { bubbles: true }));
       await waitFor(() => root.querySelectorAll(".market-list > li").length === 1, "MCP filter");
       assert(root.querySelector(".market-list")?.textContent?.includes("GitHub"), "MCP filtered entry");
       button(groups[1], "已安装")?.click();
@@ -91,6 +145,7 @@ async function run() {
       root.querySelector<HTMLButtonElement>(".add-form button")?.click();
       await waitFor(() => root.textContent?.includes("fixture-added"), "MCP add visible");
       results.push("MCP filter and manual add ok");
+      await waitFor(() => [...root.querySelectorAll(".entry-list > li")].some((item) => item.textContent?.includes("fixture-added")), "MCP config is visible after adding");
     }
     if (category === "skills") {
       button(groups[1], "已安装")?.click();

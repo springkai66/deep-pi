@@ -23,7 +23,7 @@ pnpm dev:desktop
 
 ## Pi 无法启动
 
-DeepPi 只使用自己托管的运行时（Node、Pi、DSH），不读取电脑上安装的 Pi/Node/npm。托管运行时安装在 DeepPi 安装目录下的 `runtimes` 子文件夹（跟随安装盘符，不写 C 盘 AppData），即 `<DeepPi 安装目录>\runtimes\<组件>\active.json`，实际版本在同级 `versions` 目录；没有指针文件的旧安装继续使用 `current`。开发构建则放在仓库 `.deeppi-runtime\runtimes`。缺失或损坏时，请到“设置 → 运行时与更新”安装或修复对应组件（Node 是安装 Pi/DSH 的前提，由应用从官方发行包下载并校对 SHA-256）。指针损坏或指向缺失的运行时会直接报错，不会静默使用本机环境。
+DeepPi 只使用自己托管的运行时（Node、Pi、DSH），不读取电脑上安装的 Pi/Node/npm。托管运行时安装在 DeepPi 安装目录下的 `runtimes` 子文件夹（跟随安装盘符，不写 C 盘 AppData），即 `<DeepPi 安装目录>\runtimes\<组件>\active.json`，实际版本在同级 `versions` 目录；没有指针文件的旧安装继续使用 `current`。开发构建则放在仓库 `.deeppi-runtime\runtimes`。缺失或损坏时，请到“设置 → Pi 服务”（Node / Pi Coding Agent）或“设置 → DSH 服务”（DSH / DSH Plugin Market）的“组件”里安装或修复对应组件（Node 是安装 Pi/DSH 的前提，由应用从官方发行包下载并校对 SHA-256）。指针损坏或指向缺失的运行时会直接报错，不会静默使用本机环境。
 
 确认以下目录可写，并检查日志：
 
@@ -50,11 +50,17 @@ DSH 的 profile 位于：
 
 如果更新后市场不兼容，使用设置页的“修复”或“回滚”。
 
-### DSH 版本固定
+### 上游版本与兼容验证
 
-DeepPi v1.0 只安装并验证 **DSH 0.1.1-rc.2**。DSH 0.1.5-rc.1 起启动 URL 会携带进程 token，且 Host API 需要浏览器交互签发的 cookie，宿主的会话同步与就绪探测尚未适配；因此检查更新时若上游版本更高，应用只显示提示，不提供安装；即使绕过界面直接请求，安装接口也会拒绝非验证版本。
+本轮托管运行时已升级并核对：Pi 0.99.1、DSH 0.2.0-rc.2。Pi 0.99.1 的 CLI 参数和必要 RPC 状态字段已验证；新增的 `/bug` 在 DeepPi 图形界面中不可执行。稳定版高于已验证基线时，托盘角标和菜单会提示“尚未验证”，点击后打开相应运行时设置。提示不限制手动安装，也不会自动升级。
 
-如果因早期版本误装了其他 DSH，运行时页面会把该组件标为“可更新 · 0.1.1-rc.2”，点“更新”即可回到已验证版本。
+Pi 0.99.0 起，MCP 状态由托管 Pi 的 `pi mcp list --json` 检测，OAuth 可在 MCP 设置中登录/退出；配置改动通常要重启 Pi 任务才生效。Codemode 设置位于同一 Pi 配置范围（全局或项目）：默认工具开关使用 `defaultTools`，模式/说明预算使用 `codemode.mode` 与 `codemode.inlineBudget`。项目级 Pi 配置只有在该项目受信任时才会加载。
+
+DSH 0.2.0-rc.2 按 DeepPi 启动参数可启动并输出带 token 的回环 URL；HTTP 跟随重定向探测最终返回 401，因此浏览器认证、会话同步和 Host API 交互尚未验证。DSH 预发布版本仍可手动检查和安装，但不会主动提示。
+
+**DSH 插件兼容性未通过验证。** 当前 profile 的 `dshmarket@1.52.0`、`dsh-codex-subscription@2.1.4`、`@mars-sea/dsh-commandcode-provider@0.11.8`、`dsh-better-sidebar@0.22.1` 均因 peerDependencies 不兼容被 DSH 跳过；尝试将 dshmarket 升至 1.66.5 时 npm 返回 `ERESOLVE`。主机进程启动成功不代表这些插件可用，请勿通过风险豁免强行加载。
+
+升级前留下的 DSH 0.1.5-rc.2 回滚目录缺少 `package.json` 与 `lib/bin.js`；previous 指针存在不代表回滚目标可运行，回滚能力尚未验证。
 
 ## 更新失败
 
@@ -148,19 +154,6 @@ DeepPi 运行时会在 Windows 通知区域（任务栏右下角）常驻托盘�
 
 外部文件变化不会自动保存或放弃内置草稿。出现磁盘版本冲突时，先比较，再决定重载或另存。构建目录的高频变化不重建文件索引，但仍可能触发 Git 状态核对。
 
-### Pi RPC 报告
-
-桌面应用的“设置 → 高级与诊断 → Pi RPC 诊断”可刷新事件、按运行批次筛选、清空记录及导出当前快照。
-
-- 当前报告包含应用版本、系统/架构、相对启动时间、固定 RPC 事件码、计数和退出码。只保留本次应用运行的最近 256 条记录，相邻同类事件会合并计数；任务进程退出后记录仍可读取，应用退出后不保留。
-- `spawn_not_found` 表示找不到程序或工作目录，`spawn_denied` 表示启动被拒绝；`process_ownership_failed` / `process_resume_failed` 分别表示进程树托管或恢复失败，其他创建错误归入 `spawn_failed`。
-- `invalid_json` / `incomplete_frame` / `frame_too_large` 区分协议格式、末帧截断和大小超限；`history_failed` 表示历史解析或临时存储失败，其他输出错误归入 `output_invalid`。`request_timeout` 表示请求未按时返回；`response_failed` 表示 Pi 命令返回失败；`stop_timeout` 表示进程收尾未在等待预算内结束。报告不提供任意错误原文。
-- `stderr_observed` 的计数单位为字节，其他事件为次数或缺失事件数量。stderr 原文可能包含提示词或凭据，因此不保存、展示或导出；不能用该字节数判断错误的具体内容。
-- 报告不收集项目/任务名、文件内容、路径、模型地址、原生会话 ID 或凭据。不打包已有应用日志、配置文件或数据库，不自动上传。
-- 导出使用当前预览的快照，预览 10 分钟后失效，刷新可重新生成。原生保存对话框只创建新文件，不覆盖已有文件；取消不会创建报告。写入失败时可能留下不完整报告，先核对目标再选择新文件名，不自动重试。
-- 清空仅影响诊断记录和未导出的预览，不删除会话、不停止任务，也不删除已经导出的报告。运行中的任务仍会继续产生新记录。
-
-此入口目前仅覆盖 Pi RPC 传输与进程事件，不替代 DSH、终端兼容模式、运行时安装日志或崩溃诊断。提交报告前仍请核对内容，避免附上原始凭据、提示词或私有源码。
 
 发布前检查：
 
