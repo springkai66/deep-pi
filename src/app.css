@@ -1100,7 +1100,7 @@ aside.project-sidebar, aside.file-panel, aside.git-sidebar { position: relative;
   backdrop-filter: blur(var(--theme-backdrop-blur)) saturate(var(--theme-backdrop-saturation));
 }
 
-:root[data-surface-material="glass"] :is(.settings-page, .workspace, .settings-modal, .project-sidebar .task-sidebar) {
+:root[data-surface-material="glass"] :is(.settings-page, .settings-header, .settings-navigation, .workspace, .project-sidebar .task-sidebar, .file-panel .file-sidebar) {
   background: transparent !important;
 }
 
@@ -1121,14 +1121,15 @@ aside.project-sidebar, aside.file-panel, aside.git-sidebar { position: relative;
   background: var(--surface) !important;
 }
 
+/* Sidebars/settings own their panel tint; chat controls retain readable surfaces. */
+:root[data-surface-material="glass"] :is(.project-sidebar, .file-panel, .settings-modal, .chat-pane > header) {
+  background: var(--surface) !important;
+}
+
 :root[data-surface-material="glass"] .chat-pane .message-content {
   color: var(--text-strong) !important;
   font-weight: 500;
   text-shadow: 0 1px 1px color-mix(in srgb, var(--page-bg) 55%, transparent);
-}
-
-:root[data-surface-material="glass"] .chat-pane .tool-call-live-output {
-  background: var(--surface-alt) !important;
 }
 
 /* Acrylic is a native main-window material; auxiliary webviews never set this attribute. */
@@ -1143,12 +1144,13 @@ aside.project-sidebar, aside.file-panel, aside.git-sidebar { position: relative;
     transparent !important;
 }
 
-/* Only the exit confirmation keeps a scrim; settings stay as a centered window. */
+/* Modal scrims follow theme transparency; settings stay as a centered window. */
 :root[data-surface-material="glass"] .settings-overlay {
   background: transparent !important;
 }
 
-:root[data-surface-material="glass"] .dialog-backdrop {
+:root[data-surface-material="glass"] .dialog-backdrop,
+:root[data-surface-material="glass"] .editor-backdrop {
   background: color-mix(in srgb, var(--page-bg) calc(100% - var(--theme-transparency)), transparent) !important;
 }
 
@@ -1190,14 +1192,10 @@ aside.project-sidebar, aside.file-panel, aside.git-sidebar { position: relative;
 
 :root[data-surface-material="glass"] :is(
   .topbar,
-  .project-sidebar,
-  .file-panel,
   .git-sidebar,
   .task-tabs-shell,
   .task-tabs,
-  .workspace-switcher,
-  .file-sidebar,
-  .chat-pane > header
+  .workspace-switcher
 ) {
   background: color-mix(in srgb, var(--page-bg) var(--theme-reading-surface-opacity, 60%), transparent) !important;
 }
@@ -1207,7 +1205,7 @@ aside.project-sidebar, aside.file-panel, aside.git-sidebar { position: relative;
   padding: 3px 7px;
   border-radius: 5px;
   color: var(--text-strong) !important;
-  background: color-mix(in srgb, var(--page-bg) var(--theme-reading-surface-opacity, 60%), transparent);
+  background: var(--surface);
   font-weight: 600;
 }
 
@@ -1215,16 +1213,19 @@ aside.project-sidebar, aside.file-panel, aside.git-sidebar { position: relative;
   padding: 10px 12px;
   border: 1px solid color-mix(in srgb, var(--border-strong) 55%, transparent);
   border-radius: 8px;
-  background: color-mix(in srgb, var(--page-bg) var(--theme-reading-surface-opacity, 60%), transparent);
+  background: var(--surface);
 }
 
 :root[data-surface-material="glass"] .chat-pane .user-message .message-content {
   color: var(--text-strong);
-  background: color-mix(in srgb, var(--accent) 18%, color-mix(in srgb, var(--page-bg) var(--theme-reading-surface-opacity, 60%), transparent));
+  background: color-mix(in srgb, color-mix(in srgb, var(--accent) 18%, var(--page-bg)) calc(100% - var(--theme-transparency)), transparent);
 }
 
 :root[data-surface-material="glass"] .chat-pane .tool-call,
-:root[data-surface-material="glass"] .chat-pane .tool-call-live-output,
+:root[data-surface-material="glass"] .chat-pane .tool-call-live-output {
+  background: var(--surface-alt) !important;
+}
+
 :root[data-surface-material="glass"] .chat-pane .composer {
-  background: color-mix(in srgb, var(--page-bg) var(--theme-reading-surface-opacity, 60%), transparent) !important;
+  background: var(--surface) !important;
 }

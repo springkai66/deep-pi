@@ -129,7 +129,7 @@ describe("theme appearance application", () => {
     expect(appCss).toMatch(/:root\[data-surface-material="glass"\] \.chat-pane\s*\{[^}]*background:\s*var\(--surface\)/s);
     expect(appCss).toMatch(/:root\[data-surface-material="glass"\] \.chat-pane \.message-content\s*\{[^}]*color:\s*var\(--text-strong\)[^}]*font-weight:\s*500/s);
     expect(appCss).toContain("--theme-reading-surface-opacity");
-    expect(appCss).toMatch(/\.chat-pane article:not\(\.user-message\):not\(\.tool-message\) \.message-content\s*\{[^}]*background:\s*color-mix/s);
+    expect(appCss).toMatch(/\.chat-pane article:not\(\.user-message\):not\(\.tool-message\) \.message-content\s*\{[^}]*background:\s*var\(--surface\)/s);
     expect(appCss).toMatch(/\.app-shell\s*\{[^}]*text-shadow:/s);
     expect(appCss).not.toContain(':root[data-theme="frosted-glass"]');
     expect(appCss).not.toContain("--glass-transparency");
