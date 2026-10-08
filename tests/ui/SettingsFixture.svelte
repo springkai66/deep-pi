@@ -4,6 +4,7 @@
   import PiMcpSkillsSettings from "../../src/lib/PiMcpSkillsSettings.svelte";
   import PiProviderSettings from "../../src/lib/PiProviderSettings.svelte";
   import PiMarketplace from "../../src/lib/PiMarketplace.svelte";
+  import PiCodemodeSettings from "../../src/lib/PiCodemodeSettings.svelte";
   import AppToasts from "../../src/lib/AppToasts.svelte";
   import { notices } from "../../src/lib/notices.svelte";
   import { DEFAULT_APP_SETTINGS, cssAppFontFamily, cssSessionFontFamily, type AppSettings } from "../../src/lib/settings";
@@ -41,7 +42,23 @@
   const fixtureProjectPath = new URLSearchParams(location.search).has("project") ? "F:/fixture-project" : null;
   let installedPackages = $state([{ source: "npm:pi-demo@1.0.0", autoload: true, environment: "managed" as const }]);
   let installedServers = $state<Array<{ name: string; config: Record<string, unknown> }>>([{ name: "local-mcp", config: { url: "https://example.com/mcp" } }]);
-  let codemodeSettings = $state({ enabled: false, mode: "on" as "on" | "only", inlineBudget: 3000 });
+  type CodemodeSettings = { enabled: boolean; mode: "on" | "only"; inlineBudget: number };
+  let globalCodemode = $state<CodemodeSettings>(new URLSearchParams(location.search).has("codemode-enabled")
+    ? { enabled: true, mode: "only", inlineBudget: 4200 } : { enabled: false, mode: "on", inlineBudget: 3000 });
+  let projectCodemode = $state<CodemodeSettings | null>(null);
+  let codemodeReadScope = $state("");
+  let codemodeSaveScope = $state("");
+  let codemodeSaves = $state(0);
+  let codemodeBusy = $state(false);
+  let codemodeReadFailures = new URLSearchParams(location.search).has("codemode-read-fails") ? 1 : 0;
+  let codemodeSaveFailures = new URLSearchParams(location.search).has("codemode-save-fails") ? 1 : 0;
+  let catalogCalls = $state<string[]>([]);
+  let catalogFailures = new Set<string>();
+  let pendingCatalogRequests = $state(0);
+  const catalogPackage = (name: string, types: string[] = ["extension"], downloads = 200) => ({
+    name, description: `Official catalog package ${name}`, types, downloads, publishedAt: 1789300000000, path: name,
+  });
+  const popularPackages = [catalogPackage("pi-demo", ["extension"], 1200), catalogPackage("pi-other")];
   let installedSkills = $state([{ name: "local-skill", description: "Project helper", path: "skills/local-skill/SKILL.md" }]);
   const catalogModels: PiOfficialModel[] = [
     { id: "fixture-reasoning", name: "Reasoning model", contextWindow: 128000, maxTokens: 8192, reasoning: true, thinkingLevels: ["off", "low", "high"], input: ["text"], inputCost: null, outputCost: null },
@@ -76,7 +93,26 @@
       modelProbes++;
       return { ok: true, status: name === "pi_auth_test_model_connection" ? null : 200, latencyMs: 1, error: null } as T;
     }
-    if (name === "search_pi_packages") return [{ name: "pi-demo", description: "Example extension for settings layout checks", types: ["extension"], downloads: 1200, publishedAt: 1789400000000, path: "pi-demo" }, { name: "pi-other", description: "Another extension", types: ["extension"], downloads: 200, publishedAt: 1789300000000, path: "pi-other" }] as T;
+    if (name === "search_pi_packages") {
+      const { query, page } = (args as { request: { query: string; page: number } }).request;
+      const key = `${query}:${page}`;
+      catalogCalls = [...catalogCalls, key];
+      if (query === "slow" || query === "slow-fail" || (query === "slow-page" && page === 2)) {
+        pendingCatalogRequests++;
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        pendingCatalogRequests--;
+      }
+      if (query === "slow-fail") throw new Error("Fixture stale catalog request failed");
+      if ((query === "fail-once" || (query === "page-fail" && page === 2)) && !catalogFailures.has(key)) {
+        catalogFailures.add(key);
+        throw new Error("Fixture official catalog unavailable");
+      }
+      if (query === "empty") return { packages: [], nextPage: null } as T;
+      if (query === "" && page === 1) return { packages: popularPackages, nextPage: 2 } as T;
+      if (query === "advisor") return { packages: [catalogPackage("pi-advisor-flow"), catalogPackage("pi-advisor", ["skill"])], nextPage: null } as T;
+      if (page === 1) return { packages: [catalogPackage("pi-page-first", ["extension", "skill"], 100), catalogPackage("pi-page-theme", ["theme"], 100)], nextPage: 2 } as T;
+      return { packages: [catalogPackage("pi-page-theme", ["theme"], 100), catalogPackage("pi-page-prompt", ["prompt"], 100), catalogPackage("pi-page-untyped", [], 100)], nextPage: null } as T;
+    }
     if (name === "list_pi_packages") return installedPackages as T;
     if (name === "pi_package_metadata") return { version: "1.0.0", license: "MIT" } as T;
     if (name === "package_operation") {
@@ -86,7 +122,10 @@
       action = request.operation;
       return undefined as T;
     }
-    if (name === "list_mcp_servers") return installedServers as T;
+    if (name === "list_mcp_servers") {
+      if (new URLSearchParams(location.search).has("mcp-fails")) throw new Error("Fixture MCP config damaged");
+      return installedServers as T;
+    }
     if (name === "pi_mcp_list_servers") {
       const { scope } = (args as { request: { scope: "global" | "project" } }).request;
       return {
@@ -99,9 +138,21 @@
         errors: [], note: null,
       } as T;
     }
-    if (name === "pi_codemode_settings") return codemodeSettings as T;
+    if (name === "pi_codemode_settings") {
+      const { scope } = args as { scope: string };
+      codemodeReadScope = scope;
+      if (codemodeReadFailures-- > 0) throw new Error("Fixture Codemode read failed");
+      return { ...(scope === "project" ? projectCodemode ?? globalCodemode : globalCodemode) } as T;
+    }
     if (name === "save_pi_codemode_settings") {
-      codemodeSettings = (args as { request: typeof codemodeSettings }).request;
+      const { scope, projectPath, enabled, mode, inlineBudget } = (args as { request: CodemodeSettings & { scope: string; projectPath: string | null } }).request;
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      if (codemodeSaveFailures-- > 0) throw new Error("Fixture Codemode save failed");
+      if (scope === "project" && projectPath !== fixtureProjectPath) throw new Error("Fixture Codemode project path missing");
+      if (scope === "project") projectCodemode = { enabled, mode, inlineBudget };
+      else globalCodemode = { enabled, mode, inlineBudget };
+      codemodeSaveScope = scope;
+      codemodeSaves++;
       action = name;
       return undefined as T;
     }
@@ -225,6 +276,12 @@
   <output aria-label="订阅筛选快照">{chosenModelIds === null ? "all" : chosenModelIds.join(",")}</output>
   <output aria-label="操作结果">{action}</output>
   <output aria-label="读取范围">{listedScope}</output>
+  <output aria-label="Codemode 读取范围">{codemodeReadScope}</output>
+  <output aria-label="Codemode 保存范围">{codemodeSaveScope}</output>
+  <output aria-label="Codemode 保存次数">{codemodeSaves}</output>
+  <output aria-label="Codemode 忙碌">{String(codemodeBusy)}</output>
+  <output aria-label="目录请求">{catalogCalls.join(",")}</output>
+  <output aria-label="待完成目录请求">{pendingCatalogRequests}</output>
   {#if error}<span role="alert">{error}</span>{/if}
 </nav>
 <main class="workspace settings-view">
@@ -240,9 +297,11 @@
     onUninstallRuntime={() => { action = "卸载组件"; }}
     runningPiCount={1}
     dshRunning={true}
+    closeBlocked={codemodeBusy}
   >
     {#snippet models()}<PiProviderSettings embedded invokeCommand={command} confirm={async () => true} onClose={() => {}} onError={reportError}
       codexTransport={settings.codexTransport} onCodexTransportChange={(codexTransport) => { settings = { ...settings, codexTransport }; changes++; }} />{/snippet}
+    {#snippet codemode()}<PiCodemodeSettings projectPath={fixtureProjectPath} invokeCommand={command} onError={reportError} onBusyChange={(busy) => { codemodeBusy = busy; }} />{/snippet}
     {#snippet extensions()}<PiMarketplace embedded projectPath={fixtureProjectPath} invokeCommand={command} confirm={async () => true} onClose={() => {}} onError={(cause) => { error = String(cause); }} />{/snippet}
     {#snippet mcp()}<PiMcpSkillsSettings mode="mcp" projectPath={fixtureProjectPath} invokeCommand={command} onError={(cause) => { error = String(cause); }} onBusyChange={() => {}} />{/snippet}
     {#snippet skills()}<PiMcpSkillsSettings mode="skills" projectPath={fixtureProjectPath} invokeCommand={command} onError={(cause) => { error = String(cause); }} onBusyChange={() => {}} />{/snippet}

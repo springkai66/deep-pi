@@ -36,12 +36,6 @@
     note: string | null;
   }
 
-  interface PiCodemodeSettings {
-    enabled: boolean;
-    mode: "on" | "only";
-    inlineBudget: number;
-  }
-
   interface SkillEntry {
     name: string;
     description: string;
@@ -232,11 +226,6 @@
   let piMcpStatus = $state<PiMcpListResult>({ available: false, servers: [], errors: [], note: null });
   let piMcpStatusLoading = $state(false);
   let piMcpStatusRequest = 0;
-  let codemodeSettings = $state<PiCodemodeSettings>({ enabled: false, mode: "on", inlineBudget: 3000 });
-  let codemodeLoading = $state(false);
-  let codemodeSaving = $state(false);
-  let codemodeNotice = $state("");
-  let codemodeRequest = 0;
   let skills = $state<SkillEntry[]>([]);
   let loading = $state(false);
   let busy = $state(false);
@@ -321,7 +310,7 @@
     if (!canUseProjectScope && scope === "project") scope = "global";
   });
   const componentBusy = $derived(
-    busy || codemodeSaving ||
+    busy ||
       busyMcpEntry !== null ||
       busySkillEntry !== null ||
       busyWorkflowEntry !== null ||
@@ -443,7 +432,6 @@
         // Reading the config is safe on panel open. Connecting stdio/HTTP servers is explicit via
         // “Check connections”, since `pi mcp list` starts every enabled server.
         piMcpStatus = { available: false, servers: [], errors: [], note: null };
-        void refreshCodemodeSettings(requestedScope, requestedProjectPath);
       } else if (mode === "skills") {
         skills = await invoke<SkillEntry[]>("list_skills", { scope: requestedScope, projectPath: requestedProjectPath });
       } else {
@@ -472,23 +460,6 @@
       if (request === piMcpStatusRequest) piMcpStatusLoading = false;
     }
   }
-
-  async function refreshCodemodeSettings(requestedScope: "global" | "project", requestedProjectPath: string | null) {
-    const request = ++codemodeRequest;
-    codemodeLoading = true;
-    try {
-      const result = await invoke<PiCodemodeSettings>("pi_codemode_settings", {
-        scope: requestedScope,
-        projectPath: requestedProjectPath,
-      });
-      if (request === codemodeRequest) codemodeSettings = result;
-    } catch (error) {
-      if (request === codemodeRequest) onError(error);
-    } finally {
-      if (request === codemodeRequest) codemodeLoading = false;
-    }
-  }
-
 
   onMount(() => {
     mountedMode = mode;
@@ -547,26 +518,6 @@
       onError(error);
     } finally {
       busy = false;
-    }
-  }
-
-  async function saveCodemodeSettings() {
-    if (!Number.isInteger(codemodeSettings.inlineBudget) || codemodeSettings.inlineBudget < 0 || codemodeSettings.inlineBudget > 100000) {
-      onError(t("Codemode 工具说明预算必须是 0 到 100000 的整数"));
-      return;
-    }
-    codemodeSaving = true;
-    codemodeNotice = "";
-    try {
-      await invoke("save_pi_codemode_settings", {
-        request: { scope, projectPath, ...codemodeSettings },
-      });
-      codemodeNotice = t("Codemode 设置已保存；已运行的 Pi 任务重启后生效");
-      await refreshCodemodeSettings(scope, projectPath);
-    } catch (error) {
-      onError(error);
-    } finally {
-      codemodeSaving = false;
     }
   }
 
@@ -1270,37 +1221,6 @@
 
   {#if tab === "installed"}
     {#if mode === "mcp"}
-      <section class="settings-group" aria-label={t("Codemode 设置")}>
-        <div class="group-header"><h3>Codemode</h3></div>
-        <p class="muted">{t("Codemode 让模型编写 JavaScript，在沙箱中组合调用已启用的工具；MCP 默认曝光也可能按需自动启用它。")}</p>
-        {#if scope === "project"}<p class="muted">{t("项目范围 Codemode 设置仅在受信任的项目中生效。")}</p>{/if}
-        {#if codemodeLoading}
-          <p class="muted" role="status">{t("正在读取 Codemode 设置…")}</p>
-        {:else}
-          <label class="codemode-toggle">
-            <input type="checkbox" checked={codemodeSettings.enabled} disabled={codemodeSaving}
-              onchange={(event) => { codemodeSettings.enabled = event.currentTarget.checked; }} />
-            <span>{t("Pi 会话默认启用 Codemode")}</span>
-          </label>
-          <div class="codemode-options">
-            <label>{t("Codemode 模式")}
-              <select bind:value={codemodeSettings.mode} disabled={codemodeSaving}>
-                <option value="on">{t("on · 直接工具仍可调用")}</option>
-                <option value="only">{t("only · 工具只通过 Codemode 调用")}</option>
-              </select>
-            </label>
-            <label>{t("工具描述预算（tokens）")}
-              <input type="number" min="0" max="100000" step="100" value={codemodeSettings.inlineBudget}
-                disabled={codemodeSaving}
-                oninput={(event) => { const value = Number(event.currentTarget.value); if (Number.isFinite(value)) codemodeSettings.inlineBudget = value; }} />
-            </label>
-          </div>
-          <button type="button" class="primary-action" disabled={codemodeSaving} onclick={() => void saveCodemodeSettings()}>
-            {t("保存 Codemode 设置")}
-          </button>
-          {#if codemodeNotice}<p class="status" role="status">{codemodeNotice}</p>{/if}
-        {/if}
-      </section>
       <section class="settings-group">
         <div class="group-header">
           <h3>{t("已安装")} · {t("MCP 服务")}</h3>
@@ -1798,11 +1718,6 @@
   .scope-switch button.active { color: var(--accent); background: var(--surface-raised); box-shadow: inset 0 -2px var(--accent); font-weight: 700; }
   .scope-switch button:disabled { opacity: .4; cursor: default; }
   .group-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-  .codemode-toggle { display: flex; align-items: center; gap: 8px; min-height: 32px; color: var(--text); font-size: 13px; }
-  .codemode-toggle input { accent-color: var(--accent); }
-  .codemode-options { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); gap: 10px; }
-  .codemode-options label { display: grid; gap: 4px; min-width: 0; font-size: 11px; color: var(--text-muted); }
-  .codemode-options input, .codemode-options select { width: 100%; min-width: 0; min-height: 32px; padding: 5px 8px; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--surface); color: var(--text); font: inherit; }
   .mcp-native-status { color: var(--accent); }
   .mcp-status-error { overflow-wrap: anywhere; color: #d88989; }
   h3 { margin: 0; font-size: 14px; font-weight: 650; color: var(--text-strong); }

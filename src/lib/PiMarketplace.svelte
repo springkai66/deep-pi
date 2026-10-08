@@ -3,7 +3,7 @@
   import { PackageOpen, RefreshCw, Search, Trash2, X, ArrowUpCircle } from "@lucide/svelte";
   import { onDestroy, onMount } from "svelte";
   import { createOperationRunner, type OperationState } from "$lib/operation";
-  import { getLocale, t } from "$lib/i18n.svelte";
+  import { getLocale, t, tm } from "$lib/i18n.svelte";
 
   interface PiPackage {
     name: string;
@@ -18,6 +18,11 @@
     source: string;
     autoload: boolean | null;
     environment: "managed" | "native";
+  }
+
+  interface PiPackagePage {
+    packages: PiPackage[];
+    nextPage: number | null;
   }
 
   interface PackageMetadata {
@@ -37,15 +42,11 @@
 
   let { projectPath, confirm, onClose, onError, embedded = false, onBusyChange = () => {}, invokeCommand = nativeInvoke }: Props = $props();
   const invoke = <T,>(command: string, args?: Parameters<typeof nativeInvoke>[1]) => invokeCommand<T>(command, args);
-  type SortMode = "downloads" | "publishedAt";
-  const SORT_MODES: readonly SortMode[] = ["downloads", "publishedAt"];
-  const SORT_LABELS: Record<SortMode, string> = {
-    downloads: "按下载量排序",
-    publishedAt: "按发布时间排序",
-  };
   let query = $state("");
-  let sortBy = $state<SortMode>("downloads");
+  let catalogQuery = $state("");
   let packages = $state<PiPackage[]>([]);
+  let nextPage = $state<number | null>(null);
+  let searchError = $state<{ query: string; page: number; message: string } | null>(null);
   let installed = $state<InstalledPackage[]>([]);
   let scope = $state<"global" | "project">("global");
   let tab = $state<"installed" | "market">("installed");
@@ -53,7 +54,7 @@
   let isLoading = $state(false);
   let busyPackage = $state<string | null>(null);
   $effect(() => onBusyChange(busyPackage !== null));
-  onDestroy(() => onBusyChange(false));
+  onDestroy(() => { searchGeneration++; onBusyChange(false); });
   let statusMessage = $state("");
   let operationState = $state<OperationState | null>(null);
   const operations = createOperationRunner(invoke, (state) => { operationState = state; });
@@ -61,31 +62,56 @@
   let installedGeneration = 0;
 
   const canUseProjectScope = $derived(projectPath !== null);
-  /** 目录展示顺序：下载量、发布时间均按降序（最多 / 最新在前），并列时按名称稳定排序。 */
-  const sortedPackages = $derived.by(() => {
-    const mode = sortBy;
-    return [...packages].sort((a, b) => b[mode] - a[mode] || a.name.localeCompare(b.name));
-  });
 
   onMount(() => {
     void search();
     void refreshInstalled();
   });
 
-  async function search() {
+  function search() {
+    catalogQuery = query.trim();
+    packages = [];
+    nextPage = null;
+    statusMessage = "";
+    return loadPage(catalogQuery, 1);
+  }
+
+  async function loadPage(requestedQuery: string, page: number) {
     const generation = ++searchGeneration;
     isLoading = true;
-    statusMessage = "";
+    searchError = null;
     try {
-      const result = await invoke<PiPackage[]>("search_pi_packages", {
-        request: { query: query.trim() },
+      const result = await invoke<PiPackagePage>("search_pi_packages", {
+        request: { query: requestedQuery, page },
       });
-      if (generation === searchGeneration) packages = result;
+      if (generation !== searchGeneration) return;
+      // Keep the official catalog order, including across page boundaries.
+      const names = new Set(packages.map((pkg) => pkg.name));
+      const additions = result.packages.filter((pkg) => {
+        if (names.has(pkg.name)) return false;
+        names.add(pkg.name);
+        return true;
+      });
+      packages = [...packages, ...additions];
+      nextPage = result.nextPage;
     } catch (error) {
-      if (generation === searchGeneration) onError(error);
+      if (generation === searchGeneration) {
+        searchError = { query: requestedQuery, page, message: tm(error instanceof Error ? error.message : String(error)) };
+        onError(error);
+      }
     } finally {
       if (generation === searchGeneration) isLoading = false;
     }
+  }
+
+  function loadMore() {
+    if (isLoading || nextPage === null) return;
+    void loadPage(catalogQuery, nextPage);
+  }
+
+  function retrySearch() {
+    if (isLoading || !searchError) return;
+    void loadPage(searchError.query, searchError.page);
   }
 
   async function refreshInstalled() {
@@ -223,11 +249,11 @@
   }
 </script>
 
-<section class="market-page" class:embedded aria-label={t("Pi 扩展市场")}>
+<section class="market-page" class:embedded aria-label={t("Pi 资源包市场")}>
   {#if !embedded}
     <header class="market-header">
       <button class="icon-action" type="button" aria-label={t("返回工作区")} title={t("返回工作区")} disabled={busyPackage !== null} onclick={onClose}><X size={17} /></button>
-      <h1>{t("Pi 扩展市场")}</h1>
+      <h1>{t("Pi 资源包市场")}</h1>
     </header>
   {/if}
   <div class="page-controls">
@@ -247,9 +273,9 @@
   {#if tab === "installed"}
     <section class="settings-group">
       <div class="group-header">
-        <h3>{t("已安装")} · {t("Pi 扩展")}</h3>
+        <h3>{t("已安装")} · {t("Pi 资源包")}</h3>
         <div class="header-actions">
-          <button class="icon-action" type="button" aria-label={t("全部更新 Pi Package")} title={t("更新 DeepPi 托管扩展")}
+          <button class="icon-action" type="button" aria-label={t("全部更新 Pi Package")} title={t("更新 DeepPi 托管资源包")}
             disabled={busyPackage !== null || installed.length === 0} onclick={() => void updateAll()}><ArrowUpCircle size={14} /></button>
           <button class="icon-action" type="button" aria-label={t("刷新已安装 Package")} title={t("刷新")}
             disabled={installedLoading} onclick={() => void refreshInstalled()}><RefreshCw size={14} /></button>
@@ -279,26 +305,24 @@
   {:else}
     <section class="settings-group">
       <div class="group-header">
-        <h3>{t("Pi 扩展市场")}</h3>
-        <span class="muted">{t("官方目录")}</span>
+        <h3>{t("Pi 资源包市场")}</h3>
+        <span class="muted">pi.dev/packages · {t("按下载量排序")}</span>
       </div>
       <div class="market-toolbar">
         <form class="market-search" onsubmit={(event) => { event.preventDefault(); void search(); }}>
           <Search size={14} />
-          <input bind:value={query} aria-label={t("搜索 Pi Package")} placeholder={t("搜索 Pi Package")} autocomplete="off" />
-          <button class="primary-action compact" type="submit" disabled={isLoading} aria-label={t("搜索")} title={t("搜索")}><Search size={14} />{t("搜索")}</button>
+          <input bind:value={query} aria-label={t("搜索 Pi 资源包")} placeholder={t("搜索名称、描述或作者")} autocomplete="off" />
+          <button class="primary-action compact" type="submit" aria-label={t("搜索")} title={t("搜索")}><Search size={14} />{t("搜索")}</button>
         </form>
-        <select class="market-sort" bind:value={sortBy} aria-label={t("排序")}>
-          {#each SORT_MODES as mode (mode)}<option value={mode}>{t(SORT_LABELS[mode])}</option>{/each}
-        </select>
       </div>
       {#if isLoading && packages.length === 0}
         <p class="muted" role="status">{t("正在加载目录…")}</p>
-      {:else if packages.length === 0}
+      {:else if packages.length === 0 && !searchError}
         <p class="muted" role="status">{t("没有匹配的 Package")}</p>
-      {:else}
+      {/if}
+      {#if packages.length > 0}
         <ul class="entry-list market-list">
-          {#each sortedPackages as pkg (pkg.name)}
+          {#each packages as pkg (pkg.name)}
             {@const installedPackage = installedSource(pkg.name)}
             <li>
               <div class="entry-main">
@@ -322,6 +346,16 @@
             </li>
           {/each}
         </ul>
+      {/if}
+      {#if searchError}
+        <div class="catalog-error" role="alert">
+          <p>{t("Pi 资源包目录请求失败：{error}", { error: searchError.message })}</p>
+          <button class="secondary-action" type="button" disabled={isLoading} onclick={retrySearch}>{t("重试")}</button>
+        </div>
+      {:else if nextPage !== null}
+        <button class="secondary-action load-more" type="button" disabled={isLoading} onclick={loadMore}>
+          {isLoading ? t("正在加载目录…") : t("加载更多")}
+        </button>
       {/if}
     </section>
   {/if}
@@ -363,7 +397,6 @@
   .market-toolbar { gap: 8px; margin-top: 10px; }
   .market-search { flex: 1; min-width: 0; gap: 8px; padding: 2px 4px 2px 10px; border: 1px solid var(--border-strong); border-radius: 5px; background: var(--surface); color: var(--text-muted); }
   .market-search input { flex: 1; min-width: 0; height: 34px; border: 0; outline: 0; background: transparent; color: var(--text); font: inherit; font-size: 13px; }
-  .market-sort { flex-shrink: 0; height: 32px; max-width: 180px; padding: 0 6px; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--surface); color: var(--text); font: inherit; font-size: 12px; cursor: pointer; }
   .primary-action, .secondary-action { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 32px; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--surface-hover); color: var(--text); cursor: pointer; }
   .primary-action.compact, .secondary-action { font-size: 12px; flex-shrink: 0; }
   @container (max-width: 720px) {
@@ -373,6 +406,9 @@
   .primary-action:hover:not(:disabled), .secondary-action:hover:not(:disabled) { border-color: var(--accent); color: var(--text-strong); }
   .secondary-action { justify-self: start; background: transparent; }
   .status { margin: 0; font-size: 13px; color: var(--accent); }
+  .catalog-error { margin-top: 12px; color: var(--status-failed); font-size: 13px; overflow-wrap: anywhere; }
+  .catalog-error p { margin: 0 0 8px; }
+  .load-more { margin-top: 12px; }
   .spin { display: inline-grid; animation: spin 0.8s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
   @media (max-width: 480px) {

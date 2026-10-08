@@ -34,6 +34,7 @@
     onEditorSaved: (editor: ExternalEditor | null) => void;
     onClose: () => void;
     models: Snippet;
+    codemode: Snippet;
     extensions: Snippet;
     mcp: Snippet;
     skills: Snippet;
@@ -43,10 +44,11 @@
     closeBlocked?: boolean;
     saving?: boolean;
   }
-  let { category, onCategoryChange, onChangeSettings, onEditorSaved, onClose, models, extensions, mcp, skills, workflows, dsh, closeBlocked = false, saving = false, ...runtime }: Props = $props();
+  let { category, onCategoryChange, onChangeSettings, onEditorSaved, onClose, models, codemode, extensions, mcp, skills, workflows, dsh, closeBlocked = false, saving = false, ...runtime }: Props = $props();
   const icons = { general: Monitor, appearance: Palette, pi: Server, models: Server, extensions: PackageOpen, mcp: Puzzle, skills: Sparkles, workflows: Workflow, dsh: Globe, network: Network, advanced: Wrench };
   let search = $state("");
   let modelsVisited = $state(false);
+  let piVisited = $state(false);
   let extensionsVisited = $state(false);
   let mcpVisited = $state(false);
   let skillsVisited = $state(false);
@@ -208,6 +210,7 @@
   }
   $effect(() => {
     if (category === "models") modelsVisited = true;
+    if (category === "pi") piVisited = true;
     if (category === "extensions") extensionsVisited = true;
     if (category === "mcp") mcpVisited = true;
     if (category === "skills") skillsVisited = true;
@@ -506,7 +509,10 @@
         </section>
       </div>
       <div class="settings-panel embedded-panel" role="region" aria-labelledby="settings-panel-title" hidden={category !== "models"}>{#if modelsVisited}{@render models()}{/if}</div>
-      <div class="settings-panel" role="region" aria-labelledby="settings-panel-title" hidden={category !== "pi"}><RuntimeSettings {...runtime} view="pi" /></div>
+      <div class="settings-panel" role="region" aria-labelledby="settings-panel-title" hidden={category !== "pi"}>
+        <RuntimeSettings {...runtime} view="pi" />
+        {#if piVisited}{@render codemode()}{/if}
+      </div>
       <div class="settings-panel embedded-panel" role="region" aria-labelledby="settings-panel-title" hidden={category !== "extensions"}>{#if extensionsVisited}{@render extensions()}{/if}</div>
       <div class="settings-panel embedded-panel" role="region" aria-labelledby="settings-panel-title" hidden={category !== "mcp"}>{#if mcpVisited}{@render mcp()}{/if}</div>
       <div class="settings-panel embedded-panel" role="region" aria-labelledby="settings-panel-title" hidden={category !== "skills"}>{#if skillsVisited}{@render skills()}{/if}</div>

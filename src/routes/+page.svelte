@@ -54,6 +54,7 @@
   import type { DialogRequest, DialogValue } from "$lib/dialog";
   import type { Project } from "$lib/project";
   import PiMarketplace from "$lib/PiMarketplace.svelte";
+  import PiCodemodeSettings from "$lib/PiCodemodeSettings.svelte";
   import PiMcpSkillsSettings from "$lib/PiMcpSkillsSettings.svelte";
   import PiProviderSettings from "$lib/PiProviderSettings.svelte";
   import { runSensitiveHostSlash, type SensitiveHostSlash } from "$lib/pi-host-slash";
@@ -166,6 +167,8 @@
   let loginRequest = $state<{ provider: string; serial: number } | null>(null);
   let dshBusy = $state(false);
   let settingsPackageBusy = $state(false);
+  let settingsCodemodeBusy = $state(false);
+  const settingsBusy = $derived(settingsPackageBusy || settingsCodemodeBusy);
   let activeAgent = $state<"pi" | "dsh">("pi");
   // 把当前工作区告诉后端：桌宠任务环据此只显示该工作流的任务。
   $effect(() => {
@@ -437,7 +440,7 @@
     return {
       pi: activeAgent === "pi", workspace: view === "workspace", rpc: activeTask?.interactionMode === "rpc",
       fileOpen: !!openedFile, fileReady: !!fileEditor && !!fileId && fileDocuments.some((doc) => doc.id === fileId && !!doc.state),
-      fileBusy: fileSaving, navigationLocked: settingsOpen && settingsPackageBusy,
+      fileBusy: fileSaving, navigationLocked: settingsOpen && settingsBusy,
       modal: !!dialogRequest, recovery: !!recoveryProject, closing: closingWindow,
     };
   }
@@ -772,8 +775,8 @@
     const requestWindowClose = createWindowCloseHandler({
       // 托盘菜单的退出是显式退出，不受「关闭窗口行为」影响。
       behavior: (source) => (source === "tray" || !nativeReady ? "exit" : settings.closeBehavior),
-      blocked: () => recoveryBusy || fileWorkspace.busy() || switchingTasks.size > 0 || gitIndexBusy || settingsPackageBusy || busyRuntime !== null,
-      blockedReason: () => recoveryBusy || fileWorkspace.busy() ? t("项目文件正在处理，请完成后再关闭窗口") : settingsPackageBusy || busyRuntime !== null ? t("组件操作正在处理，请完成或取消后再关闭窗口") : gitIndexBusy ? t("Git 写入正在处理，请完成后再关闭窗口") : t("任务正在切换模式，请完成后再关闭窗口"),
+      blocked: () => recoveryBusy || fileWorkspace.busy() || switchingTasks.size > 0 || gitIndexBusy || settingsBusy || busyRuntime !== null,
+      blockedReason: () => recoveryBusy || fileWorkspace.busy() ? t("项目文件正在处理，请完成后再关闭窗口") : settingsBusy || busyRuntime !== null ? t("组件操作正在处理，请完成或取消后再关闭窗口") : gitIndexBusy ? t("Git 写入正在处理，请完成后再关闭窗口") : t("任务正在切换模式，请完成后再关闭窗口"),
       hasActiveTasks: () => tasks.some((task) => ["running", "waiting"].includes(task.status)),
       choose: closeChoiceDialog,
       confirm: () => confirmDialog(t("退出 DeepPi"), t("仍有活动任务，停止任务并退出吗？")),
@@ -797,7 +800,7 @@
     // 需要弹确认框或提示时，先把可能隐藏着的主窗口亮出来，否则用户看不到对话框。
     const trayQuitListener = listen("tray-quit", async () => {
       const needsVisibleWindow = recoveryBusy || fileWorkspace.busy()
-        || switchingTasks.size > 0 || gitIndexBusy || settingsPackageBusy || busyRuntime !== null
+        || switchingTasks.size > 0 || gitIndexBusy || settingsBusy || busyRuntime !== null
         || tasks.some((task) => ["running", "waiting"].includes(task.status));
       if (needsVisibleWindow) {
         await appWindow.show();
@@ -1195,7 +1198,7 @@
       showError(t("DSH 检测/修复操作正在处理，请先完成或取消操作"));
       return false;
     }
-    if (settingsOpen && settingsPackageBusy) {
+    if (settingsOpen && settingsBusy) {
       showError(t("扩展操作正在处理，请先完成或取消操作"));
       return false;
     }
@@ -1905,7 +1908,7 @@
       bind:this={settingsDialog} onkeydown={handleSettingsKeydown}>
       <PiSettings
         saving={settingsSaving}
-        closeBlocked={settingsPackageBusy || dshBusy}
+        closeBlocked={settingsBusy || dshBusy}
         category={settingsCategory}
         onCategoryChange={(category) => { settingsCategory = category; }}
         settings={settings}
@@ -1928,6 +1931,9 @@
         {#snippet models()}
           <PiProviderSettings embedded confirm={confirmDialog} onClose={closeSettings} onError={showError} {loginRequest}
             codexTransport={settings.codexTransport} onCodexTransportChange={(codexTransport) => updateSettings({ ...settings, codexTransport })} />
+        {/snippet}
+        {#snippet codemode()}
+          <PiCodemodeSettings projectPath={selectedProject?.path ?? null} onError={showError} onBusyChange={(busy) => { settingsCodemodeBusy = busy; }} />
         {/snippet}
         {#snippet extensions()}
           <PiMarketplace embedded projectPath={selectedProject?.path ?? null} confirm={confirmDialog} onClose={closeSettings} onError={showError} onBusyChange={(busy) => { settingsPackageBusy = busy; }} />

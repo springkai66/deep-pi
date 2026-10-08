@@ -177,7 +177,7 @@ export const EN_CHAT: Record<string, string> = {
   "通用": "General",
   "外观": "Appearance",
   "模型设置": "Model settings",
-  "Pi 扩展": "Pi Extensions",
+  "Pi 资源包": "Pi Packages",
   "MCP 服务": "MCP Servers",
   "Skills 技能": "Skills",
   "DSH 服务": "DSH Service",
