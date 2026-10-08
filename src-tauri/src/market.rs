@@ -1567,15 +1567,27 @@ mod tests {
         let page = parse_pi_packages(CATALOG_EMPTY, 1).unwrap();
         assert!(page.packages.is_empty());
         assert_eq!(page.next_page, None);
-        for html in [
+        // Target the main catalog so partial corruption reaches the parser seam.
+        let (catalog_prefix, catalog) = CATALOG_ADVISOR
+            .split_once("packages-index-card\">")
+            .unwrap();
+        let missing_card_close = format!(
+            "{catalog_prefix}packages-index-card\">{}",
+            catalog.replacen("</article>", "", 1)
+        );
+        let missing_catalog_close = format!(
+            "{catalog_prefix}packages-index-card\">{}",
+            catalog.replacen("</section>", "", 1)
+        );
+        for (case, html) in [
             String::new(),
             "<html><p>Service unavailable</p></html>".into(),
             "<p class=\"packages-empty\">No packages match this filter.</p>".into(),
             CATALOG_EMPTY.replace("No packages match this filter.", "Service unavailable"),
             CATALOG_ADVISOR.replace("</article>", ""),
-            CATALOG_ADVISOR.replacen("</article>", "", 1),
+            missing_card_close,
             CATALOG_ADVISOR.replace("</section>", ""),
-            CATALOG_ADVISOR.replacen("</section>", "", 1),
+            missing_catalog_close,
             CATALOG_ADVISOR.replace(
                 "data-package-downloads=\"322\"",
                 "data-package-downloads=\"oops\"",
@@ -1585,8 +1597,16 @@ mod tests {
                 "href=\"/packages/other\"",
             ),
             format!("{CATALOG_EMPTY}{CATALOG_EMPTY}"),
-        ] {
-            let error = parse_pi_packages(&html, 1).unwrap_err();
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let result = parse_pi_packages(&html, 1);
+            assert!(
+                result.is_err(),
+                "accepted malformed catalog case {case}: {result:?}"
+            );
+            let error = result.unwrap_err();
             assert!(
                 error.starts_with("Pi package catalog HTML is invalid:"),
                 "{error}"
