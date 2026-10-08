@@ -3,6 +3,8 @@ export const EN_SETTINGS: Record<string, string> = {
   "磨砂玻璃": "Frosted Glass",
   "磨玻璃透明程度": "Glass transparency",
   "0% 为不透明，数值越高越透明。": "0% is opaque; higher values are more transparent.",
+  "Windows 已关闭透明效果，当前使用透明背景，桌面磨砂不可用。": "Windows transparency effects are off. The background is transparent, but desktop blur is unavailable.",
+  "窗口透明效果未能应用，请重新选择主题后重试。": "Could not apply window transparency. Select the theme again to retry.",
   "柔和的蓝紫色磨砂玻璃界面，可调整面板透明程度。": "A soft blue-violet frosted-glass interface with adjustable panel transparency.",
   "搜索设置": "Search settings",
   "没有匹配的设置": "No matching settings",

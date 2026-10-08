@@ -1132,16 +1132,24 @@ aside.project-sidebar, aside.file-panel, aside.git-sidebar { position: relative;
   text-shadow: 0 1px 1px color-mix(in srgb, var(--page-bg) 55%, transparent);
 }
 
-/* Acrylic is a native main-window material; auxiliary webviews never set this attribute. */
+/* Both native glass and its transparent fallback need a clear WebView canvas. */
+:root[data-window-material="transparent"] body,
 :root[data-window-material="acrylic"] body {
   background: transparent !important;
 }
 
+:root[data-window-material="transparent"] .app-shell,
 :root[data-window-material="acrylic"] .app-shell {
   background:
     radial-gradient(ellipse at var(--theme-glow-primary-x) var(--theme-glow-primary-y), color-mix(in srgb, var(--theme-glow-primary) var(--theme-glow-primary-opacity), transparent), transparent var(--theme-glow-primary-spread)),
     radial-gradient(ellipse at var(--theme-glow-secondary-x) var(--theme-glow-secondary-y), color-mix(in srgb, var(--theme-glow-secondary) var(--theme-glow-secondary-opacity), transparent), transparent var(--theme-glow-secondary-spread)),
     transparent !important;
+}
+
+.native-material-notice { display: none; }
+:root[data-native-material-fallback="system_transparency_disabled"] .native-material-transparent-notice,
+:root[data-native-material-fallback="native_material_failed"] .native-material-error-notice {
+  display: block;
 }
 
 /* Modal scrims follow theme transparency; settings stay as a centered window. */

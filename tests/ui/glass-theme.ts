@@ -121,6 +121,13 @@ async function run() {
         for (const selector of [".project-sidebar .task-sidebar", ".file-panel .file-sidebar", ".chat-pane"]) {
           expectPanelAlpha(selector, 1 - transparency / 100, label);
         }
+        // Exercise the host's transparent fallback with the same real components.
+        document.documentElement.dataset.windowMaterial = "transparent";
+        document.documentElement.dataset.nativeMaterialFallback = "system_transparency_disabled";
+        expectAlpha(".app-shell", 0, `${label} native fallback`);
+        for (const selector of surfaces) expectAlpha(selector, 1 - transparency / 100, `${label} native fallback`);
+        delete document.documentElement.dataset.nativeMaterialFallback;
+        document.documentElement.dataset.windowMaterial = "none";
         expectAlpha(".dialog-backdrop", 1 - transparency / 100, label);
         expectAlpha(".editor-backdrop", 1 - transparency / 100, label);
         expectAlpha(".app-dialog", 0, `${label} native backdrop`, "::backdrop");
@@ -135,6 +142,20 @@ async function run() {
         throw new Error(`${colorMode}: ${selector} did not restore its regular theme background`);
       }
     }
+  }
+  element("#settings-nav-general").click();
+  await tick();
+  const themePicker = element('select[aria-label="主题"]') as HTMLSelectElement;
+  themePicker.value = FROSTED_GLASS_THEME.id;
+  themePicker.dispatchEvent(new Event("change", { bubbles: true }));
+  await tick();
+  document.documentElement.dataset.nativeMaterialFallback = "system_transparency_disabled";
+  if (getComputedStyle(element(".native-material-transparent-notice")).display === "none") {
+    throw new Error("Transparent fallback notice is hidden");
+  }
+  delete document.documentElement.dataset.nativeMaterialFallback;
+  if (getComputedStyle(element(".native-material-transparent-notice")).display !== "none") {
+    throw new Error("Transparent fallback notice remains visible after recovery");
   }
   if (unexpectedCommands.length) throw new Error(`Unsupported glass fixture commands: ${unexpectedCommands.join(", ")}`);
   const fixtureError = document.querySelector('.settings-modal [role="alert"]');

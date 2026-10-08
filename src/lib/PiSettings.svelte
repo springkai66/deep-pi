@@ -470,6 +470,12 @@
                 <output>{runtime.settings.themeTransparency}%</output>
               </span>
             </label>
+            <p class="theme-status native-material-notice native-material-transparent-notice" role="status">
+              {t("Windows 已关闭透明效果，当前使用透明背景，桌面磨砂不可用。")}
+            </p>
+            <p class="theme-error native-material-notice native-material-error-notice" role="status">
+              {t("窗口透明效果未能应用，请重新选择主题后重试。")}
+            </p>
           {/if}
         </section>
         <section class="settings-group" aria-labelledby="appearance-heading">
