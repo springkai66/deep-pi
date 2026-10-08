@@ -17,9 +17,9 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 /// 全量目录（约 4.5 MB）下载可能超过默认请求超时。
 const MODELS_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const CACHE_TTL: Duration = Duration::from_secs(600);
-/// pi.dev 目录页（会忽略 `?search=`，已不是搜索主路径，仅为兼容保留）。
-#[allow(dead_code)]
 const PI_PACKAGES_URL: &str = "https://pi.dev/packages";
+const MAX_PACKAGE_QUERY_LENGTH: usize = 214;
+const PI_PACKAGES_PAGE_SIZE: usize = 50;
 /// pi.dev 模型目录页（HTML 抓取已被 models.dev `api.json` 取代，仅为兼容保留）。
 #[allow(dead_code)]
 const PI_MODELS_URL: &str = "https://pi.dev/models";
@@ -44,6 +44,13 @@ pub struct PiPackage {
     pub downloads: u64,
     pub published_at: i64,
     pub path: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PiPackagePage {
+    pub packages: Vec<PiPackage>,
+    pub next_page: Option<u32>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -94,20 +101,20 @@ pub struct PiModelProfile {
 
 #[derive(Default)]
 pub struct MarketCache {
-    entries: Mutex<HashMap<String, (Instant, Vec<PiPackage>)>>,
+    entries: Mutex<HashMap<String, (Instant, PiPackagePage)>>,
 }
 
 impl MarketCache {
-    fn get(&self, query: &str) -> Option<Vec<PiPackage>> {
+    fn get(&self, query: &str) -> Option<PiPackagePage> {
         let entries = self.entries.lock().ok()?;
-        let (created, packages) = entries.get(query)?;
-        (created.elapsed() < CACHE_TTL).then(|| packages.clone())
+        let (created, page) = entries.get(query)?;
+        (created.elapsed() < CACHE_TTL).then(|| page.clone())
     }
 
-    fn insert(&self, query: String, packages: Vec<PiPackage>) {
+    fn insert(&self, query: String, page: PiPackagePage) {
         if let Ok(mut entries) = self.entries.lock() {
             entries.retain(|_, (created, _)| created.elapsed() < CACHE_TTL);
-            entries.insert(query, (Instant::now(), packages));
+            entries.insert(query, (Instant::now(), page));
         }
     }
 }
@@ -174,9 +181,12 @@ pub struct McpRegistryRequest {
 #[serde(rename_all = "camelCase")]
 pub struct PackageRequest {
     query: String,
-    /// 目录类型过滤（如 "skill"）。为空时不过滤。
-    #[serde(default)]
-    types: Vec<String>,
+    #[serde(default = "first_package_page")]
+    page: u32,
+}
+
+fn first_package_page() -> u32 {
+    1
 }
 
 #[derive(Deserialize)]
@@ -291,14 +301,6 @@ pub(crate) fn strip_tags(value: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-fn element_text(body: &str, class_name: &str) -> Option<String> {
-    let class_marker = format!("class=\"{class_name}\"");
-    let class_start = body.find(&class_marker)?;
-    let content_start = body[class_start..].find('>')? + class_start + 1;
-    let content_end = body[content_start..].find('<')? + content_start;
-    Some(strip_tags(&body[content_start..content_end]))
 }
 
 fn model_cell(body: &str, label: &str) -> Option<String> {
@@ -747,66 +749,161 @@ pub fn parse_model_profile(
     })
 }
 
-/// 解析 pi.dev 的 `data-package-card` 卡片。注：pi.dev 会忽略 `?search=` 参数，
-/// 搜索主路径已改为 npm registry 搜索接口（见 `fetch_npm_pi_packages`），
-/// 此函数与该 HTML 解析仅作兼容保留。
-#[allow(dead_code)]
-pub fn parse_pi_packages(html: &str) -> Vec<PiPackage> {
-    let mut packages = Vec::new();
-    let mut cursor = 0;
-    while packages.len() < 50 {
-        let Some(relative_start) = html[cursor..].find("<article") else {
-            break;
-        };
-        let start = cursor + relative_start;
-        let Some(relative_open_end) = html[start..].find('>') else {
-            break;
-        };
-        let open_end = start + relative_open_end + 1;
-        let opening = &html[start..open_end];
-        let Some(relative_close) = html[open_end..].find("</article>") else {
-            break;
-        };
-        let close = open_end + relative_close;
-        cursor = close + "</article>".len();
+fn package_catalog_error(detail: &str) -> String {
+    format!("Pi package catalog HTML is invalid: {detail}")
+}
 
-        if html_attribute(opening, "data-package-card").as_deref() != Some("true") {
+/// 仅扫描目录使用的、非嵌套的同名元素；缺闭合标签不能成为空结果。
+fn catalog_elements<'a>(html: &'a str, tag: &str) -> Result<Vec<(&'a str, &'a str)>, String> {
+    let marker = format!("<{tag}");
+    let closing = format!("</{tag}>");
+    let mut rest = html;
+    let mut elements = Vec::new();
+    while let Some(start) = rest.find(&marker) {
+        rest = &rest[start..];
+        if !rest[marker.len()..]
+            .starts_with(|character: char| character.is_ascii_whitespace() || character == '>')
+        {
+            rest = &rest[marker.len()..];
             continue;
         }
-        let Some(name) = html_attribute(opening, "data-package-name") else {
-            continue;
-        };
-        if validate_package_name(&name).is_err() {
-            continue;
+        let open_end = rest
+            .find('>')
+            .ok_or_else(|| package_catalog_error("unterminated opening tag"))?
+            + 1;
+        let close = rest[open_end..]
+            .find(&closing)
+            .map(|offset| open_end + offset)
+            .ok_or_else(|| package_catalog_error("missing closing tag"))?;
+        let content = &rest[open_end..close];
+        if content.match_indices(&marker).any(|(start, _)| {
+            content[start + marker.len()..]
+                .starts_with(|character: char| character.is_ascii_whitespace() || character == '>')
+        }) {
+            return Err(package_catalog_error("nested or unclosed catalog element"));
         }
-        let body = &html[open_end..close];
-        let description = element_text(body, "packages-desc")
-            .filter(|value| !value.is_empty())
-            .or_else(|| {
-                html_attribute(opening, "data-package-search").map(|value| strip_tags(&value))
-            })
-            .unwrap_or_else(|| name.clone());
-        let types = html_attribute(opening, "data-package-types")
-            .unwrap_or_default()
-            .split_whitespace()
-            .map(str::to_owned)
-            .collect();
-        let downloads = html_attribute(opening, "data-package-downloads")
-            .and_then(|value| value.parse().ok())
-            .unwrap_or_default();
-        let published_at = html_attribute(opening, "data-package-date")
-            .and_then(|value| value.parse().ok())
-            .unwrap_or_default();
-        packages.push(PiPackage {
-            path: format!("/packages/{name}"),
-            name,
-            description,
-            types,
-            downloads,
-            published_at,
-        });
+        elements.push((&rest[..open_end], content));
+        rest = &rest[close + closing.len()..];
     }
-    packages
+    Ok(elements)
+}
+
+fn catalog_has_class(opening: &str, class: &str) -> bool {
+    html_attribute(opening, "class")
+        .is_some_and(|classes| classes.split_whitespace().any(|value| value == class))
+}
+
+fn parse_catalog_package(opening: &str, body: &str) -> Result<PiPackage, String> {
+    let headings = catalog_elements(body, "h3")?;
+    let (_, heading) = headings
+        .iter()
+        .find(|(opening, _)| catalog_has_class(opening, "packages-name"))
+        .ok_or_else(|| package_catalog_error("package heading is missing"))?;
+    let anchors = catalog_elements(heading, "a")?;
+    let (anchor, label) = anchors
+        .first()
+        .ok_or_else(|| package_catalog_error("package link is missing"))?;
+    let name = strip_tags(label);
+    validate_package_name(&name).map_err(|_| package_catalog_error("package name is invalid"))?;
+    let href = html_attribute(anchor, "href")
+        .map(|value| decode_entities(&value))
+        .ok_or_else(|| package_catalog_error("package link has no href"))?;
+    let path = href.split(['?', '#']).next().unwrap_or_default();
+    if path != format!("/packages/{name}")
+        || html_attribute(opening, "data-package-name")
+            .is_some_and(|value| decode_entities(&value) != name)
+    {
+        return Err(package_catalog_error("package name and link disagree"));
+    }
+    let descriptions = catalog_elements(body, "p")?;
+    let description = descriptions
+        .iter()
+        .find(|(opening, _)| catalog_has_class(opening, "packages-desc"))
+        .map(|(_, content)| strip_tags(content))
+        .ok_or_else(|| package_catalog_error("package description is missing"))?;
+    // 类型来自官网，不按 npm 关键词推断；空类型仍是目录中的有效包。
+    let types = html_attribute(opening, "data-package-types")
+        .ok_or_else(|| package_catalog_error("package types are missing"))?
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect();
+    let downloads = html_attribute(opening, "data-package-downloads")
+        .and_then(|value| value.parse().ok())
+        .ok_or_else(|| package_catalog_error("package downloads are invalid"))?;
+    // 官网 data-package-date 为 Unix 毫秒，与 UI 的 Intl.DateTimeFormat 约定一致。
+    let published_at = html_attribute(opening, "data-package-date")
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|value| *value >= 0)
+        .ok_or_else(|| package_catalog_error("package publication date is invalid"))?;
+    Ok(PiPackage {
+        name,
+        description,
+        types,
+        downloads,
+        published_at,
+        path: path.to_owned(),
+    })
+}
+
+/// 只读取 All packages 区域，保持官网排序；近期发布侧栏不是查询结果。
+pub fn parse_pi_packages(html: &str, current_page: u32) -> Result<PiPackagePage, String> {
+    let sections = catalog_elements(html, "section")?;
+    let indexes: Vec<_> = sections
+        .iter()
+        .filter(|(opening, _)| catalog_has_class(opening, "packages-index-card"))
+        .collect();
+    if indexes.len() != 1 || current_page == 0 {
+        return Err(package_catalog_error(
+            "package index is missing or ambiguous",
+        ));
+    }
+    let (_, index) = indexes[0];
+    let packages = catalog_elements(index, "article")?
+        .into_iter()
+        .map(|(opening, body)| parse_catalog_package(opening, body))
+        .collect::<Result<Vec<_>, _>>()?;
+    let empty = catalog_elements(index, "p")?
+        .iter()
+        .any(|(opening, content)| {
+            catalog_has_class(opening, "packages-empty")
+                && strip_tags(content) == "No packages match this filter."
+        });
+    if packages.is_empty() != empty || packages.len() > PI_PACKAGES_PAGE_SIZE {
+        return Err(package_catalog_error(
+            "package results are missing or inconsistent",
+        ));
+    }
+    let base = Url::parse(PI_PACKAGES_URL).expect("constant Pi catalog URL");
+    let mut next_page = None;
+    for (opening, content) in catalog_elements(index, "a")? {
+        if !catalog_has_class(opening, "pagination-link") || strip_tags(content) != "Next →" {
+            continue;
+        }
+        let href = html_attribute(opening, "href")
+            .ok_or_else(|| package_catalog_error("next page link is missing"))?;
+        let url = base
+            .join(&decode_entities(&href))
+            .map_err(|_| package_catalog_error("next page URL is invalid"))?;
+        let pages: Vec<_> = url.query_pairs().filter(|(key, _)| key == "page").collect();
+        let page = pages
+            .first()
+            .and_then(|(_, value)| value.parse::<u32>().ok());
+        if url.origin() != base.origin()
+            || url.path() != base.path()
+            || pages.len() != 1
+            || page.is_none()
+            || page != current_page.checked_add(1)
+            || next_page.is_some()
+            || empty
+        {
+            return Err(package_catalog_error("next page link is inconsistent"));
+        }
+        next_page = page;
+    }
+    Ok(PiPackagePage {
+        packages,
+        next_page,
+    })
 }
 
 pub fn validate_package_name(name: &str) -> Result<&str, String> {
@@ -834,367 +931,34 @@ pub fn validate_package_name(name: &str) -> Result<&str, String> {
     Ok(name)
 }
 
-/// Pi 生态包普遍带 `pi-package` 等关键词；搜索为空时用它覆盖整个生态。
-/// npm 单次搜索上限 250；100 足以覆盖当前 Pi 生态，避免高下载量包被
-/// 相关性排序挤出首页（这正是“按下载量排序却看不到下载量最高的包”的原因）。
-const NPM_SEARCH_SIZE: usize = 250;
-const MAX_PACKAGE_QUERY_LENGTH: usize = 214;
-/// 命中任一关键词即视为 Pi 相关包。
-const PI_PACKAGE_KEYWORDS: [&str; 6] = [
-    "pi-package",
-    "pi-extension",
-    "pi-skill",
-    "pi-model",
-    "pi-provider",
-    "pi-theme",
-];
-
-/// npm 搜索结果的 `package.name` 是否像 Pi 包（`pi`、`pi-*`、`@scope/pi-*`）。
-fn is_pi_package_name(name: &str) -> bool {
-    if name == "pi" {
-        return true;
+fn pi_package_search_url(query: &str, page: u32) -> Result<Url, String> {
+    if query.len() > MAX_PACKAGE_QUERY_LENGTH || query.chars().any(char::is_control) || page == 0 {
+        return Err("package search query or page is invalid".into());
     }
-    if let Some(rest) = name.strip_prefix('@') {
-        return rest
-            .split_once('/')
-            .is_some_and(|(_, package)| package == "pi" || package.starts_with("pi-"));
-    }
-    name.starts_with("pi-")
-}
-
-/// 从 npm 关键词推断 Pi 目录类型；保持小写，与 `filter_packages_by_types` 约定一致。
-fn package_types_from_keywords(keywords: &[String]) -> Vec<String> {
-    let mut types: Vec<String> = Vec::new();
-    for keyword in keywords {
-        let keyword = keyword.trim().to_ascii_lowercase();
-        let inferred: &[&str] = match keyword.as_str() {
-            "pi-extension" | "pi" => &["extension"],
-            "pi-skill" | "skill" => &["skill"],
-            "pi-model" | "model" => &["model"],
-            "pi-provider" => &["provider"],
-            "pi-theme" => &["theme"],
-            _ => continue,
-        };
-        for kind in inferred {
-            if !types.iter().any(|existing| existing == kind) {
-                types.push((*kind).to_owned());
-            }
-        }
-    }
-    types
-}
-
-fn package_is_pi_related(name: &str, keywords: &[String]) -> bool {
-    keywords.iter().any(|keyword| {
-        let keyword = keyword.trim().to_ascii_lowercase();
-        PI_PACKAGE_KEYWORDS.contains(&keyword.as_str())
-    }) || is_pi_package_name(name)
-}
-
-/// `2026-06-12T10:27:21.886Z` → Unix 秒；非法输入返回 `None`。
-fn parse_rfc3339_seconds(value: &str) -> Option<i64> {
-    let value = value.trim();
-    let (date, time) = value.split_once(['T', ' '])?;
-    let mut date_parts = date.split('-');
-    let year: i64 = date_parts.next()?.parse().ok()?;
-    let month: i64 = date_parts.next()?.parse().ok()?;
-    let day: i64 = date_parts.next()?.parse().ok()?;
-    if date_parts.next().is_some()
-        || !(1..=12).contains(&month)
-        || !(1..=31).contains(&day)
-        || year <= 0
-    {
-        return None;
-    }
-    let (clock, offset) = split_timezone_seconds(time)?;
-    let mut clock_parts = clock.split(':');
-    let hour: i64 = clock_parts.next()?.parse().ok()?;
-    let minute: i64 = clock_parts.next()?.parse().ok()?;
-    let second: i64 = clock_parts
-        .next()
-        .unwrap_or("0")
-        .split(['.', ','])
-        .next()
-        .unwrap_or_default()
-        .parse()
-        .ok()?;
-    if !(0..=23).contains(&hour) || !(0..=59).contains(&minute) || !(0..=60).contains(&second) {
-        return None;
-    }
-    let days = days_from_civil(year, month, day)?;
-    Some(days * 86_400 + hour * 3_600 + minute * 60 + second - offset)
-}
-
-/// 拆出时钟部分与时区 UTC 偏移秒数（`Z` / `+08:00` / `-0530`）。
-fn split_timezone_seconds(time: &str) -> Option<(&str, i64)> {
-    if let Some(clock) = time.strip_suffix(['Z', 'z']) {
-        return Some((clock, 0));
-    }
-    let index = time.find(['+', '-'])?;
-    let (clock, zone) = time.split_at(index);
-    let (sign, digits) = zone.split_at(1);
-    let digits = digits.trim();
-    let (hours, minutes) = match digits.split_once(':') {
-        Some((hours, minutes)) => (hours.parse::<i64>().ok()?, minutes.parse::<i64>().ok()?),
-        None => match digits.len() {
-            2 => (digits.parse::<i64>().ok()?, 0),
-            4 => (
-                digits[..2].parse::<i64>().ok()?,
-                digits[2..].parse::<i64>().ok()?,
-            ),
-            _ => return None,
-        },
-    };
-    let sign = if sign == "-" { -1 } else { 1 };
-    if !(0..=23).contains(&hours) || !(0..=59).contains(&minutes) {
-        return None;
-    }
-    Some((clock, sign * (hours * 3_600 + minutes * 60)))
-}
-
-/// 公历日期 → 1970-01-01 起的天数（Howard Hinnant 的 days_from_civil）。
-fn days_from_civil(year: i64, month: i64, day: i64) -> Option<i64> {
-    if !(1..=9999).contains(&year) {
-        return None;
-    }
-    let year = if month <= 2 { year - 1 } else { year };
-    let era = year.div_euclid(400);
-    let year_of_era = year - era * 400;
-    let shifted_month = month + if month > 2 { -3 } else { 9 };
-    let day_of_year = (153 * shifted_month + 2) / 5 + day - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    Some(era * 146_097 + day_of_era - 719_468)
-}
-
-fn npm_search_downloads(object: &Value) -> u64 {
-    object
-        .get("downloads")
-        .and_then(|downloads| {
-            json_u64(downloads.get("monthly")).or_else(|| json_u64(downloads.get("weekly")))
-        })
-        .unwrap_or_default()
-}
-
-fn npm_search_path(package: &Value, name: &str) -> String {
-    registry_string(package.get("links").unwrap_or(&Value::Null), "npm")
-        .unwrap_or_else(|| format!("https://www.npmjs.com/package/{name}"))
-}
-
-/// 解析 npm registry 搜索响应（`/-/v1/search`），并优先保留 Pi 相关包。
-/// 过滤后为空时回退到未过滤的原始结果，避免关键词偏门时出现"搜不到"。
-pub fn parse_npm_package_search(body: &str) -> Result<Vec<PiPackage>, String> {
-    let value: Value = serde_json::from_str(body)
-        .map_err(|error| format!("npm package search response is invalid: {error}"))?;
-    let objects = value
-        .get("objects")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let mut all = Vec::new();
-    for object in &objects {
-        let Some(package) = object.get("package") else {
-            continue;
-        };
-        let Some(name) = registry_string(package, "name") else {
-            continue;
-        };
-        if validate_package_name(&name).is_err() {
-            continue;
-        }
-        let keywords: Vec<String> = package
-            .get("keywords")
-            .and_then(Value::as_array)
-            .map(|keywords| {
-                keywords
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_owned)
-                    .collect()
-            })
-            .unwrap_or_default();
-        let description = registry_string(package, "description").unwrap_or_else(|| name.clone());
-        let downloads = npm_search_downloads(object);
-        let published_at = registry_string(package, "date")
-            .and_then(|date| parse_rfc3339_seconds(&date))
-            .unwrap_or_default();
-        let path = npm_search_path(package, &name);
-        let types = package_types_from_keywords(&keywords);
-        all.push((
-            package_is_pi_related(&name, &keywords),
-            PiPackage {
-                name,
-                description,
-                types,
-                downloads,
-                published_at,
-                path,
-            },
-        ));
-    }
-    let relevant: Vec<PiPackage> = all
-        .iter()
-        .filter(|(related, _)| *related)
-        .map(|(_, package)| package.clone())
-        .collect();
-    if relevant.is_empty() {
-        return Ok(all.into_iter().map(|(_, package)| package).collect());
-    }
-    Ok(relevant)
-}
-
-/// 空查询浏览 Pi 生态；非空查询额外读取包元数据，确保完整包名不会被
-/// npm 搜索的 250 条上限挤出结果。
-pub fn fetch_npm_pi_packages(query: &str) -> Result<Vec<PiPackage>, String> {
-    let query = query.trim();
-    if query.len() > MAX_PACKAGE_QUERY_LENGTH || query.chars().any(char::is_control) {
-        return Err("package search query is invalid".into());
-    }
-    search_npm_pi_packages_with(query, fetch_npm_search, fetch_exact_npm_package)
-}
-
-fn search_npm_pi_packages_with(
-    query: &str,
-    search: impl Fn(&str) -> Result<Vec<PiPackage>, String>,
-    exact_lookup: impl Fn(&str) -> Result<Option<PiPackage>, String>,
-) -> Result<Vec<PiPackage>, String> {
-    let exact = if !query.is_empty() && validate_package_name(query).is_ok() {
-        exact_lookup(query).ok().flatten()
-    } else {
-        None
-    };
-    let mut packages: Vec<PiPackage> = Vec::new();
-    for keyword in PI_PACKAGE_KEYWORDS {
-        let text = if query.is_empty() {
-            format!("keywords:{keyword}")
-        } else {
-            format!("keywords:{keyword} {query}")
-        };
-        let results = match search(&text) {
-            Ok(results) => results,
-            Err(error) => return exact.map(|package| vec![package]).ok_or(error),
-        };
-        for package in results {
-            if !packages
-                .iter()
-                .any(|existing| existing.name == package.name)
-            {
-                packages.push(package);
-            }
-        }
-    }
-    if let Some(package) = exact {
-        if !packages
-            .iter()
-            .any(|existing| existing.name == package.name)
-        {
-            packages.push(package);
-        }
-    }
-    Ok(packages)
-}
-
-fn parse_exact_npm_package(body: &str, requested_name: &str) -> Result<Option<PiPackage>, String> {
-    let value: Value = serde_json::from_str(body)
-        .map_err(|error| format!("npm package metadata is invalid: {error}"))?;
-    let Some(name) = registry_string(&value, "name") else {
-        return Ok(None);
-    };
-    if name != requested_name || validate_package_name(&name).is_err() {
-        return Ok(None);
-    }
-    let Some(version) = value
-        .get("dist-tags")
-        .and_then(|tags| tags.get("latest"))
-        .and_then(Value::as_str)
-        .filter(|version| is_valid_version(version))
-    else {
-        return Ok(None);
-    };
-    let latest = value
-        .get("versions")
-        .and_then(|versions| versions.get(version));
-    let keywords: Vec<String> = value
-        .get("keywords")
-        .or_else(|| latest.and_then(|package| package.get("keywords")))
-        .and_then(Value::as_array)
-        .map(|keywords| {
-            keywords
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_default();
-    if !package_is_pi_related(&name, &keywords) {
-        return Ok(None);
-    }
-    let published_at = value
-        .get("time")
-        .and_then(|time| time.get(version))
-        .and_then(Value::as_str)
-        .and_then(parse_rfc3339_seconds)
-        .unwrap_or_default();
-    Ok(Some(PiPackage {
-        description: registry_string(&value, "description")
-            .or_else(|| latest.and_then(|package| registry_string(package, "description")))
-            .unwrap_or_else(|| name.clone()),
-        types: package_types_from_keywords(&keywords),
-        downloads: 0,
-        published_at,
-        path: format!("https://www.npmjs.com/package/{name}"),
-        name,
-    }))
-}
-
-fn fetch_exact_npm_package(name: &str) -> Result<Option<PiPackage>, String> {
-    validate_package_name(name)?;
-    let url = format!("{NPM_REGISTRY_URL}/{}", name.replace('/', "%2f"));
-    let body = crate::retry::retry_network(|_attempt| {
-        let mut response = match http_agent()
-            .get(&url)
-            .header("Accept", "application/json")
-            .call()
-        {
-            Ok(response) => response,
-            Err(ureq::Error::StatusCode(404)) => return Ok(None),
-            Err(error) => {
-                return Err(crate::retry::AttemptFailure {
-                    message: format!("npm package lookup failed: {error}"),
-                    retryable: crate::retry::is_retryable_ureq_error(&error),
-                    status: crate::retry::status_of_ureq_error(&error),
-                    retry_after: None,
-                })
-            }
-        };
-        read_response(response.body_mut())
-            .map(Some)
-            .map_err(crate::retry::AttemptFailure::retryable)
-    })
-    .map_err(|failure| failure.message)?;
-    body.map(|body| parse_exact_npm_package(&body, name))
-        .transpose()
-        .map(Option::flatten)
-}
-
-fn fetch_npm_search(text: &str) -> Result<Vec<PiPackage>, String> {
-    let mut url = Url::parse(&format!("{NPM_REGISTRY_URL}/-/v1/search"))
-        .map_err(|error| format!("invalid npm search URL: {error}"))?;
+    let mut url = Url::parse(PI_PACKAGES_URL).expect("constant Pi catalog URL");
     url.query_pairs_mut()
-        .append_pair("text", text)
-        .append_pair("size", &NPM_SEARCH_SIZE.to_string());
+        .append_pair("name", query.trim())
+        .append_pair("sort", "downloads")
+        .append_pair("page", &page.to_string());
+    Ok(url)
+}
+
+fn fetch_pi_package_page(url: &Url, page: u32) -> Result<PiPackagePage, String> {
     let body = crate::retry::retry_network(|_attempt| {
-        let mut response = http_agent().get(url.as_str()).call().map_err(|error| {
-            crate::retry::AttemptFailure {
+        let mut response = http_agent()
+            .get(url.as_str())
+            .header("Accept", "text/html")
+            .call()
+            .map_err(|error| crate::retry::AttemptFailure {
                 message: format!("Pi package catalog request failed: {error}"),
                 retryable: crate::retry::is_retryable_ureq_error(&error),
                 status: crate::retry::status_of_ureq_error(&error),
                 retry_after: None,
-            }
-        })?;
+            })?;
         read_response(response.body_mut()).map_err(crate::retry::AttemptFailure::retryable)
     })
     .map_err(|failure| failure.message)?;
-    parse_npm_package_search(&body)
+    parse_pi_packages(&body, page)
 }
 
 fn registry_string(object: &Value, key: &str) -> Option<String> {
@@ -1527,62 +1291,28 @@ pub async fn pi_model_profile(
 pub async fn search_pi_packages(
     app: tauri::AppHandle,
     request: PackageRequest,
-) -> Result<Vec<PiPackage>, String> {
+) -> Result<PiPackagePage, String> {
     use tauri::Manager;
-    tauri::async_runtime::spawn_blocking(move || search_pi_packages_inner(app.state(), request))
-        .await
-        .map_err(|error| format!("package search worker failed: {error}"))?
+    tauri::async_runtime::spawn_blocking(move || {
+        search_pi_packages_with(&app.state::<MarketCache>(), request, fetch_pi_package_page)
+    })
+    .await
+    .map_err(|error| format!("package search worker failed: {error}"))?
 }
 
-/// 目录默认顺序：按下载量降序，并列时按名称稳定排序。
-pub(crate) fn sort_packages_by_downloads(packages: &mut [PiPackage]) {
-    packages.sort_by(|left, right| {
-        right
-            .downloads
-            .cmp(&left.downloads)
-            .then_with(|| left.name.cmp(&right.name))
-    });
-}
-
-fn filter_packages_by_types(packages: Vec<PiPackage>, types: &[String]) -> Vec<PiPackage> {
-    if types.is_empty() {
-        return packages;
-    }
-    let wanted: Vec<String> = types
-        .iter()
-        .map(|kind| kind.trim().to_ascii_lowercase())
-        .filter(|kind| !kind.is_empty())
-        .collect();
-    if wanted.is_empty() {
-        return packages;
-    }
-    packages
-        .into_iter()
-        .filter(|package| {
-            package.types.iter().any(|kind| {
-                wanted
-                    .iter()
-                    .any(|candidate| candidate == &kind.to_ascii_lowercase())
-            })
-        })
-        .collect()
-}
-
-fn search_pi_packages_inner(
-    cache: State<'_, MarketCache>,
+fn search_pi_packages_with(
+    cache: &MarketCache,
     request: PackageRequest,
-) -> Result<Vec<PiPackage>, String> {
-    let query = request.query.trim().to_owned();
-    let key = format!("{query}\0{}", request.types.join("\u{1}"));
-    if let Some(packages) = cache.get(&key) {
-        return Ok(packages);
+    fetch: impl FnOnce(&Url, u32) -> Result<PiPackagePage, String>,
+) -> Result<PiPackagePage, String> {
+    let url = pi_package_search_url(&request.query, request.page)?;
+    let key = url.as_str().to_owned();
+    if let Some(page) = cache.get(&key) {
+        return Ok(page);
     }
-    let packages = filter_packages_by_types(fetch_npm_pi_packages(&query)?, &request.types);
-    let mut packages = packages;
-    // 目录默认顺序 = 下载量降序（并列按名称），前端不再依赖 npm 的相关性排序。
-    sort_packages_by_downloads(&mut packages);
-    cache.insert(key, packages.clone());
-    Ok(packages)
+    let page = fetch(&url, request.page)?;
+    cache.insert(key, page.clone());
+    Ok(page)
 }
 
 #[tauri::command]
@@ -1597,207 +1327,11 @@ pub async fn pi_package_metadata(
 #[cfg(test)]
 mod tests {
     use super::{
-        filter_packages_by_types, parse_mcp_registry, parse_model_profile,
-        parse_models_dev_catalog, parse_models_dev_profile, parse_npm_package_search,
-        parse_pi_models, parse_pi_packages, sort_packages_by_downloads, validate_package_name,
+        parse_mcp_registry, parse_model_profile, parse_models_dev_catalog,
+        parse_models_dev_profile, parse_pi_models, parse_pi_packages, validate_package_name,
         MAX_MODEL_RESULTS,
     };
     use serde_json::json;
-    #[test]
-    fn exact_metadata_requires_a_real_matching_pi_package() {
-        let body = r#"{"name":"pi-matt-pocock","description":"Pi extension","keywords":["pi-package","pi-extension"],"dist-tags":{"latest":"1.2.3"},"time":{"1.2.3":"2026-01-05T00:00:00.000Z"}}"#;
-        let package = super::parse_exact_npm_package(body, "pi-matt-pocock")
-            .unwrap()
-            .expect("matching package");
-        assert_eq!(package.name, "pi-matt-pocock");
-        assert_eq!(package.description, "Pi extension");
-        assert_eq!(package.types, vec!["extension"]);
-        assert!(package.published_at > 0);
-        assert_eq!(package.path, "https://www.npmjs.com/package/pi-matt-pocock");
-        assert!(super::parse_exact_npm_package(body, "pi-other")
-            .unwrap()
-            .is_none());
-        assert!(
-            super::parse_exact_npm_package(r#"{"name":"pi-other"}"#, "pi-other")
-                .unwrap()
-                .is_none()
-        );
-        assert!(super::parse_exact_npm_package(
-            r#"{"name":"express","dist-tags":{"latest":"1.0.0"}}"#,
-            "express"
-        )
-        .unwrap()
-        .is_none());
-        let scoped = r#"{"name":"@scope/tools","keywords":["pi-package","pi-skill"],"dist-tags":{"latest":"2.0.0"}}"#;
-        let scoped = super::parse_exact_npm_package(scoped, "@scope/tools")
-            .unwrap()
-            .unwrap();
-        assert_eq!(scoped.types, vec!["skill"]);
-        assert_eq!(scoped.path, "https://www.npmjs.com/package/@scope/tools");
-    }
-
-    #[test]
-    fn exact_package_outside_catalog_is_found_and_deduplicated() {
-        let exact = super::parse_exact_npm_package(
-            r#"{"name":"pi-matt-pocock","dist-tags":{"latest":"1.0.0"}}"#,
-            "pi-matt-pocock",
-        )
-        .unwrap()
-        .unwrap();
-        let results = super::search_npm_pi_packages_with(
-            "pi-matt-pocock",
-            |_| Ok(vec![]),
-            |name| {
-                assert_eq!(name, "pi-matt-pocock");
-                Ok(Some(exact.clone()))
-            },
-        )
-        .unwrap();
-        assert_eq!(results, vec![exact.clone()]);
-        let results = super::search_npm_pi_packages_with(
-            "pi-matt-pocock",
-            |_| Ok(vec![exact.clone()]),
-            |_| Ok(Some(exact.clone())),
-        )
-        .unwrap();
-        assert_eq!(results.len(), 1);
-        let results = super::search_npm_pi_packages_with(
-            "pi-matt-pocock",
-            |_| Err("catalog unavailable".into()),
-            |_| Ok(Some(exact.clone())),
-        )
-        .unwrap();
-        assert_eq!(results, vec![exact]);
-    }
-
-    #[test]
-    fn scoped_and_missing_packages_handle_catalog_omissions() {
-        let scoped = super::parse_exact_npm_package(
-            r#"{"name":"@scope/pi-tools","dist-tags":{"latest":"1.0.0"}}"#,
-            "@scope/pi-tools",
-        )
-        .unwrap()
-        .unwrap();
-        let results = super::search_npm_pi_packages_with(
-            "@scope/pi-tools",
-            |_| Ok(vec![]),
-            |_| Ok(Some(scoped.clone())),
-        )
-        .unwrap();
-        assert_eq!(results, vec![scoped]);
-        let results =
-            super::search_npm_pi_packages_with("pi-not-published", |_| Ok(vec![]), |_| Ok(None))
-                .unwrap();
-        assert!(results.is_empty());
-    }
-
-    #[test]
-    fn regular_and_empty_queries_keep_keyword_search() {
-        let calls = std::cell::RefCell::new(Vec::new());
-        let results = super::search_npm_pi_packages_with(
-            "advisor",
-            |text| {
-                calls.borrow_mut().push(text.to_owned());
-                super::parse_npm_package_search(
-                    r#"{"objects":[{"package":{"name":"pi-advisor","keywords":["pi-package"]}}]}"#,
-                )
-            },
-            |_| Ok(None),
-        )
-        .unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(calls.borrow().len(), super::PI_PACKAGE_KEYWORDS.len());
-        assert_eq!(calls.borrow()[0], "keywords:pi-package advisor");
-        assert!(super::search_npm_pi_packages_with(
-            "",
-            |_| Ok(vec![]),
-            |_| panic!("empty query must not read exact metadata")
-        )
-        .unwrap()
-        .is_empty());
-        assert!(super::search_npm_pi_packages_with(
-            "pi-invalid name",
-            |_| Ok(vec![]),
-            |_| panic!("invalid name must not be looked up")
-        )
-        .unwrap()
-        .is_empty());
-    }
-    #[test]
-    fn exact_metadata_reads_latest_version_fields_when_root_lacks_them() {
-        let body = r#"{"name":"@scope/tools","dist-tags":{"latest":"1.0.0"},"versions":{"1.0.0":{"keywords":["pi-package","pi-extension"],"description":"Scoped Pi extension"}}}"#;
-        let package = super::parse_exact_npm_package(body, "@scope/tools")
-            .unwrap()
-            .expect("scoped Pi package");
-        assert_eq!(package.description, "Scoped Pi extension");
-        assert_eq!(package.types, vec!["extension"]);
-    }
-
-    #[test]
-    fn sorts_packages_by_downloads_descending_then_name() {
-        let mut packages = vec![
-            super::PiPackage {
-                name: "pi-b".into(),
-                description: String::new(),
-                types: vec!["extension".into()],
-                downloads: 100,
-                published_at: 0,
-                path: String::new(),
-            },
-            super::PiPackage {
-                name: "pi-a".into(),
-                description: String::new(),
-                types: vec!["extension".into()],
-                downloads: 900,
-                published_at: 0,
-                path: String::new(),
-            },
-            super::PiPackage {
-                name: "pi-c".into(),
-                description: String::new(),
-                types: vec!["skill".into()],
-                downloads: 0,
-                published_at: 0,
-                path: String::new(),
-            },
-            super::PiPackage {
-                name: "pi-d".into(),
-                description: String::new(),
-                types: vec!["skill".into()],
-                downloads: 100,
-                published_at: 0,
-                path: String::new(),
-            },
-        ];
-        sort_packages_by_downloads(&mut packages);
-        let order: Vec<&str> = packages
-            .iter()
-            .map(|package| package.name.as_str())
-            .collect();
-        assert_eq!(order, ["pi-a", "pi-b", "pi-d", "pi-c"]);
-    }
-
-    #[test]
-    fn filters_packages_by_type_case_insensitively() {
-        let packages = parse_pi_packages(
-            r#"
-            <article data-package-card="true" data-package-name="skill-one"
-              data-package-search="a skill" data-package-types="skill"
-              data-package-downloads="10" data-package-date="0"></article>
-            <article data-package-card="true" data-package-name="ext-one"
-              data-package-search="an extension" data-package-types="extension"
-              data-package-downloads="10" data-package-date="0"></article>
-            "#,
-        );
-        assert_eq!(packages.len(), 2);
-        let skills = filter_packages_by_types(packages.clone(), &["skill".to_owned()]);
-        assert_eq!(skills.len(), 1);
-        assert_eq!(skills[0].name, "skill-one");
-        let uppercase = filter_packages_by_types(packages.clone(), &["SKILL".to_owned()]);
-        assert_eq!(uppercase.len(), 1);
-        assert_eq!(uppercase[0].name, "skill-one");
-        assert_eq!(filter_packages_by_types(packages, &[]).len(), 2);
-    }
 
     #[test]
     fn parses_mcp_registry_entries() {
@@ -1832,25 +1366,6 @@ mod tests {
     fn parse_mcp_registry_tolerates_invalid_payloads() {
         assert!(parse_mcp_registry("not json").is_empty());
         assert!(parse_mcp_registry(r#"{"servers": "nope"}"#).is_empty());
-    }
-
-    #[test]
-    fn parses_official_package_cards() {
-        let html = r#"
-          <article data-package-card="true" data-package-name="pi-tools"
-            data-package-search="Tools &amp; helpers" data-package-types="extension skill"
-            data-package-downloads="1200" data-package-date="1730000000000">
-            <div class="packages-desc">Tools &amp; helpers</div>
-          </article>
-        "#;
-
-        let packages = parse_pi_packages(html);
-
-        assert_eq!(packages.len(), 1);
-        assert_eq!(packages[0].name, "pi-tools");
-        assert_eq!(packages[0].description, "Tools & helpers");
-        assert_eq!(packages[0].types, vec!["extension", "skill"]);
-        assert_eq!(packages[0].downloads, 1_200);
     }
 
     #[test]
@@ -1919,197 +1434,316 @@ mod tests {
         assert!(validate_package_name("https://example.com").is_err());
     }
 
-    const NPM_SEARCH_FIXTURE: &str = r#"{
-      "total": 20602,
-      "objects": [
-        {
-          "package": {
-            "name": "pi-advisor",
-            "version": "0.3.0",
-            "description": "Pi extension package that adds a Claude-style advisor tool",
-            "keywords": ["pi-package", "pi-extension", "advisor", "coding-agent"],
-            "date": "2026-06-12T10:27:21.886Z",
-            "publisher": {"username": "linioi"},
-            "links": {
-              "npm": "https://www.npmjs.com/package/pi-advisor",
-              "repository": "https://github.com/linioi/pi-advisor"
-            }
-          },
-          "downloads": {"monthly": 334, "weekly": 62},
-          "score": {"final": 0.9},
-          "searchScore": 1.2
-        },
-        {
-          "package": {
-            "name": "@hk_net/pi-advisor",
-            "version": "1.0.0",
-            "description": "Scoped Pi advisor",
-            "keywords": ["pi-package", "pi", "extension", "advisor"],
-            "date": "2026-08-29T15:02:19.998Z",
-            "links": {"npm": "https://www.npmjs.com/package/@hk_net/pi-advisor"}
-          },
-          "downloads": {"monthly": 960, "weekly": 39}
-        },
-        {
-          "package": {
-            "name": "@scope/pi-tools",
-            "description": "Skill bundle",
-            "keywords": ["pi-skill"],
-            "date": "2026-01-05T00:00:00.000Z",
-            "links": {}
-          },
-          "downloads": {"weekly": 42}
-        },
-        {
-          "package": {
-            "name": "pi-plain",
-            "description": "Name-only match",
-            "keywords": [],
-            "date": "2030-01-01T00:00:00.000Z"
-          }
-        },
-        {
-          "package": {
-            "name": "express",
-            "description": "Fast web framework",
-            "keywords": ["express", "http", "framework"],
-            "date": "2026-01-05T00:00:00.000Z",
-            "links": {"npm": "https://www.npmjs.com/package/express"}
-          },
-          "downloads": {"monthly": 50000000}
+    const CATALOG_ADVISOR: &str = include_str!("fixtures/pi-catalog-advisor.html");
+    const CATALOG_PAGE_2: &str = include_str!("fixtures/pi-catalog-page-2.html");
+    const CATALOG_TYPES: &str = include_str!("fixtures/pi-catalog-types.html");
+    const CATALOG_EMPTY: &str = include_str!("fixtures/pi-catalog-empty.html");
+
+    fn package_request(query: &str, page: u32) -> super::PackageRequest {
+        super::PackageRequest {
+            query: query.into(),
+            page,
         }
-      ]
-    }"#;
+    }
 
     #[test]
-    fn parses_npm_search_results_and_drops_unrelated_packages() {
-        let packages =
-            parse_npm_package_search(NPM_SEARCH_FIXTURE).expect("npm fixture should parse");
-
-        let names: Vec<&str> = packages
-            .iter()
-            .map(|package| package.name.as_str())
-            .collect();
+    fn package_search_uses_official_encoded_name_downloads_and_page() {
+        let query = "@scope/tools & advice+中文";
+        let url = super::pi_package_search_url(query, 2).unwrap();
+        assert_eq!(url.scheme(), "https");
+        assert_eq!(url.host_str(), Some("pi.dev"));
+        assert_eq!(url.path(), "/packages");
+        let params: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+        assert_eq!(params.len(), 3);
+        assert_eq!(params["name"], query);
+        assert_eq!(params["sort"], "downloads");
+        assert_eq!(params["page"], "2");
+        assert!(url.as_str().contains("%40scope%2Ftools"));
+        assert!(url.as_str().contains("%26"));
+        assert!(url.as_str().contains("%2B"));
+        let request: super::PackageRequest = serde_json::from_value(json!({"query": ""})).unwrap();
+        assert_eq!(request.page, 1);
         assert_eq!(
-            names,
-            vec![
-                "pi-advisor",
-                "@hk_net/pi-advisor",
-                "@scope/pi-tools",
-                "pi-plain"
+            super::pi_package_search_url(&request.query, request.page)
+                .unwrap()
+                .as_str(),
+            "https://pi.dev/packages?name=&sort=downloads&page=1"
+        );
+        assert!(super::pi_package_search_url("advisor", 0).is_err());
+        assert!(super::pi_package_search_url("ad\nvisor", 1).is_err());
+        assert!(super::pi_package_search_url(&"a".repeat(215), 1).is_err());
+    }
+
+    #[test]
+    fn catalog_advisor_results_preserve_metadata_and_exclude_recent_sidebar() {
+        let page = parse_pi_packages(CATALOG_ADVISOR, 1).unwrap();
+        assert_eq!(page.next_page, None);
+        assert_eq!(
+            page.packages
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            ["pi-advisor-flow", "pi-advisor"]
+        );
+        let advisor = &page.packages[1];
+        assert_eq!(advisor.types, ["extension"]);
+        assert_eq!(advisor.downloads, 322);
+        assert_eq!(advisor.published_at, 1_781_260_041_886);
+        assert_eq!(advisor.path, "/packages/pi-advisor");
+        assert_eq!(advisor.description, "Pi extension package that adds a Claude-style advisor tool for strategic guidance during complex agent tasks.");
+        let json = serde_json::to_value(&page).unwrap();
+        assert_eq!(json["nextPage"], serde_json::Value::Null);
+        assert_eq!(json["packages"][1]["publishedAt"], 1_781_260_041_886_i64);
+    }
+
+    #[test]
+    fn catalog_preserves_scoped_untyped_packages_and_next_page() {
+        let page = parse_pi_packages(CATALOG_PAGE_2, 2).unwrap();
+        assert_eq!(page.next_page, Some(3));
+        assert_eq!(page.packages.len(), 2);
+        assert_eq!(page.packages[0].name, "@braintrust/pi-extension");
+        assert_eq!(page.packages[0].path, "/packages/@braintrust/pi-extension");
+        assert_eq!(page.packages[0].downloads, 25_850);
+        assert_eq!(page.packages[0].published_at, 1_791_303_924_079);
+        assert!(page.packages.iter().all(|package| package.types.is_empty()));
+        assert_eq!(serde_json::to_value(page).unwrap()["nextPage"], 3);
+    }
+
+    #[test]
+    fn catalog_keeps_skills_themes_multiple_types_and_official_order() {
+        // A description-only query match must survive: no local name/keyword filter.
+        let page = super::search_pi_packages_with(
+            &super::MarketCache::default(),
+            package_request("methodology", 1),
+            |url, number| {
+                assert_eq!(
+                    url.query_pairs().find(|(key, _)| key == "name").unwrap().1,
+                    "methodology"
+                );
+                parse_pi_packages(CATALOG_TYPES, number)
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            page.packages
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "bigpowers",
+                "@agimon-ai/doompi-web-components",
+                "pi-open-tui"
             ]
         );
-
-        let advisor = &packages[0];
+        assert_eq!(page.packages[0].types, ["skill"]);
+        assert_eq!(page.packages[1].types, ["theme"]);
+        assert_eq!(page.packages[2].types, ["extension", "theme"]);
+        // Even a changed server ordering passes through without being sorted locally.
+        let html = CATALOG_TYPES.replace(
+            "data-package-downloads=\"130483\"",
+            "data-package-downloads=\"0\"",
+        );
         assert_eq!(
-            advisor.description,
-            "Pi extension package that adds a Claude-style advisor tool"
+            parse_pi_packages(&html, 1).unwrap().packages[0].name,
+            "bigpowers"
         );
-        assert_eq!(advisor.types, vec!["extension"]);
-        assert_eq!(advisor.downloads, 334);
-        assert_eq!(advisor.published_at, 1_781_260_041);
-        assert_eq!(advisor.path, "https://www.npmjs.com/package/pi-advisor");
+    }
 
-        assert_eq!(packages[1].types, vec!["extension"]);
-        assert_eq!(packages[1].downloads, 960);
-        assert_eq!(packages[1].published_at, 1_788_015_739);
-
-        assert_eq!(packages[2].types, vec!["skill"]);
-        assert_eq!(packages[2].downloads, 42);
+    #[test]
+    fn catalog_decodes_entities_and_nested_description_text() {
+        let html = CATALOG_ADVISOR.replace(
+            "Advanced Executor/Advisor flow for Pi, fully configurable and extendable.",
+            "Tools &amp; <strong>helpers</strong> &quot;advisor&quot; &#39;ok&#39; &#x1F680;",
+        );
+        let page = parse_pi_packages(&html, 1).unwrap();
         assert_eq!(
-            packages[2].path,
-            "https://www.npmjs.com/package/@scope/pi-tools"
-        );
-
-        assert!(packages[3].types.is_empty());
-        assert_eq!(packages[3].downloads, 0);
-    }
-
-    #[test]
-    fn npm_search_defaults_for_missing_or_invalid_fields() {
-        let body = r#"{
-          "objects": [
-            {
-              "package": {
-                "name": "pi-mystery",
-                "keywords": [7, "unknown"],
-                "date": "not-a-date",
-                "links": null
-              }
-            }
-          ]
-        }"#;
-
-        let packages = parse_npm_package_search(body).expect("payload should parse");
-
-        assert_eq!(packages.len(), 1);
-        assert!(packages[0].types.is_empty());
-        assert_eq!(packages[0].downloads, 0);
-        assert_eq!(packages[0].published_at, 0);
-        assert_eq!(packages[0].path, "https://www.npmjs.com/package/pi-mystery");
-        assert!(parse_npm_package_search("not json").is_err());
-        assert!(parse_npm_package_search(r#"{"total": 1}"#)
-            .expect("missing objects should parse")
-            .is_empty());
-    }
-
-    #[test]
-    fn npm_search_falls_back_to_unfiltered_results() {
-        let body = r#"{
-          "objects": [
-            {"package": {"name": "express", "keywords": ["http"]}},
-            {"package": {"name": "loadshed", "keywords": ["reload"]}}
-          ]
-        }"#;
-
-        let packages = parse_npm_package_search(body).expect("payload should parse");
-
-        assert_eq!(packages.len(), 2);
-        assert_eq!(packages[0].name, "express");
-        assert_eq!(packages[1].name, "loadshed");
-    }
-
-    #[test]
-    #[ignore = "requires network access to the npm registry"]
-    fn fetches_live_exact_pi_matt_pocock() {
-        let package = super::fetch_exact_npm_package("pi-matt-pocock")
-            .expect("npm registry should be reachable")
-            .expect("published Pi package should be found");
-        assert_eq!(package.name, "pi-matt-pocock");
-        assert!(!package.description.is_empty());
-        assert!(package.published_at > 0);
-        let results = super::fetch_npm_pi_packages("pi-matt-pocock")
-            .expect("package search should be reachable");
-        assert!(results.iter().any(|result| result.name == package.name));
-        assert!(
-            super::fetch_exact_npm_package("pi-not-published-deeppi-20260928")
-                .unwrap()
-                .is_none()
+            page.packages[0].description,
+            "Tools & helpers \"advisor\" 'ok' 🚀"
         );
     }
 
     #[test]
-    #[ignore = "requires network access to the npm registry"]
-    fn fetches_live_npm_search_for_pi_advisor() {
-        let packages =
-            super::fetch_npm_pi_packages("pi-advisor").expect("npm search should be reachable");
-        for package in packages.iter().take(5) {
-            println!("npm search hit: {} ({})", package.name, package.path);
-        }
-        assert!(
-            packages.iter().any(|package| package.name == "pi-advisor"),
-            "pi-advisor should survive filtering: {packages:?}"
-        );
-        for package in &packages {
+    fn catalog_requires_explicit_empty_state_and_rejects_malformed_pages() {
+        let page = parse_pi_packages(CATALOG_EMPTY, 1).unwrap();
+        assert!(page.packages.is_empty());
+        assert_eq!(page.next_page, None);
+        for html in [
+            String::new(),
+            "<html><p>Service unavailable</p></html>".into(),
+            "<p class=\"packages-empty\">No packages match this filter.</p>".into(),
+            CATALOG_EMPTY.replace("No packages match this filter.", "Service unavailable"),
+            CATALOG_ADVISOR.replace("</article>", ""),
+            CATALOG_ADVISOR.replacen("</article>\n      <article", "\n      <article", 1),
+            CATALOG_ADVISOR.replace("</section>", ""),
+            CATALOG_ADVISOR.replacen("</section>", "", 1),
+            CATALOG_ADVISOR.replace(
+                "data-package-downloads=\"322\"",
+                "data-package-downloads=\"oops\"",
+            ),
+            CATALOG_ADVISOR.replace(
+                "href=\"/packages/pi-advisor?name=advisor\"",
+                "href=\"/packages/other\"",
+            ),
+            format!("{CATALOG_EMPTY}{CATALOG_EMPTY}"),
+        ] {
+            let error = parse_pi_packages(&html, 1).unwrap_err();
             assert!(
-                !package.types.is_empty()
-                    || package.name == "pi"
-                    || package.name.starts_with("pi-")
-                    || package.name.contains("/pi-"),
-                "unrelated package slipped through: {}",
-                package.name
+                error.starts_with("Pi package catalog HTML is invalid:"),
+                "{error}"
             );
         }
+    }
+
+    #[test]
+    fn catalog_rejects_invalid_next_links_and_inconsistent_empty_results() {
+        for href in [
+            "https://example.com/packages?page=3",
+            "/packages?page=1",
+            "/packages?page=3&amp;page=4",
+            "/packages?page=oops",
+            "/other?page=3",
+        ] {
+            let html = CATALOG_PAGE_2.replace(
+                "href=\"/packages?page=3\">Next",
+                &format!("href=\"{href}\">Next"),
+            );
+            assert!(
+                parse_pi_packages(&html, 2).is_err(),
+                "accepted next link: {href}"
+            );
+        }
+        let html = CATALOG_ADVISOR.replace(
+            "<h2>All packages</h2>",
+            "<h2>All packages</h2><p class=\"packages-empty\">No packages match this filter.</p>",
+        );
+        assert!(parse_pi_packages(&html, 1).is_err());
+        let empty_with_next = CATALOG_EMPTY.replace(
+            "</section>\n</main>",
+            "<a class=\"pagination-link\" href=\"/packages?page=2\">Next →</a></section></main>",
+        );
+        assert!(parse_pi_packages(&empty_with_next, 1).is_err());
+        let html = CATALOG_PAGE_2.replace("/packages?page=3", "/packages?page=3&amp;name=a%26b");
+        assert_eq!(parse_pi_packages(&html, 2).unwrap().next_page, Some(3));
+    }
+
+    #[test]
+    fn package_cache_keys_query_and_page_and_preserves_pagination() {
+        let cache = super::MarketCache::default();
+        let first =
+            super::search_pi_packages_with(&cache, package_request("advisor", 1), |_, page| {
+                parse_pi_packages(CATALOG_ADVISOR, page)
+            })
+            .unwrap();
+        assert_eq!(
+            super::search_pi_packages_with(&cache, package_request(" advisor ", 1), |_, _| panic!(
+                "first page should be cached"
+            ))
+            .unwrap(),
+            first
+        );
+        let second =
+            super::search_pi_packages_with(&cache, package_request("advisor", 2), |_, page| {
+                parse_pi_packages(CATALOG_PAGE_2, page)
+            })
+            .unwrap();
+        assert_eq!(second.next_page, Some(3));
+        assert_eq!(
+            super::search_pi_packages_with(&cache, package_request("advisor", 2), |_, _| panic!(
+                "second page should be cached"
+            ))
+            .unwrap(),
+            second
+        );
+        let empty =
+            super::search_pi_packages_with(&cache, package_request("different", 1), |_, page| {
+                parse_pi_packages(CATALOG_EMPTY, page)
+            })
+            .unwrap();
+        assert!(empty.packages.is_empty());
+        assert_eq!(
+            super::search_pi_packages_with(&cache, package_request("different", 1), |_, _| panic!(
+                "explicit empty results may be cached"
+            ))
+            .unwrap(),
+            empty
+        );
+    }
+
+    #[test]
+    fn package_search_errors_are_not_cached_and_expired_pages_are_refetched() {
+        let cache = super::MarketCache::default();
+        assert!(
+            super::search_pi_packages_with(&cache, package_request("advisor", 1), |_, _| Err(
+                "catalog unavailable".into()
+            ))
+            .is_err()
+        );
+        assert!(super::search_pi_packages_with(
+            &cache,
+            package_request("advisor", 1),
+            |_, page| parse_pi_packages("<html>broken</html>", page)
+        )
+        .is_err());
+        let page =
+            super::search_pi_packages_with(&cache, package_request("advisor", 1), |_, page| {
+                parse_pi_packages(CATALOG_ADVISOR, page)
+            })
+            .unwrap();
+        assert_eq!(page.packages.len(), 2);
+        let key = super::pi_package_search_url("advisor", 1)
+            .unwrap()
+            .to_string();
+        cache.entries.lock().unwrap().get_mut(&key).unwrap().0 =
+            std::time::Instant::now() - super::CACHE_TTL - std::time::Duration::from_secs(1);
+        assert!(cache.get(&key).is_none());
+        let refreshed =
+            super::search_pi_packages_with(&cache, package_request("advisor", 1), |_, page| {
+                parse_pi_packages(CATALOG_EMPTY, page)
+            })
+            .unwrap();
+        assert!(refreshed.packages.is_empty());
+    }
+
+    #[test]
+    #[ignore = "requires network access to the official pi.dev catalog"]
+    fn fetches_live_official_catalog_advisor_and_second_page() {
+        let fetch = |query, page| {
+            super::fetch_pi_package_page(&super::pi_package_search_url(query, page).unwrap(), page)
+                .unwrap()
+        };
+        let advisor = fetch("advisor", 1);
+        assert!(advisor
+            .packages
+            .iter()
+            .any(|package| package.name == "pi-advisor"));
+        assert!(advisor
+            .packages
+            .iter()
+            .any(|package| package.name == "pi-advisor-flow"));
+        for unrelated in [
+            "@aliou/pi-processes",
+            "@braintrust/pi-extension",
+            "pi-ui-kit",
+            "bigpowers",
+        ] {
+            assert!(!advisor
+                .packages
+                .iter()
+                .any(|package| package.name == unrelated));
+        }
+        let first = fetch("", 1);
+        assert_eq!(first.packages.len(), 50);
+        assert_eq!(first.next_page, Some(2));
+        let second = fetch("", 2);
+        assert_eq!(second.packages.len(), 50);
+        assert_eq!(second.next_page, Some(3));
+        assert!(!second
+            .packages
+            .iter()
+            .any(|package| first.packages.iter().any(|p| p.name == package.name)));
+        assert!(fetch("deeppi-no-match-20261008-5f092d", 1)
+            .packages
+            .is_empty());
     }
 
     // —— models.dev 目录/详情解析（离线边界用例） ——
