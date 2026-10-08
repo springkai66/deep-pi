@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { DEFAULT_APP_SETTINGS } from "./settings";
-import { FROSTED_GLASS_THEME } from "./theme";
+import { TRANSPARENT_THEME } from "./theme";
 
 const native = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ isTauri: () => true, invoke: native.invoke }));
@@ -18,30 +18,23 @@ function root() {
   vi.stubGlobal("document", { documentElement: element });
   return element;
 }
-const glass = { ...DEFAULT_APP_SETTINGS, theme: FROSTED_GLASS_THEME.id };
+const glass = { ...DEFAULT_APP_SETTINGS, theme: TRANSPARENT_THEME.id };
 
-it("uses the native fallback without making the glass shell opaque on later slider changes", async () => {
+it("keeps the main canvas transparent across slider changes without native material requests", async () => {
   const element = root();
-  native.invoke.mockResolvedValue({ material: "transparent", fallback: "system_transparency_disabled" });
   const { applyAppearance } = await import("./appearance");
   applyAppearance(glass);
-  await vi.waitFor(() => expect(element.dataset.windowMaterial).toBe("transparent"));
-  expect(element.dataset.nativeMaterialFallback).toBe("system_transparency_disabled");
+  expect(element.dataset.windowMaterial).toBe("transparent");
   applyAppearance({ ...glass, themeTransparency: 100 });
   expect(element.dataset.windowMaterial).toBe("transparent");
-  expect(native.invoke).toHaveBeenCalledTimes(1);
+  expect(native.invoke).not.toHaveBeenCalled();
 });
 
-it("ignores a stale glass response after switching back to an opaque theme", async () => {
+it("switches immediately back to an opaque theme without native material requests", async () => {
   const element = root();
-  let resolveGlass!: (value: { material: string; fallback: string }) => void;
-  native.invoke.mockReturnValueOnce(new Promise(resolve => { resolveGlass = resolve; }));
-  native.invoke.mockResolvedValueOnce({ material: "none", fallback: null });
   const { applyAppearance } = await import("./appearance");
   applyAppearance(glass);
   applyAppearance(DEFAULT_APP_SETTINGS);
-  resolveGlass({ material: "transparent", fallback: "system_transparency_disabled" });
-  await Promise.resolve();
   expect(element.dataset.windowMaterial).toBe("none");
-  expect(element.dataset.nativeMaterialFallback).toBeUndefined();
+  expect(native.invoke).not.toHaveBeenCalled();
 });

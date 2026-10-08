@@ -6,7 +6,7 @@
  * 保证两个窗口的主题、语言、字体观感一致。
  */
 import { setLocale } from "./i18n.svelte";
-import { invoke, isTauri } from "@tauri-apps/api/core";
+import { isTauri } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   cssAppFontFamily,
@@ -16,14 +16,6 @@ import {
   type AppSettings,
 } from "./settings";
 import { resolveTheme, themeCssVariables } from "./theme";
-let requestedNativeWindowMaterial: string | undefined;
-let appliedNativeWindowMaterial: string | undefined;
-let nativeMaterialRequest = 0;
-
-interface NativeMaterialStatus {
-  material: "acrylic" | "transparent" | "none";
-  fallback: "system_transparency_disabled" | null;
-}
 
 /** 把设置里的外观项写入 document 根节点；不读取也不修改业务状态。 */
 export function applyAppearance(next: AppSettings): void {
@@ -33,34 +25,15 @@ export function applyAppearance(next: AppSettings): void {
   const theme = resolveTheme(next.theme, next.customThemes ?? []);
   const isMainWindows = isTauri() && getCurrentWindow().label === "main" &&
     typeof navigator !== "undefined" && /windows/i.test(navigator.userAgent);
-  const windowMaterial = isMainWindows ? theme.effects?.windowMaterial ?? "none" : "none";
   root.dataset.colorMode = next.colorMode;
   root.dataset.colorScheme = scheme;
   root.dataset.theme = next.theme;
   root.dataset.surfaceMaterial = theme.effects?.surfaceMaterial ?? "solid";
-  root.dataset.windowMaterial = isMainWindows && windowMaterial === requestedNativeWindowMaterial
-    ? appliedNativeWindowMaterial ?? windowMaterial : windowMaterial;
+  root.dataset.windowMaterial = isMainWindows && theme.effects?.surfaceMaterial === "glass"
+    ? "transparent" : "none";
   setLocale(next.language);
   // 同步 <html lang>：影响无障碍朗读、字体选择与 :lang() 选择器。
   root.lang = next.language;
-  if (isMainWindows && windowMaterial !== requestedNativeWindowMaterial) {
-    requestedNativeWindowMaterial = windowMaterial;
-    appliedNativeWindowMaterial = undefined;
-    delete root.dataset.nativeMaterialFallback;
-    const request = ++nativeMaterialRequest;
-    void invoke<NativeMaterialStatus>("set_main_window_material", { material: windowMaterial })
-      .then((status) => {
-        if (request !== nativeMaterialRequest) return;
-        appliedNativeWindowMaterial = status.material;
-        root.dataset.windowMaterial = status.material;
-        if (status.fallback) root.dataset.nativeMaterialFallback = status.fallback;
-      })
-      .catch(() => {
-        if (request !== nativeMaterialRequest) return;
-        requestedNativeWindowMaterial = undefined;
-        root.dataset.nativeMaterialFallback = "native_material_failed";
-      });
-  }
   // 主题包令牌与效果参数；字体设置在主题默认值之上叠加用户自定义（用户设置优先）。
   for (const [name, value] of Object.entries(themeCssVariables(theme, scheme, next.themeTransparency))) {
     root.style.setProperty(name, value);

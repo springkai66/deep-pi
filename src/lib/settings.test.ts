@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { CHAT_DETAIL_LEVELS, DEFAULT_APP_SETTINGS, cssCodeFontFamily, cssTerminalFontFamily } from "./settings";
-import { DEFAULT_THEME_TRANSPARENCY, FROSTED_GLASS_THEME, themeTransparencyRange } from "./theme";
+import { DEFAULT_THEME_TRANSPARENCY, TRANSPARENT_THEME, themeTransparencyRange } from "./theme";
 
 describe("managed workspace defaults", () => {
   it("uses only the DeepPi environment for new tasks", () => {
@@ -29,7 +29,7 @@ describe("Pi conversation display choices", () => {
 describe("theme transparency setting", () => {
   it("defaults to 50% and uses the configured theme range", () => {
     expect(DEFAULT_APP_SETTINGS.themeTransparency).toBe(DEFAULT_THEME_TRANSPARENCY.default);
-    expect(themeTransparencyRange(FROSTED_GLASS_THEME)).toEqual(DEFAULT_THEME_TRANSPARENCY);
+    expect(themeTransparencyRange(TRANSPARENT_THEME)).toEqual(DEFAULT_THEME_TRANSPARENCY);
   });
 });
 describe("theme typography defaults", () => {

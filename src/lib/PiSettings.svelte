@@ -470,12 +470,6 @@
                 <output>{runtime.settings.themeTransparency}%</output>
               </span>
             </label>
-            <p class="theme-status native-material-notice native-material-transparent-notice" role="status">
-              {t("Windows 已关闭透明效果，当前使用透明背景，桌面磨砂不可用。")}
-            </p>
-            <p class="theme-error native-material-notice native-material-error-notice" role="status">
-              {t("窗口透明效果未能应用，请重新选择主题后重试。")}
-            </p>
           {/if}
         </section>
         <section class="settings-group" aria-labelledby="appearance-heading">
@@ -601,7 +595,7 @@
     min-height: 64px; flex-shrink: 0; display: flex; align-items: center; gap: 12px;
     padding: 12px 22px; border-bottom: 1px solid var(--border);
     background: color-mix(in srgb, var(--surface) 92%, transparent);
-    box-shadow: 0 1px 0 rgb(255 255 255 / 2%); backdrop-filter: blur(14px);
+    box-shadow: 0 1px 0 rgb(255 255 255 / 2%);
   }
   .settings-header h1 { margin: 0; color: var(--text-strong); font-size: 17px; font-weight: 700; letter-spacing: -.018em; }
   .settings-header .muted {

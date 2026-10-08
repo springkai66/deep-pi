@@ -2,7 +2,7 @@ import { mount, tick } from "svelte";
 import FileSidebar from "../../src/lib/FileSidebar.svelte";
 import { applyAppearance } from "../../src/lib/appearance";
 import { DEFAULT_APP_SETTINGS } from "../../src/lib/settings";
-import { FROSTED_GLASS_THEME } from "../../src/lib/theme";
+import { TRANSPARENT_THEME } from "../../src/lib/theme";
 import type { FileTreeAction } from "../../src/lib/files";
 import "../../src/app.css";
 
@@ -63,7 +63,7 @@ async function smoke() {
   await new Promise(resolve => setTimeout(resolve, 0));
   if (document.querySelectorAll('[role="treeitem"]').length !== 2) throw new Error("Fixture files did not load");
   let cases = 0;
-  for (const theme of [DEFAULT_APP_SETTINGS.theme, FROSTED_GLASS_THEME.id]) {
+  for (const theme of [DEFAULT_APP_SETTINGS.theme, TRANSPARENT_THEME.id]) {
     for (const colorMode of ["light", "dark"] as const) {
       Reflect.set(globalThis, "isTauri", false);
       applyAppearance({ ...DEFAULT_APP_SETTINGS, theme, colorMode });

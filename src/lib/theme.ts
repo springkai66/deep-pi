@@ -40,7 +40,6 @@ export interface ThemeTypography {
 }
 
 export type ThemeSurfaceMaterial = "solid" | "glass";
-export type ThemeWindowMaterial = "none" | "acrylic";
 
 export interface ThemeTransparencyRange {
   min: number;
@@ -48,27 +47,12 @@ export interface ThemeTransparencyRange {
   default: number;
 }
 
-/** Visual behavior is data so new themes can reuse the existing surface and window treatments. */
+/** Translucent surfaces share opacity controls across built-in and imported themes. */
 export interface ThemeEffects {
   surfaceMaterial?: ThemeSurfaceMaterial;
   transparency?: ThemeTransparencyRange;
-  backdropBlur?: number;
-  backdropSaturation?: number;
   /** Opacity for text-bearing surfaces that need contrast over arbitrary desktop backdrops. */
   readingSurfaceOpacity?: number;
-  windowMaterial?: ThemeWindowMaterial;
-  ambient?: {
-    primaryColor?: string;
-    primaryOpacity?: number;
-    primarySpread?: number;
-    primaryX?: number;
-    primaryY?: number;
-    secondaryColor?: string;
-    secondaryOpacity?: number;
-    secondaryX?: number;
-    secondaryY?: number;
-    secondarySpread?: number;
-  };
 }
 
 export interface ThemePack {
@@ -111,17 +95,18 @@ export const THEME_TOKENS: Record<keyof ThemeColors, string> = {
 
 export const THEME_COLOR_KEYS = Object.keys(THEME_TOKENS) as Array<keyof ThemeColors>;
 
+// Keep the persisted ID so existing theme selections continue to resolve.
 export const GLASS_THEME_ID = "frosted-glass";
 export const DEFAULT_THEME_TRANSPARENCY: ThemeTransparencyRange = { min: 0, max: 100, default: 50 };
 
-/** 磨砂玻璃主题：调色、字体与表面效果均由主题包参数驱动。 */
-export const FROSTED_GLASS_THEME: ThemePack = {
+/** 透明主题：调色、字体与透明度均由主题包参数驱动。 */
+export const TRANSPARENT_THEME: ThemePack = {
   $schema: THEME_SCHEMA_URL,
   id: GLASS_THEME_ID,
-  name: "磨砂玻璃",
+  name: "透明",
   author: "DeepPi",
   version: "1.0.0",
-  description: "柔和的蓝紫色磨砂玻璃界面，可调整面板透明程度。",
+  description: "柔和的蓝紫色透明界面，可调整面板透明程度。",
   colorScheme: "dark",
   colors: {
     pageBg: "#111723",
@@ -171,22 +156,7 @@ export const FROSTED_GLASS_THEME: ThemePack = {
   effects: {
     surfaceMaterial: "glass",
     transparency: DEFAULT_THEME_TRANSPARENCY,
-    backdropBlur: 16,
-    backdropSaturation: 1.2,
     readingSurfaceOpacity: 60,
-    windowMaterial: "acrylic",
-    ambient: {
-      primaryColor: "#8bd5f5",
-      primaryOpacity: 16,
-      primarySpread: 38,
-      primaryX: 18,
-      primaryY: 8,
-      secondaryColor: "#9a8cff",
-      secondaryOpacity: 12,
-      secondarySpread: 42,
-      secondaryX: 82,
-      secondaryY: 84,
-    },
   },
 };
 
@@ -246,7 +216,7 @@ export const COMMAND_FLOW_THEME: ThemePack = {
   },
 };
 
-export const BUILT_IN_THEMES: ThemePack[] = [COMMAND_FLOW_THEME, FROSTED_GLASS_THEME];
+export const BUILT_IN_THEMES: ThemePack[] = [COMMAND_FLOW_THEME, TRANSPARENT_THEME];
 
 export const DEFAULT_THEME_ID = COMMAND_FLOW_THEME.id;
 
@@ -302,23 +272,6 @@ function clampEffectNumber(value: unknown, min: number, max: number, fallback: n
   return Math.min(max, Math.max(min, value));
 }
 
-function setAmbientVariables(variables: Record<string, string>, ambient?: ThemeEffects["ambient"]): void {
-  const defaults = ambient
-    ? { primaryOpacity: 16, primarySpread: 38, primaryX: 18, primaryY: 8, secondaryOpacity: 12, secondarySpread: 42, secondaryX: 82, secondaryY: 84 }
-    : { primaryOpacity: 0, primarySpread: 38, primaryX: 18, primaryY: 8, secondaryOpacity: 0, secondarySpread: 42, secondaryX: 82, secondaryY: 84 };
-  for (const [key, color, opacity, spread, x, y, defaultOpacity, defaultSpread, defaultX, defaultY] of [
-    ["primary", ambient?.primaryColor, ambient?.primaryOpacity, ambient?.primarySpread, ambient?.primaryX, ambient?.primaryY, defaults.primaryOpacity, defaults.primarySpread, defaults.primaryX, defaults.primaryY],
-    ["secondary", ambient?.secondaryColor, ambient?.secondaryOpacity, ambient?.secondarySpread, ambient?.secondaryX, ambient?.secondaryY, defaults.secondaryOpacity, defaults.secondarySpread, defaults.secondaryX, defaults.secondaryY],
-  ] as const) {
-    variables[`--theme-glow-${key}`] = isSafeColor(color) ? color.trim() : "transparent";
-    variables[`--theme-glow-${key}-opacity`] = `${clampEffectNumber(opacity, 0, 100, defaultOpacity)}%`;
-    variables[`--theme-glow-${key}-spread`] = `${clampEffectNumber(spread, 0, 100, defaultSpread)}%`;
-    variables[`--theme-glow-${key}-x`] = `${clampEffectNumber(x, 0, 100, defaultX)}%`;
-    variables[`--theme-glow-${key}-y`] = `${clampEffectNumber(y, 0, 100, defaultY)}%`;
-  }
-}
-
-
 /** Compile one theme's colors and effect parameters into root CSS variables. */
 export function themeCssVariables(
   theme: ThemePack,
@@ -332,12 +285,7 @@ export function themeCssVariables(
   const transparency = clampThemeTransparency(themeTransparency ?? range.default, range);
   if (effects?.surfaceMaterial === "glass") {
     variables["--theme-transparency"] = `${transparency}%`;
-    variables["--theme-backdrop-blur"] = `${clampEffectNumber(effects.backdropBlur, 0, 40, 16)}px`;
-    variables["--theme-backdrop-saturation"] = `${clampEffectNumber(effects.backdropSaturation, 0, 3, 1.2)}`;
     variables["--theme-reading-surface-opacity"] = `${clampEffectNumber(effects.readingSurfaceOpacity, 20, 90, 60)}%`;
-    setAmbientVariables(variables, effects.ambient);
-  } else if (effects?.windowMaterial === "acrylic") {
-    setAmbientVariables(variables, effects.ambient);
   }
   for (const key of THEME_COLOR_KEYS) {
     const value = colors[key];
@@ -384,15 +332,6 @@ function parseThemeEffects(raw: unknown): ThemeEffects | undefined {
   if (source.surfaceMaterial === "solid" || source.surfaceMaterial === "glass") {
     effects.surfaceMaterial = source.surfaceMaterial;
   }
-  if (source.windowMaterial === "none" || source.windowMaterial === "acrylic") {
-    effects.windowMaterial = source.windowMaterial;
-  }
-  if (typeof source.backdropBlur === "number" && Number.isFinite(source.backdropBlur)) {
-    effects.backdropBlur = clampEffectNumber(source.backdropBlur, 0, 40, 16);
-  }
-  if (typeof source.backdropSaturation === "number" && Number.isFinite(source.backdropSaturation)) {
-    effects.backdropSaturation = clampEffectNumber(source.backdropSaturation, 0, 3, 1.2);
-  }
   if (typeof source.readingSurfaceOpacity === "number" && Number.isFinite(source.readingSurfaceOpacity)) {
     effects.readingSurfaceOpacity = clampEffectNumber(source.readingSurfaceOpacity, 20, 90, 60);
   }
@@ -409,21 +348,6 @@ function parseThemeEffects(raw: unknown): ThemeEffects | undefined {
         effects.transparency = parsed;
       }
     }
-  }
-  if (source.ambient && typeof source.ambient === "object" && !Array.isArray(source.ambient)) {
-    const ambientSource = source.ambient as Record<string, unknown>;
-    const ambient: NonNullable<ThemeEffects["ambient"]> = {};
-    for (const key of ["primaryColor", "secondaryColor"] as const) {
-      if (isSafeColor(ambientSource[key])) ambient[key] = ambientSource[key].trim();
-    }
-    for (const key of [
-      "primaryOpacity", "secondaryOpacity", "primarySpread", "secondarySpread",
-      "primaryX", "primaryY", "secondaryX", "secondaryY",
-    ] as const) {
-      const value = ambientSource[key];
-      if (typeof value === "number" && Number.isFinite(value)) ambient[key] = clampEffectNumber(value, 0, 100, 0);
-    }
-    if (Object.keys(ambient).length) effects.ambient = ambient;
   }
 
   return Object.keys(effects).length ? effects : undefined;

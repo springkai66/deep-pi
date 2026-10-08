@@ -2,7 +2,7 @@ import "../../src/app.css";
 import { mount, tick } from "svelte";
 import { applyAppearance } from "../../src/lib/appearance";
 import { DEFAULT_APP_SETTINGS } from "../../src/lib/settings";
-import { COMMAND_FLOW_THEME, FROSTED_GLASS_THEME, type ThemePack } from "../../src/lib/theme";
+import { COMMAND_FLOW_THEME, TRANSPARENT_THEME, type ThemePack } from "../../src/lib/theme";
 
 // Mock only the native boundary. The real components, theme compiler and CSS run in Chromium.
 const unexpectedCommands: string[] = [];
@@ -106,13 +106,13 @@ async function run() {
     if (Date.now() > deadline) throw new Error("Glass fixture did not open the provider dialog");
     await new Promise((resolve) => setTimeout(resolve, 30));
   }
-  const imported = { ...FROSTED_GLASS_THEME, id: "imported-glass", effects: { ...FROSTED_GLASS_THEME.effects, readingSurfaceOpacity: 90 } };
+  const imported = { ...TRANSPARENT_THEME, id: "imported-glass", effects: { ...TRANSPARENT_THEME.effects, readingSurfaceOpacity: 90 } };
   const results: string[] = [];
   for (const colorMode of ["light", "dark"] as const) {
     await appearance(COMMAND_FLOW_THEME, colorMode, 50);
     const restoredSurfaces = [...surfaces, ...clearChildren, ".editor-backdrop"];
     const regular = restoredSurfaces.map((selector) => getComputedStyle(element(selector)).backgroundColor);
-    for (const theme of [FROSTED_GLASS_THEME, imported]) {
+    for (const theme of [TRANSPARENT_THEME, imported]) {
       for (const transparency of [0, 50, 100]) {
         await appearance(theme, colorMode, transparency);
         const label = `${theme.id}/${colorMode}/${transparency}`;
@@ -121,12 +121,15 @@ async function run() {
         for (const selector of [".project-sidebar .task-sidebar", ".file-panel .file-sidebar", ".chat-pane"]) {
           expectPanelAlpha(selector, 1 - transparency / 100, label);
         }
-        // Exercise the host's transparent fallback with the same real components.
+        // Exercise the host's clear canvas with the same real components.
         document.documentElement.dataset.windowMaterial = "transparent";
-        document.documentElement.dataset.nativeMaterialFallback = "system_transparency_disabled";
-        expectAlpha(".app-shell", 0, `${label} native fallback`);
-        for (const selector of surfaces) expectAlpha(selector, 1 - transparency / 100, `${label} native fallback`);
-        delete document.documentElement.dataset.nativeMaterialFallback;
+        expectAlpha(".app-shell", 0, `${label} native transparency`);
+        for (const selector of surfaces) expectAlpha(selector, 1 - transparency / 100, `${label} native transparency`);
+        for (const selector of [...surfaces, ".project-sidebar .task-sidebar", ".file-panel .file-sidebar"]) {
+          if (getComputedStyle(element(selector)).backdropFilter !== "none") {
+            throw new Error(`${label}: ${selector} still blurs the background`);
+          }
+        }
         document.documentElement.dataset.windowMaterial = "none";
         expectAlpha(".dialog-backdrop", 1 - transparency / 100, label);
         expectAlpha(".editor-backdrop", 1 - transparency / 100, label);
@@ -146,16 +149,11 @@ async function run() {
   element("#settings-nav-general").click();
   await tick();
   const themePicker = element('select[aria-label="主题"]') as HTMLSelectElement;
-  themePicker.value = FROSTED_GLASS_THEME.id;
+  themePicker.value = TRANSPARENT_THEME.id;
   themePicker.dispatchEvent(new Event("change", { bubbles: true }));
   await tick();
-  document.documentElement.dataset.nativeMaterialFallback = "system_transparency_disabled";
-  if (getComputedStyle(element(".native-material-transparent-notice")).display === "none") {
-    throw new Error("Transparent fallback notice is hidden");
-  }
-  delete document.documentElement.dataset.nativeMaterialFallback;
-  if (getComputedStyle(element(".native-material-transparent-notice")).display !== "none") {
-    throw new Error("Transparent fallback notice remains visible after recovery");
+  if (!document.querySelector('input[aria-label="主题透明度"]')) {
+    throw new Error("Theme transparency control is missing");
   }
   if (unexpectedCommands.length) throw new Error(`Unsupported glass fixture commands: ${unexpectedCommands.join(", ")}`);
   const fixtureError = document.querySelector('.settings-modal [role="alert"]');

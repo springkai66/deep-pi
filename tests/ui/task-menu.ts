@@ -2,7 +2,7 @@ import { mount, tick } from "svelte";
 import TaskSidebar from "../../src/lib/TaskSidebar.svelte";
 import { applyAppearance } from "../../src/lib/appearance";
 import { DEFAULT_APP_SETTINGS } from "../../src/lib/settings";
-import { FROSTED_GLASS_THEME } from "../../src/lib/theme";
+import { TRANSPARENT_THEME } from "../../src/lib/theme";
 import type { Task } from "../../src/lib/task";
 import "../../src/app.css";
 
@@ -50,7 +50,7 @@ async function openMenu(selector: string, x: number, y: number, label: string) {
 async function smoke() {
   await tick();
   let cases = 0;
-  for (const theme of [DEFAULT_APP_SETTINGS.theme, FROSTED_GLASS_THEME.id]) {
+  for (const theme of [DEFAULT_APP_SETTINGS.theme, TRANSPARENT_THEME.id]) {
     for (const colorMode of ["light", "dark"] as const) {
       applyAppearance({ ...DEFAULT_APP_SETTINGS, theme, colorMode });
       for (const [x, y] of [[190, 180], [innerWidth - 1, innerHeight - 1], [1, 1]]) {

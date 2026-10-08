@@ -2453,7 +2453,7 @@
   .empty-conversation { display: grid; place-content: center; justify-items: center; min-height: 180px; color: var(--text-muted); }
   .empty-hint { margin: 8px 0 0; font-size: 12px; }
   h2 { font-size: 16px; font-weight: 500; overflow-wrap: anywhere; }
-  /* 指令坞：常规流式布局的磨砂胶囊——会话内容始终结束于输入框上方，错误与提示条排在输入框上方，不会被遮挡。 */
+  /* 指令坞：常规流式布局的胶囊——会话内容始终结束于输入框上方，错误与提示条排在输入框上方，不会被遮挡。 */
   .composer {
     position: relative;
     flex-shrink: 0;
