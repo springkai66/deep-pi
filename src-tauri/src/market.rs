@@ -1573,7 +1573,7 @@ mod tests {
             "<p class=\"packages-empty\">No packages match this filter.</p>".into(),
             CATALOG_EMPTY.replace("No packages match this filter.", "Service unavailable"),
             CATALOG_ADVISOR.replace("</article>", ""),
-            CATALOG_ADVISOR.replacen("</article>\n      <article", "\n      <article", 1),
+            CATALOG_ADVISOR.replacen("</article>", "", 1),
             CATALOG_ADVISOR.replace("</section>", ""),
             CATALOG_ADVISOR.replacen("</section>", "", 1),
             CATALOG_ADVISOR.replace(
@@ -1618,8 +1618,8 @@ mod tests {
         );
         assert!(parse_pi_packages(&html, 1).is_err());
         let empty_with_next = CATALOG_EMPTY.replace(
-            "</section>\n</main>",
-            "<a class=\"pagination-link\" href=\"/packages?page=2\">Next →</a></section></main>",
+            "<p class=\"packages-empty\">No packages match this filter.</p>",
+            "<p class=\"packages-empty\">No packages match this filter.</p><a class=\"pagination-link\" href=\"/packages?page=2\">Next →</a>",
         );
         assert!(parse_pi_packages(&empty_with_next, 1).is_err());
         let html = CATALOG_PAGE_2.replace("/packages?page=3", "/packages?page=3&amp;name=a%26b");
