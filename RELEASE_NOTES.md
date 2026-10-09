@@ -16,4 +16,6 @@
 
 ## 安装
 
-手动安装使用 `DeepPi_0.1.3_x64-setup.exe`（推荐）或 `DeepPi_0.1.3_x64.msi`。本地安装包未进行 Windows Authenticode 或 updater 签名；正式自动更新包需通过配置签名密钥的发布工作流生成。
+免安装运行使用 `DeepPi_0.1.3_x64-portable.exe`，下载到可写文件夹后双击启动，系统需已有 WebView2。设置和用户数据仍保存在 AppData，托管运行时位于 EXE 同级的 `runtimes` 目录。
+
+手动安装使用 `DeepPi_0.1.3_x64-setup.exe` 或 `DeepPi_0.1.3_x64.msi`。安装包未进行 Windows Authenticode 签名；自动更新包通过发布工作流进行 updater 签名。

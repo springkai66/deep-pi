@@ -224,7 +224,8 @@ fn validate_model_probe(
 }
 
 fn parse_model_probe(model_id: String, value: Value) -> Result<PiAuthModelTestResult, String> {
-    let reply: ProbeReply = serde_json::from_value(value).map_err(|_| msg("pi.auth.models_invalid"))?;
+    let reply: ProbeReply =
+        serde_json::from_value(value).map_err(|_| msg("pi.auth.models_invalid"))?;
     Ok(PiAuthModelTestResult {
         model_id,
         ok: reply.ok,
@@ -992,24 +993,35 @@ mod tests {
         let catalog: Vec<PiOfficialModel> = serde_json::from_value(json!([{
             "id": "fixture-codex", "name": "Fixture", "reasoning": false, "input": ["text"],
             "contextWindow": null, "maxTokens": null, "inputCost": null, "outputCost": null
-        }])).unwrap();
+        }]))
+        .unwrap();
         let request = |provider_id: &str, model_id: &str| PiAuthModelTestRequest {
-            provider_id: provider_id.into(), model_id: model_id.into(),
+            provider_id: provider_id.into(),
+            model_id: model_id.into(),
         };
         assert!(validate_model_probe(&request("openai-codex", "fixture-codex"), &catalog).is_ok());
         for (provider, model) in [
-            ("openai", "fixture-codex"), ("openai-codex", "unknown"),
-            ("openai-codex", ""), ("openai-codex", "bad\nmodel"),
+            ("openai", "fixture-codex"),
+            ("openai-codex", "unknown"),
+            ("openai-codex", ""),
+            ("openai-codex", "bad\nmodel"),
         ] {
             assert!(validate_model_probe(&request(provider, model), &catalog).is_err());
         }
-        let result = parse_model_probe("fixture-codex".into(), json!({
-            "ok": true, "latencyMs": 12, "error": null
-        })).unwrap();
-        assert_eq!(serde_json::to_value(result).unwrap(), json!({
-            "modelId": "fixture-codex", "ok": true, "status": null,
-            "latencyMs": 12, "error": null
-        }));
+        let result = parse_model_probe(
+            "fixture-codex".into(),
+            json!({
+                "ok": true, "latencyMs": 12, "error": null
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(result).unwrap(),
+            json!({
+                "modelId": "fixture-codex", "ok": true, "status": null,
+                "latencyMs": 12, "error": null
+            })
+        );
         assert!(parse_model_probe("fixture-codex".into(), json!({"ok": true})).is_err());
     }
 }
@@ -1136,13 +1148,22 @@ mod bridge_tests {
   },
 };"#).unwrap();
         let settings = paths.pi_home.join("settings.json");
-        fs::write(&settings, br#"{"defaultProvider":"other","defaultModel":"other-model"}"#).unwrap();
+        fs::write(
+            &settings,
+            br#"{"defaultProvider":"other","defaultModel":"other-model"}"#,
+        )
+        .unwrap();
         let auth = paths.pi_auth_file();
         let original_auth = br#"{"openai-codex":{"type":"oauth","access":"fixture-secret-access","refresh":"fixture-secret-refresh","expires":9999999999999}}"#;
         fs::write(&auth, original_auth).unwrap();
         let bridge = spawn_bridge(None, &paths, Some(&inject), None).unwrap();
         for (provider, model) in [("other", "fixture-codex"), ("openai-codex", "missing")] {
-            assert!(bridge.request(json!({"op":"test_model_connection", "provider":provider, "modelId":model}), REQUEST_TIMEOUT).is_err());
+            assert!(bridge
+                .request(
+                    json!({"op":"test_model_connection", "provider":provider, "modelId":model}),
+                    REQUEST_TIMEOUT
+                )
+                .is_err());
         }
         let reply = bridge.request(json!({"op":"test_model_connection", "provider":"openai-codex", "modelId":"fixture-codex"}), REQUEST_TIMEOUT).unwrap();
         assert_eq!(reply["result"]["ok"], json!(true));
@@ -1154,8 +1175,15 @@ mod bridge_tests {
         assert!(!failed.to_string().contains("fixture-secret"));
         assert!(bridge.request(json!({"op":"test_model_connection", "provider":"openai-codex", "modelId":"fixture-key"}), REQUEST_TIMEOUT).is_err());
         assert_eq!(fs::read(&auth).unwrap(), original_auth);
-        assert_eq!(fs::read(&settings).unwrap(), br#"{"defaultProvider":"other","defaultModel":"other-model"}"#);
-        fs::write(&auth, br#"{"openai-codex":{"type":"api_key","key":"fixture-only"}}"#).unwrap();
+        assert_eq!(
+            fs::read(&settings).unwrap(),
+            br#"{"defaultProvider":"other","defaultModel":"other-model"}"#
+        );
+        fs::write(
+            &auth,
+            br#"{"openai-codex":{"type":"api_key","key":"fixture-only"}}"#,
+        )
+        .unwrap();
         assert!(bridge.request(json!({"op":"test_model_connection", "provider":"openai-codex", "modelId":"fixture-codex"}), REQUEST_TIMEOUT).is_err());
     }
 
