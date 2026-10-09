@@ -362,15 +362,14 @@ mod tests {
             Some(&local),
         )
         .contains(&"codemode".into()));
-        assert_eq!(
+        assert!(
             get_settings(
                 &paths,
                 ConfigScope::Project,
                 Some(project.to_str().unwrap())
             )
             .unwrap()
-            .enabled,
-            true
+            .enabled
         );
     }
 }

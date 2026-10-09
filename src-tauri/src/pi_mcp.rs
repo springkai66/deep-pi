@@ -282,10 +282,7 @@ fn cli_safe_http_url(url: &str) -> bool {
     {
         return false;
     }
-    let authority = rest
-        .split(|character| matches!(character, '/' | '?' | '#'))
-        .next()
-        .unwrap_or_default();
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
     !authority.is_empty() && !authority.contains('@')
 }
 
@@ -309,8 +306,9 @@ fn sensitive_header_name(name: &str) -> bool {
         "private",
         "access",
     ];
-    sensitive_markers.iter()
-    .any(|marker| lower.contains(marker))
+    sensitive_markers
+        .iter()
+        .any(|marker| lower.contains(marker))
 }
 
 fn safe_cli_header_value(name: &str, value: &str) -> bool {

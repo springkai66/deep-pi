@@ -252,7 +252,7 @@ mod tests {
         assert_eq!(&badged.rgba()[..4], &[0, 0, 0, 0]);
         assert!(badged
             .rgba()
-            .chunks_exact(4)
+            .chunks(4)
             .any(|pixel| pixel == [220, 55, 45, 255]));
     }
 }

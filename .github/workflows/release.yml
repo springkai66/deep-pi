@@ -148,6 +148,16 @@ jobs:
             -InstallerPath $current.FullName `
             -PreviousInstallerPath $previous.FullName
 
+      - name: Build portable executable
+        shell: pwsh
+        run: |
+          if ('${{ github.ref }}'.StartsWith('refs/tags/')) {
+            pnpm tauri build --no-bundle --config src-tauri/tauri.release.generated.conf.json
+          } else {
+            pnpm tauri build --no-bundle
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'Portable executable build failed.' }
+
       # v1 先发未签名安装包；拿到 Authenticode 证书后把
       # DEEPPI_WINDOWS_CERTIFICATE_BASE64 / _PASSWORD 写入仓库 Secrets 即自动启用签名。
       - name: Detect Authenticode certificate
@@ -206,6 +216,10 @@ jobs:
             }
           }
 
+      - name: Package and verify portable executable
+        shell: pwsh
+        run: ./scripts/package-portable.ps1
+
       - name: Sign updater payloads
         if: startsWith(github.ref, 'refs/tags/')
         shell: pwsh
@@ -216,7 +230,7 @@ jobs:
         run: |
           $bundle = 'src-tauri/target/release/bundle'
           $files = Get-ChildItem $bundle -Recurse -File |
-            Where-Object { $_.Extension -in '.exe', '.msi' }
+            Where-Object { $_.Extension -in '.exe', '.msi' -and $_.Directory.Name -ne 'portable' }
           foreach ($file in $files) {
             & pnpm tauri signer sign $file.FullName
             if ($LASTEXITCODE -ne 0) {
@@ -276,6 +290,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
+            src-tauri/target/release/bundle/portable/*
             src-tauri/target/release/bundle/nsis/*.exe
             src-tauri/target/release/bundle/nsis/*.exe.sig
             src-tauri/target/release/bundle/latest.json

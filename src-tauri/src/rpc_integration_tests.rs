@@ -360,10 +360,7 @@ fn real_pi_executes_a_tool_and_restores_the_same_session() {
         );
     }
     let served = model.finish();
-    assert!(
-        tool_finished && final_text,
-        "Model fixture: {served:?}"
-    );
+    assert!(tool_finished && final_text, "Model fixture: {served:?}");
     let before = transport
         .request(json!({"type":"get_messages"}), Duration::from_secs(5))
         .unwrap();

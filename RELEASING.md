@@ -1,6 +1,6 @@
 # DeepPi 发布流程
 
-当前正式发布面向 Windows x64。GitHub Actions 的 `Windows Release` 工作流在推送 `v*` 标签时构建 NSIS 与 MSI 安装包，发布版本 Release，并同步 `stable` 更新通道。安装包暂未进行 Authenticode 代码签名；应用更新包使用 Tauri updater 签名。
+当前正式发布面向 Windows x64。GitHub Actions 的 `Windows Release` 工作流在推送 `v*` 标签时构建 NSIS、MSI 安装包及免安装 EXE，发布版本 Release，并同步 `stable` 更新通道。安装包暂未进行 Authenticode 代码签名；应用更新包使用 Tauri updater 签名。
 
 ## 发布前
 
@@ -26,5 +26,7 @@ pnpm release:check
 ```
 
 确认 CI 通过后推送主分支，再创建并推送 `v0.1.0` 标签以触发首发构建。工作流会在全部检查通过后上传 `.exe`、`.msi`、更新签名和 `latest.json`。核验版本 Release 中的安装包，以及 `stable` 通道中的 `latest.json`。后续发布只需按目标版本替换标签号并同步版本文件。
+
+免安装附件名为 `DeepPi_<版本>_x64-portable.exe`，附带 SHA256 校验文件和 `PORTABLE_README.txt`。工作流在安装包测试完成后以 `--no-bundle` 重新构建主程序，再用 `scripts/package-portable.ps1` 校验版本、x64 架构和文件哈希。免安装程序需已有 WebView2，下载到可写目录后即可运行；托管运行时位于 EXE 同级的 `runtimes`，设置和数据仍保存在 AppData。
 
 回滚 `stable` 更新通道使用 `.github/workflows/rollback.yml`；它不改变已发布版本的安装包。
