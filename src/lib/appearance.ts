@@ -6,7 +6,7 @@
  * 保证两个窗口的主题、语言、字体观感一致。
  */
 import { setLocale } from "./i18n.svelte";
-import { invoke, isTauri } from "@tauri-apps/api/core";
+import { isTauri } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   cssAppFontFamily,
@@ -16,8 +16,6 @@ import {
   type AppSettings,
 } from "./settings";
 import { resolveTheme, themeCssVariables } from "./theme";
-let lastNativeWindowMaterial: string | undefined;
-
 
 /** 把设置里的外观项写入 document 根节点；不读取也不修改业务状态。 */
 export function applyAppearance(next: AppSettings): void {
@@ -27,21 +25,15 @@ export function applyAppearance(next: AppSettings): void {
   const theme = resolveTheme(next.theme, next.customThemes ?? []);
   const isMainWindows = isTauri() && getCurrentWindow().label === "main" &&
     typeof navigator !== "undefined" && /windows/i.test(navigator.userAgent);
-  const windowMaterial = isMainWindows ? theme.effects?.windowMaterial ?? "none" : "none";
   root.dataset.colorMode = next.colorMode;
   root.dataset.colorScheme = scheme;
   root.dataset.theme = next.theme;
   root.dataset.surfaceMaterial = theme.effects?.surfaceMaterial ?? "solid";
-  root.dataset.windowMaterial = windowMaterial;
+  root.dataset.windowMaterial = isMainWindows && theme.effects?.surfaceMaterial === "glass"
+    ? "transparent" : "none";
   setLocale(next.language);
   // 同步 <html lang>：影响无障碍朗读、字体选择与 :lang() 选择器。
   root.lang = next.language;
-  if (isMainWindows && windowMaterial !== lastNativeWindowMaterial) {
-    lastNativeWindowMaterial = windowMaterial;
-    void invoke("set_main_window_material", { material: windowMaterial }).catch(() => {
-      if (lastNativeWindowMaterial === windowMaterial) lastNativeWindowMaterial = undefined;
-    });
-  }
   // 主题包令牌与效果参数；字体设置在主题默认值之上叠加用户自定义（用户设置优先）。
   for (const [name, value] of Object.entries(themeCssVariables(theme, scheme, next.themeTransparency))) {
     root.style.setProperty(name, value);

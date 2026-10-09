@@ -79,6 +79,11 @@
   const windowRows = $derived(rows.slice(start, end));
   let watchedProjectId: string | undefined;
 
+  function portalMenu(node: HTMLDivElement) {
+    document.body.appendChild(node);
+    return { destroy: () => node.remove() };
+  }
+
   $effect(() => {
     const projectId = project?.id;
     if (watchedProjectId === projectId) return;
@@ -417,7 +422,7 @@
   <footer>{t("{count} 个文件", { count: entries.filter((entry) => !entry.isDirectory).length })}</footer>
 </section>
 {#if menu}
-  <div bind:this={menuElement} class="context-menu" role="menu" tabindex="-1" aria-label={t("文件操作")}
+  <div use:portalMenu bind:this={menuElement} class="context-menu" role="menu" tabindex="-1" aria-label={t("文件操作")}
     style={`left: ${menu.x}px; top: ${menu.y}px`}
     onkeydown={menuKeydown} onclick={(event) => event.stopPropagation()}>
     {#if menu.entry && !menu.entry.isDirectory}

@@ -23,6 +23,11 @@ describe("settings navigation", () => {
     expect(filterSettingsCategories("会话字体大小")).toEqual(["appearance"]);
     expect(filterSettingsCategories("磨玻璃透明程度")).toEqual(["appearance"]);
     expect(filterSettingsCategories("Provider")).toEqual(["models"]);
+    expect(filterSettingsCategories("Pi 资源包")).toEqual(["extensions"]);
+    expect(filterSettingsCategories("提示模板")).toEqual(["extensions"]);
+    expect(filterSettingsCategories("Codemode")).toEqual(["pi"]);
+    expect(filterSettingsCategories("默认启动")).toEqual(["pi"]);
+    expect(filterSettingsCategories("内联预算")).toEqual(["pi"]);
     expect(filterSettingsCategories("外部编辑器")).toEqual(["general"]);
     expect(filterSettingsCategories("Pi RPC")).toEqual([]);
     expect(filterSettingsCategories("没有对应项")).toEqual([]);

@@ -26,7 +26,6 @@ mod git_status;
 mod git_sync;
 #[cfg(all(test, windows))]
 mod git_test_support;
-mod glass_window;
 mod market;
 pub mod message;
 mod native_pi;
@@ -68,6 +67,8 @@ mod system_proxy;
 mod task;
 mod task_title;
 mod theme;
+#[cfg(windows)]
+mod transparent_window;
 mod tray;
 
 pub fn credential_helper(provider_id: &str) -> Result<(), String> {
@@ -128,6 +129,12 @@ pub fn run() {
         .manage(provider::ProviderConfigGate::default())
         .manage(pi_auth::PiAuthManager::default())
         .setup(|app| {
+            #[cfg(windows)]
+            if let Some(window) = app.get_webview_window("main") {
+                if let Err(error) = transparent_window::configure(&window) {
+                    log::warn!("event=window_transparency status=failed reason=\"{error}\"");
+                }
+            }
             let handle = app.handle().clone();
             board::install_main_window_hooks(app.handle());
             // 托盘在主线程创建；菜单文案在设置加载完成后按用户语言更新。
@@ -379,7 +386,6 @@ pub fn run() {
                 prompt_enhance::enhance_prompt,
                 agentic_translate::translate_agentic_texts,
                 settings::get_settings,
-                glass_window::set_main_window_material,
                 settings::save_settings,
                 proxy::proxy_test,
                 theme::theme_export,

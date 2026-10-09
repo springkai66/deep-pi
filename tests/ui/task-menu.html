@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Task sidebar menu smoke</title>
+    <style>
+      .app-shell { height: 100vh; }
+      .workspace { display: grid; grid-template-columns: 220px minmax(0, 1fr); height: 100%; }
+      .project-sidebar { overflow: hidden; }
+      #glass-theme-result { position: fixed; bottom: 0; right: 0; pointer-events: none; }
+    </style>
+  </head>
+  <body>
+    <div class="app-shell">
+      <main class="workspace">
+        <aside class="project-sidebar"><div id="task-menu-fixture"></div></aside>
+        <section class="terminal-pane"></section>
+      </main>
+    </div>
+    <pre id="glass-theme-result">RUNNING</pre>
+    <script type="module" src="/task-menu.ts"></script>
+  </body>
+</html>

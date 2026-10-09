@@ -6,7 +6,7 @@ DeepPi is a desktop workspace for development with [Pi Coding Agent](https://git
 
 - **Parallel tasks:** Run multiple Pi sessions and switch between structured chat and the native terminal; use DSH in a separate workspace.
 - **Project workflow:** Browse, search, and edit files; inspect diffs; stage, commit, and push Git changes.
-- **Models and extensions:** Configure model providers and credentials; manage Pi extensions, Skills, and MCP services.
+- **Models and packages:** Configure model providers and credentials; search the Pi package catalog and manage extensions, Skills, and MCP services.
 - **Managed runtimes:** Install and manage Node.js, Pi, and DSH on demand without configuring a global environment.
 - **Supporting tools:** Task board, priority checklist, themes, and multilingual UI.
 

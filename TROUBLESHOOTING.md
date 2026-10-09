@@ -54,13 +54,19 @@ DSH 的 profile 位于：
 
 本轮托管运行时已升级并核对：Pi 0.99.1、DSH 0.2.0-rc.2。Pi 0.99.1 的 CLI 参数和必要 RPC 状态字段已验证；新增的 `/bug` 在 DeepPi 图形界面中不可执行。稳定版高于已验证基线时，托盘角标和菜单会提示“尚未验证”，点击后打开相应运行时设置。提示不限制手动安装，也不会自动升级。
 
-Pi 0.99.0 起，MCP 状态由托管 Pi 的 `pi mcp list --json` 检测，OAuth 可在 MCP 设置中登录/退出；配置改动通常要重启 Pi 任务才生效。Codemode 设置位于同一 Pi 配置范围（全局或项目）：默认工具开关使用 `defaultTools`，模式/说明预算使用 `codemode.mode` 与 `codemode.inlineBudget`。项目级 Pi 配置只有在该项目受信任时才会加载。
+Pi 0.99.0 起，MCP 状态由托管 Pi 的 `pi mcp list --json` 检测，OAuth 可在 MCP 设置中登录/退出；配置改动通常要重启 Pi 任务才生效。Codemode 设置位于“设置 → Pi 服务”中运行组件下方，可切换全局或项目范围：默认工具开关使用 `defaultTools`，模式/内联预算使用 `codemode.mode` 与 `codemode.inlineBudget`。未配置时默认启动关闭，已有用户选择继续有效，MCP 仍可能自动激活 Codemode。项目级 Pi 配置只有在该项目受信任时才会加载。
 
 DSH 0.2.0-rc.2 按 DeepPi 启动参数可启动并输出带 token 的回环 URL；HTTP 跟随重定向探测最终返回 401，因此浏览器认证、会话同步和 Host API 交互尚未验证。DSH 预发布版本仍可手动检查和安装，但不会主动提示。
 
 **DSH 插件兼容性未通过验证。** 当前 profile 的 `dshmarket@1.52.0`、`dsh-codex-subscription@2.1.4`、`@mars-sea/dsh-commandcode-provider@0.11.8`、`dsh-better-sidebar@0.22.1` 均因 peerDependencies 不兼容被 DSH 跳过；尝试将 dshmarket 升至 1.66.5 时 npm 返回 `ERESOLVE`。主机进程启动成功不代表这些插件可用，请勿通过风险豁免强行加载。
 
 升级前留下的 DSH 0.1.5-rc.2 回滚目录缺少 `package.json` 与 `lib/bin.js`；previous 指针存在不代表回滚目标可运行，回滚能力尚未验证。
+
+## Pi 资源包搜索失败
+
+“设置 → Pi 资源包”只搜索 <https://pi.dev/packages> 收录的目录，按名称、描述或作者匹配；空关键词显示热门包。关键词 `advisor` 应能找到官网同一查询中的资源包，更多结果通过“加载更多”获取。
+
+搜索失败时页面显示错误与重试按钮；“没有匹配结果”表示官网成功返回了空结果。失败时先确认官网可访问，再检查应用的代理设置并重试。应用不会改用其他目录；已安装包列表和 npm／Git 安装地址是独立功能。
 
 ## 更新失败
 

@@ -82,6 +82,12 @@
   let composing = false;
   const searchMatches = $derived(tasks.filter((task) => matchesSearch(task.title, query)));
 
+  // Glass filters and sidebar scrolling must not contain viewport-positioned menus.
+  function portalMenu(node: HTMLDivElement) {
+    document.body.appendChild(node);
+    return { destroy: () => node.remove() };
+  }
+
   $effect(() => {
     if (searchFocusToken > 0) {
       searchInput?.focus();
@@ -350,6 +356,7 @@
   {#if projectMenu}
     <div
       bind:this={projectMenuElement}
+      use:portalMenu
       class="context-menu"
       role="menu"
       tabindex="-1"
@@ -367,6 +374,7 @@
   {#if sessionMenu}
     <div
       bind:this={sessionMenuElement}
+      use:portalMenu
       class="context-menu"
       role="menu"
       tabindex="-1"

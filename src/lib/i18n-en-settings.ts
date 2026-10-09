@@ -1,9 +1,8 @@
 /** 英文目录（模型设置、DSH 服务、运行时与更新、外部编辑器）。键 = 简体中文原文。 */
 export const EN_SETTINGS: Record<string, string> = {
-  "磨砂玻璃": "Frosted Glass",
-  "磨玻璃透明程度": "Glass transparency",
+  "透明": "Transparent",
   "0% 为不透明，数值越高越透明。": "0% is opaque; higher values are more transparent.",
-  "柔和的蓝紫色磨砂玻璃界面，可调整面板透明程度。": "A soft blue-violet frosted-glass interface with adjustable panel transparency.",
+  "柔和的蓝紫色透明界面，可调整面板透明程度。": "A soft blue-violet transparent interface with adjustable panel transparency.",
   "搜索设置": "Search settings",
   "没有匹配的设置": "No matching settings",
   "服务与模型": "Service and models",

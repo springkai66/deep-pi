@@ -4,7 +4,7 @@ import {
   COMMAND_FLOW_THEME,
   DEFAULT_THEME_ID,
   DEFAULT_THEME_TRANSPARENCY,
-  FROSTED_GLASS_THEME,
+  TRANSPARENT_THEME,
   GLASS_THEME_ID,
   clampThemeTransparency,
   parseThemeFile,
@@ -81,34 +81,34 @@ describe("theme pack parsing", () => {
   });
 });
 
-describe("frosted glass built-in theme", () => {
+describe("transparent built-in theme", () => {
   it("is available as a built-in with light and dark palettes", () => {
     expect(BUILT_IN_THEMES.map((theme) => theme.id)).toContain(GLASS_THEME_ID);
-    expect(resolveTheme(GLASS_THEME_ID)).toBe(FROSTED_GLASS_THEME);
-    expect(resolveThemeColors(FROSTED_GLASS_THEME, "light").pageBg).toBe(FROSTED_GLASS_THEME.light?.pageBg);
-    expect(resolveThemeColors(FROSTED_GLASS_THEME, "dark").pageBg).toBe(FROSTED_GLASS_THEME.colors.pageBg);
+    expect(resolveTheme(GLASS_THEME_ID)).toBe(TRANSPARENT_THEME);
+    expect(resolveThemeColors(TRANSPARENT_THEME, "light").pageBg).toBe(TRANSPARENT_THEME.light?.pageBg);
+    expect(resolveThemeColors(TRANSPARENT_THEME, "dark").pageBg).toBe(TRANSPARENT_THEME.colors.pageBg);
   });
 
   it("limits transparency to 0–100%, defaults to 50%, and only applies it to glass surfaces", () => {
     expect(DEFAULT_THEME_TRANSPARENCY).toEqual({ min: 0, max: 100, default: 50 });
-    expect(themeTransparencyRange(FROSTED_GLASS_THEME)).toEqual(DEFAULT_THEME_TRANSPARENCY);
+    expect(themeTransparencyRange(TRANSPARENT_THEME)).toEqual(DEFAULT_THEME_TRANSPARENCY);
     expect(clampThemeTransparency(-3)).toBe(0);
     expect(clampThemeTransparency(140)).toBe(100);
     expect(clampThemeTransparency(Number.NaN)).toBe(50);
-    expect(themeCssVariables(FROSTED_GLASS_THEME, "dark", 20)["--surface"])
-      .toBe(`color-mix(in srgb, ${FROSTED_GLASS_THEME.colors.surface} 80%, transparent)`);
-    expect(themeCssVariables(FROSTED_GLASS_THEME, "dark", 50)["--theme-transparency"]).toBe("50%");
-    expect(themeCssVariables(FROSTED_GLASS_THEME, "dark")["--theme-reading-surface-opacity"]).toBe("60%");
-    expect(FROSTED_GLASS_THEME.colors.textMuted).toBe("#c4d2e4");
-    expect(themeCssVariables(FROSTED_GLASS_THEME, "dark", 100)["--surface"])
-      .toBe(`color-mix(in srgb, ${FROSTED_GLASS_THEME.colors.surface} 0%, transparent)`);
-    expect(themeCssVariables(FROSTED_GLASS_THEME, "dark", 0)["--surface"])
-      .toBe(FROSTED_GLASS_THEME.colors.surface);
+    expect(themeCssVariables(TRANSPARENT_THEME, "dark", 20)["--surface"])
+      .toBe(`color-mix(in srgb, ${TRANSPARENT_THEME.colors.surface} 80%, transparent)`);
+    expect(themeCssVariables(TRANSPARENT_THEME, "dark", 50)["--theme-transparency"]).toBe("50%");
+    expect(themeCssVariables(TRANSPARENT_THEME, "dark")["--theme-reading-surface-opacity"]).toBe("60%");
+    expect(TRANSPARENT_THEME.colors.textMuted).toBe("#c4d2e4");
+    expect(themeCssVariables(TRANSPARENT_THEME, "dark", 100)["--surface"])
+      .toBe(`color-mix(in srgb, ${TRANSPARENT_THEME.colors.surface} 0%, transparent)`);
+    expect(themeCssVariables(TRANSPARENT_THEME, "dark", 0)["--surface"])
+      .toBe(TRANSPARENT_THEME.colors.surface);
     expect(themeCssVariables(COMMAND_FLOW_THEME, "dark", 80)["--surface"])
       .toBe(COMMAND_FLOW_THEME.colors.surface);
   });
 
-  it("parses and compiles blur, reading opacity, ambient positions and material", () => {
+  it("keeps transparency from old theme packs while discarding removed visual effects", () => {
     const result = parseThemePack(validTheme({ effects: {
       surfaceMaterial: "glass",
       windowMaterial: "acrylic",
@@ -121,17 +121,14 @@ describe("frosted glass built-in theme", () => {
     } }));
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.theme.effects?.backdropSaturation).toBe(1.7);
-    expect(result.theme.effects?.readingSurfaceOpacity).toBe(68);
-    expect(result.theme.effects?.ambient?.primaryX).toBe(27);
-    expect(result.theme.effects?.ambient?.secondaryY).toBe(81);
+    expect(result.theme.effects).toEqual({
+      surfaceMaterial: "glass",
+      transparency: { min: 10, max: 80, default: 35 },
+      readingSurfaceOpacity: 68,
+    });
     const variables = themeCssVariables(result.theme, "dark", 45);
     expect(variables["--theme-transparency"]).toBe("45%");
-    expect(variables["--theme-backdrop-blur"]).toBe("22px");
-    expect(variables["--theme-backdrop-saturation"]).toBe("1.7");
     expect(variables["--theme-reading-surface-opacity"]).toBe("68%");
-    expect(variables["--theme-glow-primary-x"]).toBe("27%");
-    expect(variables["--theme-glow-secondary-y"]).toBe("81%");
   });
 });
 
@@ -185,11 +182,11 @@ describe("theme serialization", () => {
     expect(parsed.theme.typography?.sessionFontSize).toBe(COMMAND_FLOW_THEME.typography?.sessionFontSize);
   });
   it("round-trips the glass effects and typography configuration", () => {
-    const parsed = parseThemePack(JSON.parse(serializeTheme(FROSTED_GLASS_THEME)));
+    const parsed = parseThemePack(JSON.parse(serializeTheme(TRANSPARENT_THEME)));
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
-    expect(parsed.theme.effects).toEqual(FROSTED_GLASS_THEME.effects);
-    expect(parsed.theme.typography).toEqual(FROSTED_GLASS_THEME.typography);
+    expect(parsed.theme.effects).toEqual(TRANSPARENT_THEME.effects);
+    expect(parsed.theme.typography).toEqual(TRANSPARENT_THEME.typography);
   });
 
   it("builds a filesystem-safe export file name", () => {

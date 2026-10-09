@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Files Panel menu smoke</title>
+    <style>#glass-theme-result { position:fixed; bottom:0; left:0; pointer-events:none; }</style>
+  </head>
+  <body>
+    <div class="app-shell" style="display:grid; grid-template-columns:minmax(0,1fr) 260px; grid-template-rows:1fr; height:100vh; overflow:hidden">
+      <main class="workspace"></main>
+      <aside class="file-panel" id="file-menu-fixture"></aside>
+    </div>
+    <pre id="glass-theme-result">RUNNING</pre>
+    <script type="module" src="/file-menu.ts"></script>
+  </body>
+</html>

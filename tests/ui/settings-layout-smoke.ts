@@ -1,4 +1,4 @@
-type Category = "extensions" | "mcp" | "skills" | "workflows";
+type Category = "pi" | "extensions" | "mcp" | "skills" | "workflows";
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -32,10 +32,10 @@ async function open(category: Category) {
   await new Promise((resolve) => setTimeout(resolve, 0));
   return waitFor(() => {
     if (nav.getAttribute("aria-current") !== "page") return null;
-    const controls = panel()?.querySelector<HTMLElement>(".page-controls");
-    const root = controls?.closest<HTMLElement>(".settings-panel");
+    const root = panel();
+    if (!root?.querySelector(category === "pi" ? ".codemode-settings" : ".page-controls")) return null;
     const body = document.querySelector<HTMLElement>(".settings-body");
-    return root && body && root.getBoundingClientRect().bottom <= body.getBoundingClientRect().bottom + 2 ? root : null;
+    return body && (category === "pi" || root.getBoundingClientRect().bottom <= body.getBoundingClientRect().bottom + 2) ? root : null;
   }, `${category} panel`);
 }
 
@@ -51,7 +51,7 @@ async function checkFontDropdowns() {
     const label = trigger.getAttribute("aria-label") ?? `font ${index + 1}`;
     assert(trigger.getBoundingClientRect().width > 0, `${label}: trigger is visible`);
     trigger.scrollIntoView({ block: "center" });
-    await new Promise((resolve) => requestAnimationFrame(() => resolve(undefined)));
+    await new Promise((resolve) => setTimeout(resolve, 0));
     if (index === 2) {
       trigger.focus();
       trigger.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
@@ -75,6 +75,144 @@ async function checkFontDropdowns() {
     await waitFor(() => trigger.querySelector(".font-preview")?.textContent?.trim() === "Fixture Sans", `${label}: selection applied`);
     await waitFor(() => !document.getElementById(list.id), `${label}: menu closes after selection`);
   }
+}
+
+const output = (label: string) => document.querySelector(`output[aria-label="${label}"]`)?.textContent;
+const packageNames = (root: HTMLElement) => [...root.querySelectorAll(".market-list > li strong")].map((item) => item.textContent).join(",");
+
+async function checkCatalog(root: HTMLElement) {
+  const field = root.querySelector<HTMLInputElement>('.market-search input[aria-label="搜索 Pi 资源包"]');
+  const form = root.querySelector<HTMLFormElement>(".market-search");
+  assert(field && form, "Pi 资源包 search uses package terminology");
+  const submit = async (query: string) => {
+    field.value = query;
+    field.dispatchEvent(new Event("input", { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await waitFor(() => output("目录请求")?.endsWith(`${query.trim()}:1`), `${query}: first catalog page requested`);
+  };
+  const expectAdvisor = async () => waitFor(() => packageNames(root) === "pi-advisor-flow,pi-advisor", "advisor official order and skill result");
+  assert(output("目录请求") === ":1", "opening packages automatically requests the popular first page");
+  assert(packageNames(root) === "pi-demo,pi-other", "popular packages retain server order");
+  assert(!root.querySelector(".market-toolbar select"), "catalog has one official downloads order");
+  await submit("advisor");
+  await expectAdvisor();
+  assert(!button(root, "加载更多"), "last page has no load-more control");
+
+  await submit("fail-once");
+  await waitFor(() => root.querySelector(".catalog-error"), "persistent first-page failure");
+  assert(!root.textContent?.includes("没有匹配的 Package"), "failure is distinct from a true empty result");
+  field.value = "unsent-draft";
+  field.dispatchEvent(new Event("input", { bubbles: true }));
+  button(root, "重试")?.click();
+  await waitFor(() => packageNames(root) === "pi-page-first,pi-page-theme", "retry failed first-page query");
+  assert(output("目录请求")?.endsWith("fail-once:1,fail-once:1"), "retry preserves submitted query despite unsent input edits");
+  assert(!root.querySelector(".catalog-error"), "successful retry clears persistent failure");
+
+  await submit("page-fail");
+  await waitFor(() => button(root, "加载更多"), "first page offers load-more");
+  button(root, "加载更多")?.click();
+  await waitFor(() => root.querySelector(".catalog-error"), "load-more failure");
+  assert(packageNames(root) === "pi-page-first,pi-page-theme", "failed later page preserves loaded rows");
+  button(root, "重试")?.click();
+  await waitFor(() => root.querySelectorAll(".market-list > li").length === 4, "retry appends later page");
+  assert(output("目录请求")?.endsWith("page-fail:2,page-fail:2"), "retry requests the failed later page");
+  assert(packageNames(root) === "pi-page-first,pi-page-theme,pi-page-prompt,pi-page-untyped", "all types, untyped packages, deduplication and server order across pages");
+  assert(!button(root, "加载更多"), "pagination ends after the last page");
+  overflow(root, "Pi 资源包 all resource types");
+
+  await submit("empty");
+  await waitFor(() => root.textContent?.includes("没有匹配的 Package"), "true empty result");
+  assert(!root.querySelector(".catalog-error") && !root.querySelector(".market-list"), "empty result has no error or stale packages");
+  for (const query of ["slow", "slow-fail", "slow-page"]) {
+    await submit(query);
+    if (query === "slow-page") {
+      await waitFor(() => button(root, "加载更多"), "slow page first batch loaded");
+      button(root, "加载更多")?.click();
+    }
+    await waitFor(() => output("待完成目录请求") === "1", `${query}: old request pending`);
+    await submit("advisor");
+    await expectAdvisor();
+    await waitFor(() => output("待完成目录请求") === "0", `${query}: old request finished`);
+    assert(packageNames(root) === "pi-advisor-flow,pi-advisor" && !root.querySelector(".catalog-error"), `${query}: stale response cannot replace or append to new results`);
+    assert(!document.querySelector('[aria-label="测试状态"]')?.textContent?.includes("Fixture stale catalog request failed"), "stale failures do not report errors");
+  }
+  await submit("   ");
+  await waitFor(() => packageNames(root) === "pi-demo,pi-other", "cleared query restores popular first page");
+  assert(button(root, "加载更多"), "cleared query restores first-page pagination");
+}
+
+async function checkCodemode(projectAvailable: boolean) {
+  const params = new URLSearchParams(location.search);
+  const root = await open("pi");
+  const card = root.querySelector<HTMLElement>(".codemode-settings");
+  const runtime = root.querySelector(".runtime-settings");
+  assert(card && runtime, "Pi 服务 contains runtime management and independent Codemode settings");
+  assert(runtime.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING, "Codemode follows runtime management");
+  assert(document.getElementById("settings-panel-title")?.textContent === "Pi 服务", "Codemode belongs to Pi 服务");
+  if (params.has("codemode-read-fails")) {
+    await waitFor(() => card.querySelector('[role="alert"]')?.textContent?.includes("Fixture Codemode read failed"), "Codemode read failure");
+    assert(!card.querySelector(".save-codemode"), "failed read cannot save defaults over existing settings");
+    button(card, "重试")?.click();
+  }
+  const toggle = await waitFor(() => card.querySelector<HTMLInputElement>('.codemode-toggle input'), "independent Codemode read");
+  const mode = card.querySelector<HTMLSelectElement>('select[aria-label="Codemode 模式"]');
+  const budget = card.querySelector<HTMLInputElement>('input[aria-label="工具描述预算（tokens）"]');
+  assert(mode && budget, "Codemode mode and inline budget");
+  assert(toggle.checked === params.has("codemode-enabled"), "default disabled and explicit enabled configuration preserved");
+  assert(mode.value === (params.has("codemode-enabled") ? "only" : "on") && budget.value === (params.has("codemode-enabled") ? "4200" : "3000"), "existing values or unconfigured mode and budget preserved");
+  assert(card.textContent?.includes("MCP 仍可能按需自动启用 Codemode"), "default startup and MCP activation semantics explained");
+  const project = button(card, "当前项目");
+  assert(project && project.disabled === !projectAvailable, "Codemode project scope availability");
+  const save = button(card, "保存 Codemode 设置");
+  assert(save, "Codemode save control");
+  save.scrollIntoView({ block: "center" });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const body = document.querySelector<HTMLElement>(".settings-body");
+  const bounds = save.getBoundingClientRect();
+  assert(body && bounds.top >= body.getBoundingClientRect().top && bounds.bottom <= body.getBoundingClientRect().bottom,
+    "Codemode save is reachable by scrolling the settings body");
+  budget.value = "100001";
+  budget.dispatchEvent(new Event("input", { bubbles: true }));
+  button(card, "保存 Codemode 设置")?.click();
+  await waitFor(() => card.querySelector('[role="alert"]')?.textContent?.includes("0 到 100000"), "invalid inline budget rejected");
+  assert(output("Codemode 保存次数") === "0", "invalid settings never invoke save");
+  toggle.checked = true;
+  toggle.dispatchEvent(new Event("change", { bubbles: true }));
+  mode.value = "only";
+  mode.dispatchEvent(new Event("change", { bubbles: true }));
+  budget.value = "4242";
+  budget.dispatchEvent(new Event("input", { bubbles: true }));
+  button(card, "保存 Codemode 设置")?.click();
+  await waitFor(() => output("Codemode 忙碌") === "true", "Codemode save blocks settings close");
+  assert(button(card, "全局")?.disabled && project.disabled, "scope cannot change while saving");
+  assert(document.querySelector<HTMLButtonElement>('.settings-header [aria-label="返回工作区"]')?.disabled, "return is disabled while saving Codemode");
+  if (params.has("codemode-save-fails")) {
+    await waitFor(() => card.querySelector('[role="alert"]')?.textContent?.includes("Fixture Codemode save failed"), "Codemode save failure");
+    await waitFor(() => output("Codemode 忙碌") === "false", "failed save releases busy state");
+    assert(card.querySelector<HTMLInputElement>(".codemode-toggle input")?.checked, "failed save preserves user edits");
+    button(card, "保存 Codemode 设置")?.click();
+  }
+  await waitFor(() => output("Codemode 保存次数") === "1" && output("Codemode 忙碌") === "false", "global Codemode save completes");
+  await waitFor(() => card.querySelector(".codemode-notice")?.textContent?.includes("已运行的 Pi 任务重启后生效"), "save restart notice");
+  assert(output("Codemode 保存范围") === "global", "global Codemode saved through existing command");
+  if (projectAvailable) {
+    project.click();
+    const projectToggle = await waitFor(() => output("Codemode 读取范围") === "project" ? card.querySelector<HTMLInputElement>(".codemode-toggle input") : null, "project Codemode inheritance loaded");
+    assert(projectToggle.checked && card.querySelector<HTMLSelectElement>("select")?.value === "only" && card.querySelector<HTMLInputElement>('input[type="number"]')?.value === "4242", "project inherits global values without project config");
+    projectToggle.checked = false;
+    projectToggle.dispatchEvent(new Event("change", { bubbles: true }));
+    button(card, "保存 Codemode 设置")?.click();
+    await waitFor(() => output("Codemode 保存次数") === "2" && output("Codemode 忙碌") === "false", "project Codemode save completes");
+    assert(output("Codemode 保存范围") === "project", "project save preserves projectPath");
+    button(card, "全局")?.click();
+    const globalToggle = await waitFor(() => output("Codemode 读取范围") === "global" ? card.querySelector<HTMLInputElement>(".codemode-toggle input") : null, "global Codemode reload");
+    assert(globalToggle.checked, "project override does not alter global enabled setting");
+    project.click();
+    const savedProjectToggle = await waitFor(() => output("Codemode 读取范围") === "project" ? card.querySelector<HTMLInputElement>(".codemode-toggle input") : null, "saved project Codemode reload");
+    assert(!savedProjectToggle.checked, "explicit project override remains respected");
+  }
+  overflow(root, "Pi 服务 Codemode");
 }
 
 async function run() {
@@ -104,6 +242,14 @@ async function run() {
   results.push("search and setting row layout ok");
   await checkFontDropdowns();
   results.push("all font dropdowns open and select");
+  for (const [term, category] of [["Pi 资源包", "extensions"], ["Codemode", "pi"], ["内联预算", "pi"]] as const) {
+    search.value = term;
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    await waitFor(() => document.querySelectorAll(".settings-navigation button[id^='settings-nav-']").length === 1, `${term}: settings search match`);
+    assert(document.getElementById(`settings-nav-${category}`), `${term}: correct settings category`);
+    search.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await waitFor(() => document.querySelectorAll(".settings-navigation button[id^='settings-nav-']").length === 11, `${term}: settings search reset`);
+  }
   const projectAvailable = new URLSearchParams(location.search).has("project");
   for (const category of ["extensions", "mcp", "skills", "workflows"] as const) {
     const root = await open(category);
@@ -126,16 +272,22 @@ async function run() {
       groups[0].querySelector<HTMLButtonElement>("button")?.click();
       await waitFor(() => document.querySelector('output[aria-label="读取范围"]')?.textContent === "global", `${category}: global refresh scope`);
     }
-    await waitFor(() => root.querySelector(".entry-list > li"), `${category} installed entries`);
+    const brokenMcp = category === "mcp" && new URLSearchParams(location.search).has("mcp-fails");
+    if (brokenMcp) await waitFor(() => document.querySelector('[aria-label="测试状态"]')?.textContent?.includes("Fixture MCP config damaged"), "damaged MCP configuration reported");
+    else await waitFor(() => root.querySelector(".entry-list > li"), `${category} installed entries`);
+    if (category === "mcp") assert(!root.querySelector(".codemode-toggle"), "MCP no longer contains Codemode settings");
     assert(root.querySelector(".group-header .icon-action"), `${category}: refresh installed`);
     overflow(root, `${category} installed`);
     button(groups[1], "市场")?.click();
     const search = await waitFor(() => root.querySelector<HTMLInputElement>(".market-toolbar input"), `${category} search`);
-    assert(search && root.querySelector(".market-toolbar select"), `${category}: search and sort`);
+    assert(search && (category === "extensions" || root.querySelector(".market-toolbar select")), `${category}: catalog search controls`);
     await waitFor(() => root.querySelector(".market-list > li"), `${category} market entries`);
     overflow(root, `${category} market`);
     results.push(`${category}: layout ok`);
     if (category === "extensions") {
+      assert(document.getElementById("settings-panel-title")?.textContent === "Pi 资源包", "Pi 资源包 category title");
+      await checkCatalog(root);
+      results.push("package pagination, all types, retry, empty results and stale queries ok");
       const install = [...root.querySelectorAll<HTMLLIElement>(".market-list > li")].find((item) => item.textContent?.includes("pi-other"));
       assert(install, "extension catalog row");
       button(install, "安装")?.click();
@@ -151,7 +303,7 @@ async function run() {
       assert(root.querySelector('[role="status"]')?.textContent?.includes("已卸载"), "extension uninstall feedback");
       results.push("extension install, update, uninstall and feedback ok");
     }
-    if (category === "mcp") {
+    if (category === "mcp" && !brokenMcp) {
       button(groups[1], "已安装")?.click();
       await waitFor(() => root.querySelector(".entry-list > li"), "MCP config loaded before connection check");
       const unrequestedStatus = await waitFor(() => {
@@ -160,16 +312,11 @@ async function run() {
       }, "connection check is opt-in");
       assert(unrequestedStatus.textContent?.includes("尚未检测"), "opening MCP settings does not start configured servers");
       button(root, "检测连接")?.click();
-      const codemodeToggle = await waitFor(() => root.querySelector<HTMLInputElement>(".codemode-toggle input"), "Codemode toggle");
       const nativeStatus = await waitFor(() => {
         const status = root.querySelector<HTMLElement>(".mcp-native-status");
         return status?.textContent?.includes("已连接") ? status : null;
       }, "native Pi MCP connection status");
       assert(nativeStatus.textContent?.includes("已连接"), "MCP state comes from Pi's native list command");
-      codemodeToggle.checked = true;
-      codemodeToggle.dispatchEvent(new Event("change", { bubbles: true }));
-      button(root, "保存 Codemode 设置")?.click();
-      await waitFor(() => document.querySelector('output[aria-label="操作结果"]')?.textContent === "save_pi_codemode_settings", "Codemode settings saved through Pi settings bridge");
       button(groups[1], "市场")?.click();
       const mcpSearch = await waitFor(() => root.querySelector<HTMLInputElement>(".market-toolbar input"), "MCP search");
       mcpSearch.value = "GitHub";
@@ -219,6 +366,8 @@ async function run() {
       results.push("workflow detail and install feedback ok");
     }
   }
+  await checkCodemode(projectAvailable);
+  results.push("Pi 服务 Codemode defaults, inheritance, both save scopes and independent error handling ok");
   return results;
 }
 
